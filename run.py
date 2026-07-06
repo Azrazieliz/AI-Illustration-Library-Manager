@@ -5,8 +5,8 @@ from engine.config import bootstrap_directories
 from engine.config import settings
 from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
+from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
-from engine.pipeline import QueueManager
 from engine.scanner import ScannerManager
 from engine.services import (
     CharacterService,
@@ -47,6 +47,10 @@ def main() -> None:
         discovered = list(scanner_manager.scan(root=scan_root))
         if discovered == []:
             print("Recursive Scanner OK")
+
+    indexer_service = IndexerService()
+    indexer_service.index_paths([Path.cwd()])
+    print("Incremental Indexer OK")
 
     print(settings.app_name)
     print(settings.version)
