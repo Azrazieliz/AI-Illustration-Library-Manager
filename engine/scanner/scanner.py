@@ -1,0 +1,25 @@
+from __future__ import annotations
+
+from engine.logging import get_logger
+from engine.scanner.scanner_config import ScannerConfiguration
+from engine.scanner.scanner_service import ScannerService
+from engine.scanner.scanner_statistics import ScannerStatistics
+
+
+class ScannerManager:
+    """Top-level manager that owns the scanner subsystem."""
+
+    def __init__(
+        self,
+        config: ScannerConfiguration | None = None,
+        statistics: ScannerStatistics | None = None,
+    ) -> None:
+        self.config = config or ScannerConfiguration()
+        self.statistics = statistics or ScannerStatistics()
+        self.logger = get_logger(self.__class__.__name__)
+        self.service = ScannerService(config=self.config, statistics=self.statistics)
+
+    def initialize(self) -> ScannerService:
+        """Initialize the scanner subsystem and return the service."""
+        self.logger.info("Scanner subsystem initialized")
+        return self.service
