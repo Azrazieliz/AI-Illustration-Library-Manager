@@ -1,33 +1,25 @@
 from __future__ import annotations
 
 from engine.database.models.knowledge import Knowledge
+from engine.repositories.knowledge_repository import KnowledgeRepository
 from engine.services.base_service import BaseService
 
 
 class KnowledgeService(BaseService[Knowledge]):
     """Service layer for knowledge records."""
 
+    def __init__(self, repository: KnowledgeRepository | None = None) -> None:
+        super().__init__(repository or KnowledgeRepository())
+        self.repository = repository or KnowledgeRepository()
+
     def create_version(self, *, version: str, description: str | None = None, created_by: str | None = None) -> Knowledge:
-        knowledge = Knowledge(version=version, description=description, created_by=created_by)
-        self.add(knowledge)
-        self.commit()
-        return knowledge
+        return self.repository.create_version(version=version, description=description, created_by=created_by)
 
     def current_version(self) -> Knowledge | None:
-        return self.session.query(Knowledge).order_by(Knowledge.created_at.desc()).first()
+        return self.repository.current_version()
 
     def add_alias(self, knowledge: Knowledge, alias: str) -> Knowledge:
-        if knowledge.description is None:
-            knowledge.description = alias
-        else:
-            knowledge.description = f"{knowledge.description}; {alias}"
-        self.commit()
-        return knowledge
+        return self.repository.add_alias(knowledge, alias)
 
     def remove_alias(self, knowledge: Knowledge, alias: str) -> Knowledge:
-        if knowledge.description is None:
-            return knowledge
-        parts = [part for part in knowledge.description.split(";") if part.strip() != alias]
-        knowledge.description = "; ".join(parts) if parts else None
-        self.commit()
-        return knowledge
+        return self.repository.remove_alias(knowledge, alias)

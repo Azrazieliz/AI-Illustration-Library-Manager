@@ -2,35 +2,32 @@ from __future__ import annotations
 
 from typing import Any, Generic, TypeVar
 
-from sqlalchemy.orm import Session
-
-from engine.database import get_session
 from engine.logging import get_logger
+from engine.repositories.base_repository import BaseRepository
 
 ModelT = TypeVar("ModelT")
 
 
 class BaseService(Generic[ModelT]):
-    """Common service functionality with session management and logging support."""
+    """Common service functionality that delegates persistence to repositories."""
 
-    def __init__(self, session: Session | None = None) -> None:
-        self.session = session or get_session()
+    def __init__(self, repository: BaseRepository[ModelT] | None = None) -> None:
+        self.repository = repository
         self.logger = get_logger(self.__class__.__name__)
 
     def commit(self) -> None:
-        """Commit the current session."""
-        self.session.commit()
+        if self.repository is not None:
+            self.repository.commit()
 
     def rollback(self) -> None:
-        """Rollback the current session."""
-        self.session.rollback()
+        if self.repository is not None:
+            self.repository.rollback()
 
     def close(self) -> None:
-        """Close the current session."""
-        self.session.close()
+        if self.repository is not None:
+            self.repository.close()
 
     def transaction(self, func: Any) -> Any:
-        """Run a function inside a session transaction with rollback on failure."""
         try:
             result = func(self)
             self.commit()
@@ -40,26 +37,28 @@ class BaseService(Generic[ModelT]):
             raise
 
     def add(self, instance: ModelT) -> ModelT:
-        """Add an instance to the session."""
-        self.session.add(instance)
-        return instance
+        if self.repository is None:
+            raise RuntimeError("No repository configured for this service")
+        return self.repository.add(instance)
 
     def flush(self) -> None:
-        """Flush pending changes to the session."""
-        self.session.flush()
+        if self.repository is not None:
+            self.repository.flush()
 
     def refresh(self, instance: ModelT) -> None:
-        """Refresh an instance from the database."""
-        self.session.refresh(instance)
+        if self.repository is not None:
+            self.repository.refresh(instance)
 
     def get_by_id(self, model_type: type[ModelT], identifier: int) -> ModelT | None:
-        """Retrieve a model instance by primary key."""
-        return self.session.get(model_type, identifier)
+        if self.repository is None:
+            return None
+        return self.repository.get_by_id(identifier)
 
     def list_all(self, model_type: type[ModelT]) -> list[ModelT]:
-        """List all instances of a model type."""
-        return list(self.session.query(model_type).all())
+        if self.repository is None:
+            return []
+        return self.repository.list_all()
 
     def delete(self, instance: ModelT) -> None:
-        """Delete an instance from the session."""
-        self.session.delete(instance)
+        if self.repository is not None:
+            self.repository.delete(instance)

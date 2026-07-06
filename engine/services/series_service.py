@@ -1,32 +1,28 @@
 from __future__ import annotations
 
 from engine.database.models.series import Series
+from engine.repositories.series_repository import SeriesRepository
 from engine.services.base_service import BaseService
 
 
 class SeriesService(BaseService[Series]):
     """Service layer for series entities."""
 
+    def __init__(self, repository: SeriesRepository | None = None) -> None:
+        super().__init__(repository or SeriesRepository())
+        self.repository = repository or SeriesRepository()
+
     def create_series(self, *, name: str) -> Series:
-        series = Series(name=name)
-        self.add(series)
-        self.commit()
-        return series
+        return self.repository.create_series(name=name)
 
     def get_series(self, identifier: int) -> Series | None:
-        return self.get_by_id(Series, identifier)
+        return self.repository.get_series(identifier)
 
     def rename_series(self, series: Series, new_name: str) -> Series:
-        series.name = new_name
-        self.commit()
-        return series
+        return self.repository.rename_series(series, new_name)
 
     def merge_series(self, source: Series, target: Series) -> Series:
-        for image in source.images:
-            image.series_id = target.id
-        self.session.delete(source)
-        self.commit()
-        return target
+        return self.repository.merge_series(source, target)
 
     def list_series(self) -> list[Series]:
-        return list(self.session.query(Series).order_by(Series.name).all())
+        return self.repository.list_series()

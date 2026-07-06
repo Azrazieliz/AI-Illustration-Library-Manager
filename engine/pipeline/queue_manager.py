@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Callable
 
+from engine.events.base_event import BaseEvent
+from engine.events.event_dispatcher import EventDispatcher
 from engine.logging import get_logger
 from engine.pipeline.job_queue import (
     DiscoveryQueue,
@@ -69,6 +70,19 @@ class QueueManager:
 
     def statistics(self) -> dict[QueueType, dict[str, int]]:
         return {queue_type: queue.stats() for queue_type, queue in self._queues.items()}
+
+    def subscribe(self, dispatcher: EventDispatcher) -> None:
+        dispatcher.subscribe(self._handle_discovery_event)
+
+    def _handle_discovery_event(self, event: BaseEvent) -> None:
+        payload = event.payload or {}
+        source_path = payload.get("source_path")
+        if not source_path:
+            return
+        self.enqueue(
+            QueueType.DISCOVERY,
+            PipelineJob(source_path=str(source_path), queue_type=QueueType.DISCOVERY),
+        )
 
     def queues(self) -> tuple[QueueType, ...]:
         return tuple(self._queues.keys())
