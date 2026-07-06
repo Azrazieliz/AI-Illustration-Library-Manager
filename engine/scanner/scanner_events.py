@@ -10,29 +10,29 @@ from engine.scanner.scanner_models import ScanEvent
 class ScanStarted(ScanEvent):
     """Raised when a scan begins."""
 
-    root: Path
+    root: Path | None = None
 
 
 @dataclass(slots=True, kw_only=True)
 class FolderScanned(ScanEvent):
     """Raised after a folder is processed."""
 
-    folder: Path
+    folder: Path | None = None
 
 
 @dataclass(slots=True, kw_only=True)
 class FileDiscovered(ScanEvent):
     """Raised when a file is discovered during the scan."""
 
-    file_path: Path
+    file_path: Path | None = None
 
 
 @dataclass(slots=True, kw_only=True)
 class FileIgnored(ScanEvent):
     """Raised when a file is intentionally skipped."""
 
-    file_path: Path
-    reason: str
+    file_path: Path | None = None
+    reason: str | None = None
 
 
 @dataclass(slots=True, kw_only=True)
@@ -56,7 +56,12 @@ class ScanResumed(ScanEvent):
 class ScanCancelled(ScanEvent):
     """Raised when the scan is cancelled."""
 
+    root: Path | None = None
+    reason: str | None = None
+
 
 @dataclass(slots=True, kw_only=True)
 class ScanCompleted(ScanEvent):
     """Raised when a scan completes."""
+
+    root: Path | None = None

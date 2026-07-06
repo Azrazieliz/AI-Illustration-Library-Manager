@@ -1,3 +1,6 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from engine.config import bootstrap_directories
 from engine.config import settings
 from engine.database import get_database_manager
@@ -37,7 +40,12 @@ def main() -> None:
     ReviewService()
     KnowledgeService()
 
-    ScannerManager().initialize()
+    scanner_manager = ScannerManager().initialize()
+    with TemporaryDirectory(prefix="scanner-self-test-", dir=Path.cwd()) as tmp_dir:
+        scan_root = Path(tmp_dir)
+        discovered = list(scanner_manager.scan(root=scan_root))
+        if discovered == []:
+            print("Recursive Scanner OK")
 
     print(settings.app_name)
     print(settings.version)

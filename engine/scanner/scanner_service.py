@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Iterator
+
 from engine.logging import get_logger
 from engine.scanner.scanner_config import ScannerConfiguration
 from engine.scanner.scanner_statistics import ScannerStatistics
@@ -27,6 +30,10 @@ class ScannerService:
         """Start the scanner worker."""
         self.worker.start()
         return self.worker
+
+    def scan(self, root: Path | None = None) -> Iterator[Path]:
+        """Run a recursive scanner pass and yield discovered image paths."""
+        return self.worker.scan(root=root)
 
     def pause_scan(self) -> None:
         """Pause the scanner worker."""

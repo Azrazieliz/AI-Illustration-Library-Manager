@@ -12,7 +12,18 @@ class ScannerConfiguration:
     recursive_scan: bool = True
     follow_symlinks: bool = False
     ignored_directories: tuple[str, ...] = (".git", "__pycache__", ".venv", "node_modules")
-    supported_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+    supported_extensions: tuple[str, ...] = (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".bmp",
+        ".gif",
+        ".tiff",
+        ".avif",
+        ".heic",
+        ".jxl",
+    )
     batch_size: int = 100
     worker_count: int = 1
     scan_hidden_files: bool = False

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Iterator
+
 from engine.logging import get_logger
 from engine.scanner.scanner_config import ScannerConfiguration
 from engine.scanner.scanner_service import ScannerService
@@ -23,3 +26,7 @@ class ScannerManager:
         """Initialize the scanner subsystem and return the service."""
         self.logger.info("Scanner subsystem initialized")
         return self.service
+
+    def scan(self, root: Path | None = None) -> Iterator[Path]:
+        """Run a recursive scan through the service layer."""
+        return self.service.scan(root=root)
