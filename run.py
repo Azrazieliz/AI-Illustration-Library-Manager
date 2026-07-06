@@ -6,6 +6,7 @@ from engine.config import settings
 from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
 from engine.logging import configure, get_logger
+from engine.pipeline import QueueManager
 from engine.scanner import ScannerManager
 from engine.services import (
     CharacterService,
@@ -55,6 +56,7 @@ def main() -> None:
     print("Transaction Engine initialized")
     print("Service Layer OK")
     print("Scanner Foundation OK")
+    print("Pipeline Queue OK")
 
 
 if __name__ == "__main__":
