@@ -3,6 +3,16 @@ from engine.config import settings
 from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
 from engine.logging import configure, get_logger
+from engine.services import (
+    CharacterService,
+    ImageService,
+    JobService,
+    KnowledgeService,
+    ReviewService,
+    SeriesService,
+    TagService,
+    TransactionService,
+)
 
 
 def main() -> None:
@@ -17,12 +27,22 @@ def main() -> None:
 
     TransactionEngine()
 
+    ImageService()
+    SeriesService()
+    CharacterService()
+    TagService()
+    JobService()
+    TransactionService()
+    ReviewService()
+    KnowledgeService()
+
     print(settings.app_name)
     print(settings.version)
     print("Configuration OK")
     print("Logging OK")
     print("Database OK")
     print("Transaction Engine initialized")
+    print("Service Layer OK")
 
 
 if __name__ == "__main__":
