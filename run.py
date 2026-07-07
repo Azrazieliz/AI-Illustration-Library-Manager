@@ -7,6 +7,7 @@ from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
 from engine.hashing import HashEngine, HashService
 from engine.duplicates import DuplicateEngine, DuplicateService
+from engine.thumbnails import ThumbnailEngine, ThumbnailService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -63,6 +64,10 @@ def main() -> None:
     duplicate_service = DuplicateService(queue_manager=queue_manager)
     _ = duplicate_service
     print("Duplicate Engine OK")
+
+    thumbnail_service = ThumbnailService(queue_manager=queue_manager)
+    _ = thumbnail_service
+    print("Thumbnail Engine OK")
 
     print(settings.app_name)
     print(settings.version)

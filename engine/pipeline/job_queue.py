@@ -142,3 +142,10 @@ class ReviewQueue(BaseQueue[PipelineJob]):
 class TransactionQueue(BaseQueue[PipelineJob]):
     def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
         super().__init__(QueueType.TRANSACTION, callback=callback)
+
+
+class MetadataQueue(BaseQueue[PipelineJob]):
+    """Queue for metadata-enrichment jobs published by the thumbnail engine."""
+
+    def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
+        super().__init__(QueueType.METADATA, callback=callback)

@@ -29,6 +29,7 @@ class QueueType(str, Enum):
     EMBEDDING = "embedding"
     RECOGNITION = "recognition"
     REVIEW = "review"
+    METADATA = "metadata"
     TRANSACTION = "transaction"
 
 

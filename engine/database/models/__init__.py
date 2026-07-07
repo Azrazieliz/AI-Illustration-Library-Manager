@@ -8,6 +8,7 @@ from engine.database.models.knowledge import Knowledge
 from engine.database.models.review import Review
 from engine.database.models.series import Series
 from engine.database.models.tag import Tag
+from engine.database.models.thumbnail import ThumbnailRecord
 from engine.database.models.transaction import Transaction
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "Review",
     "Series",
     "Tag",
+    "ThumbnailRecord",
     "Transaction",
     "image_character_association",
     "image_tag_association",
