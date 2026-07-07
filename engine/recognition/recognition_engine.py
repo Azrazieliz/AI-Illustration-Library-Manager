@@ -5,6 +5,7 @@ from typing import Callable, Iterable
 
 from engine.logging import get_logger
 from engine.recognition.recognition_events import RecognitionCompleted
+from engine.recognition.recognition_matcher import RecognitionMatcher
 from engine.recognition.recognition_models import (
     RecognitionAggregation,
     RecognitionCheckpoint,
@@ -15,6 +16,7 @@ from engine.recognition.recognition_provider import RecognitionProvider
 from engine.recognition.recognition_statistics import RecognitionStatistics
 from engine.recognition.recognition_worker import RecognitionWorker
 from engine.repositories.recognition_repository import RecognitionRepository
+from engine.repositories.character_database_repository import CharacterDatabaseRepository
 
 
 class RecognitionEngine:
@@ -30,12 +32,18 @@ class RecognitionEngine:
     ) -> None:
         self.provider = provider
         self.recognition_repository = recognition_repository or RecognitionRepository()
+        self.character_database_repository = CharacterDatabaseRepository()
+        self.matcher = RecognitionMatcher(
+            recognition_repository=self.recognition_repository,
+            character_db=self.character_database_repository,
+        )
         self.callback = callback
         self.max_workers = max_workers
         self.logger = get_logger(self.__class__.__name__)
         self.worker = RecognitionWorker(
             provider=provider,
             recognition_repository=self.recognition_repository,
+            matcher=self.matcher,
             callback=self._handle_event,
             max_workers=self.max_workers,
         )

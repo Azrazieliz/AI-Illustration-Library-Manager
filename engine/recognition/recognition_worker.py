@@ -13,6 +13,7 @@ from engine.recognition.recognition_events import (
     RecognitionStarted,
 )
 from engine.recognition.recognition_exceptions import RecognitionProviderError
+from engine.recognition.recognition_matcher import RecognitionMatcher
 from engine.recognition.recognition_models import (
     RecognitionCache,
     RecognitionCheckpoint,
@@ -32,12 +33,14 @@ class RecognitionWorker:
         *,
         provider: RecognitionProvider,
         recognition_repository: RecognitionRepository | None = None,
+        matcher: RecognitionMatcher | None = None,
         cache: RecognitionCache | None = None,
         callback: Callable[[object], None] | None = None,
         max_workers: int = 4,
     ) -> None:
         self.provider = provider
         self.recognition_repository = recognition_repository or RecognitionRepository()
+        self.matcher = matcher
         self.cache = cache or RecognitionCache()
         self.callback = callback
         self.max_workers = max_workers
@@ -119,22 +122,64 @@ class RecognitionWorker:
                     self._emit(RecognitionSkipped(path=resolved_path, reason="No labels recognized"))
                     return None
 
-                series_name = output.series.name if output.series is not None else None
-                character_names = output.ranked_character_names()
+                if self.matcher is not None:
+                    match = self.matcher.match(image=image, output=output, path=resolved_path)
+                    if match.cache_hit:
+                        self.statistics.increment_cache_hit()
+                    assignment = match.assignment
+                    if assignment.auto_assigned:
+                        series, characters = repository.apply_assignment(image=image, assignment=assignment, commit=False)
+                    else:
+                        series, characters = repository.apply_recognition(
+                            image=image,
+                            series_name=assignment.series_name or (output.series.name if output.series is not None else None),
+                            character_names=output.ranked_character_names(),
+                            commit=False,
+                        )
+                    output.assigned_character_id = assignment.character_id
+                    output.assigned_series_id = assignment.series_id
+                    output.assignment_confidence = assignment.confidence
+                    output.requires_review = assignment.needs_review
+                    output.candidate_payloads = list(assignment.candidates)
+                    assignment_review_item_id = assignment.review_item_id
+                    auto_assigned = assignment.auto_assigned
+                    needs_review = assignment.needs_review
+                    matched_candidates = list(assignment.candidates)
+                    matching_seconds = match.matching_time_seconds
+                    ranking_seconds = match.ranking_time_seconds
+                    unknown_result = assignment.character_id is None
+                else:
+                    series_name = output.series.name if output.series is not None else None
+                    character_names = output.ranked_character_names()
 
-                series, characters = repository.apply_recognition(
-                    image=image,
-                    series_name=series_name,
-                    character_names=character_names,
-                    commit=False,
-                )
+                    series, characters = repository.apply_recognition(
+                        image=image,
+                        series_name=series_name,
+                        character_names=character_names,
+                        commit=False,
+                    )
+                    assignment_review_item_id = None
+                    auto_assigned = True
+                    needs_review = False
+                    matched_candidates = []
+                    matching_seconds = 0.0
+                    ranking_seconds = 0.0
+                    unknown_result = False
 
                 if checkpoint is not None:
                     checkpoint.add_processed(path)
 
                 self.statistics.increment_recognized()
+                if auto_assigned:
+                    self.statistics.increment_automatic_assignment()
+                if needs_review:
+                    self.statistics.increment_review_submission()
+                if unknown_result:
+                    self.statistics.increment_unknown_result()
                 self.statistics.add_candidates_ranked(len(output.character_candidates))
                 self.statistics.record_confidence(output.overall_confidence)
+                self.statistics.add_matching_time(matching_seconds)
+                self.statistics.add_ranking_time(ranking_seconds)
                 self._emit(
                     RecognitionCompletedForPath(
                         path=resolved_path,
@@ -143,7 +188,16 @@ class RecognitionWorker:
                         character_count=len(characters),
                     )
                 )
-                return RecognitionResult(image_id=image.id, path=resolved_path, output=output)
+                return RecognitionResult(
+                    image_id=image.id,
+                    path=resolved_path,
+                    output=output,
+                    assignment=assignment if self.matcher is not None else None,
+                    review_item_id=assignment_review_item_id,
+                    auto_assigned=auto_assigned,
+                    needs_review=needs_review,
+                    matched_candidates=matched_candidates,
+                )
 
         except RecognitionProviderError as e:
             self.statistics.increment_failed()

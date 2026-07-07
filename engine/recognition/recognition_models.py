@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -23,6 +24,59 @@ class CharacterCandidate:
     confidence: float
     occurrences: int = 1
     rank: int = 0
+
+
+@dataclass(slots=True)
+class RecognitionCandidate:
+    """Canonical candidate resolved from the character knowledge database."""
+
+    character_id: int | None
+    series_id: int | None
+    character_name: str
+    series_name: str | None
+    confidence: float
+    normalized_label: str = ""
+    matched_alias: str = ""
+    source_labels: list[str] = field(default_factory=list)
+    score_breakdown: dict[str, float] = field(default_factory=dict)
+    rank: int = 0
+    unknown: bool = False
+
+
+@dataclass(slots=True)
+class RecognitionContext:
+    """Resolved input context used by the intelligent recognition pipeline."""
+
+    image_id: int
+    path: Path
+    filename: str
+    folder_name: str
+    folder_parts: list[str] = field(default_factory=list)
+    current_series_id: int | None = None
+    current_series_name: str | None = None
+    current_character_names: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    review_history: list[dict[str, Any]] = field(default_factory=list)
+    ai_series_name: str | None = None
+    ai_character_names: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RecognitionAssignment:
+    """Final recognition decision for an image."""
+
+    character_id: int | None
+    series_id: int | None
+    character_name: str | None
+    series_name: str | None
+    confidence: float
+    auto_assigned: bool
+    needs_review: bool
+    reason: str = ""
+    candidates: list[RecognitionCandidate] = field(default_factory=list)
+    source_labels: list[RecognitionLabel] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    review_item_id: int | None = None
 
 
 def rank_character_candidates(
@@ -71,6 +125,11 @@ class RecognitionOutput:
     provider_name: str = "unknown"
     model_name: str = "unknown"
     model_version: str = "1.0.0"
+    assigned_character_id: int | None = None
+    assigned_series_id: int | None = None
+    assignment_confidence: float | None = None
+    requires_review: bool = False
+    candidate_payloads: list[RecognitionCandidate] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.character_candidates and self.characters:
@@ -88,6 +147,9 @@ class RecognitionOutput:
 
         if self.overall_confidence is None:
             self.overall_confidence = self.confidence_score()
+
+        if self.assignment_confidence is None:
+            self.assignment_confidence = self.overall_confidence
 
     def confidence_score(self) -> float | None:
         """Compute an aggregate confidence across series and candidates."""
@@ -129,6 +191,11 @@ class RecognitionResult:
     image_id: int
     path: Path
     output: RecognitionOutput
+    assignment: RecognitionAssignment | None = None
+    review_item_id: int | None = None
+    auto_assigned: bool = False
+    needs_review: bool = False
+    matched_candidates: list[RecognitionCandidate] = field(default_factory=list)
     recognized_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 

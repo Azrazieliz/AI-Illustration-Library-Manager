@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from copy import deepcopy
 from difflib import SequenceMatcher, get_close_matches
+from typing import Iterable
 
 from engine.character_database.character_database_builder import CharacterDatabaseBuilder
 from engine.character_database.character_database_exceptions import CharacterNotFoundError, SeriesNotFoundError
@@ -23,6 +26,7 @@ class CharacterDatabaseRepository:
         self._characters: dict[int, CharacterRecord] = {}
         self._series: dict[int, SeriesRecord] = {}
         self._alias_to_character_ids: dict[str, set[int]] = {}
+        self._series_lookup: dict[str, set[int]] = {}
 
     def create_series(self, **kwargs) -> SeriesRecord:
         record = kwargs.get("record")
@@ -32,6 +36,7 @@ class CharacterDatabaseRepository:
         if series_id in self._series:
             raise ValueError(f"Series id already exists: {series_id}")
         self._series[series_id] = deepcopy(record)
+        self._index_series_aliases(self._series[series_id])
         return deepcopy(self._series[series_id])
 
     def create_character(self, **kwargs) -> CharacterRecord:
@@ -62,7 +67,7 @@ class CharacterDatabaseRepository:
         return [deepcopy(self._series[key]) for key in sorted(self._series.keys())]
 
     def search_characters(self, query: str, *, fuzzy: bool = True) -> list[CharacterRecord]:
-        query_norm = query.strip().casefold()
+        query_norm = self.normalize_text(query)
         if not query_norm:
             return []
 
@@ -88,7 +93,7 @@ class CharacterDatabaseRepository:
         return [deepcopy(self._characters[item[1]]) for item in score_hits]
 
     def search_series(self, query: str, *, fuzzy: bool = True) -> list[SeriesRecord]:
-        query_norm = query.strip().casefold()
+        query_norm = self.normalize_text(query)
         if not query_norm:
             return []
 
@@ -106,14 +111,19 @@ class CharacterDatabaseRepository:
             return []
 
         title_map = {record.series_id: record.canonical_title for record in self._series.values()}
-        close = get_close_matches(query, list(title_map.values()), n=8, cutoff=0.7)
+        close = get_close_matches(query_norm, [self.normalize_text(item) for item in title_map.values()], n=8, cutoff=0.7)
         ids = [sid for sid, title in title_map.items() if title in close]
         return [deepcopy(self._series[sid]) for sid in sorted(ids)]
 
     def find_alias(self, alias: str) -> list[CharacterRecord]:
-        alias_norm = alias.strip().casefold()
+        alias_norm = self.normalize_text(alias)
         ids = sorted(self._alias_to_character_ids.get(alias_norm, set()))
         return [deepcopy(self._characters[item]) for item in ids if item in self._characters]
+
+    def find_series_alias(self, alias: str) -> list[SeriesRecord]:
+        alias_norm = self.normalize_text(alias)
+        ids = sorted(self._series_lookup.get(alias_norm, set()))
+        return [deepcopy(self._series[item]) for item in ids if item in self._series]
 
     def find_characters_by_series(self, series_id: int) -> list[CharacterRecord]:
         rows = [item for item in self._characters.values() if item.series_id == series_id]
@@ -126,6 +136,32 @@ class CharacterDatabaseRepository:
             return None
         series = self._series.get(character.series_id)
         return deepcopy(series) if series is not None else None
+
+    def lookup_character_candidates(self, query: str) -> list[CharacterRecord]:
+        hits = self.find_alias(query)
+        if hits:
+            return hits
+        return self.search_characters(query, fuzzy=True)
+
+    def lookup_series_candidates(self, query: str) -> list[SeriesRecord]:
+        hits = self.find_series_alias(query)
+        if hits:
+            return hits
+        return self.search_series(query, fuzzy=True)
+
+    def series_titles_for_character(self, character_id: int) -> list[str]:
+        series = self.find_series_for_character(character_id)
+        if series is None:
+            return []
+        titles = [series.canonical_title]
+        titles.extend(series.aliases)
+        if series.japanese_title:
+            titles.append(series.japanese_title)
+        if series.english_title:
+            titles.append(series.english_title)
+        if series.romaji:
+            titles.append(series.romaji)
+        return self._dedupe_text(titles)
 
     def merge_character(self, source_character_id: int, target_character_id: int) -> CharacterRecord:
         if source_character_id == target_character_id:
@@ -247,7 +283,7 @@ class CharacterDatabaseRepository:
         values.extend(record.nicknames)
         values.extend(record.alternative_spellings)
         values.extend(record.abbreviations)
-        return [item.strip().casefold() for item in values if item and item.strip()]
+        return [self.normalize_text(item) for item in values if item and item.strip()]
 
     def _series_search_terms(self, record: SeriesRecord) -> list[str]:
         values = [record.canonical_title]
@@ -260,22 +296,44 @@ class CharacterDatabaseRepository:
             values.append(record.romaji)
         if record.franchise:
             values.append(record.franchise)
-        return [item.strip().casefold() for item in values if item and item.strip()]
+        return [self.normalize_text(item) for item in values if item and item.strip()]
 
     def _index_character_aliases(self, record: CharacterRecord) -> None:
         for value in self._all_alias_values(record):
-            key = value.strip().casefold()
+            key = self.normalize_text(value)
+            if not key:
+                continue
             self._alias_to_character_ids.setdefault(key, set()).add(record.character_id)
+
+    def _index_series_aliases(self, record: SeriesRecord) -> None:
+        for value in self._all_series_values(record):
+            key = self.normalize_text(value)
+            if not key:
+                continue
+            self._series_lookup.setdefault(key, set()).add(record.series_id)
 
     def _remove_alias_index(self, record: CharacterRecord) -> None:
         for value in self._all_alias_values(record):
-            key = value.strip().casefold()
+            key = self.normalize_text(value)
             ids = self._alias_to_character_ids.get(key)
             if ids is None:
                 continue
             ids.discard(record.character_id)
             if not ids:
                 del self._alias_to_character_ids[key]
+
+    def _all_series_values(self, record: SeriesRecord) -> list[str]:
+        values = [record.canonical_title]
+        values.extend(record.aliases)
+        if record.japanese_title:
+            values.append(record.japanese_title)
+        if record.english_title:
+            values.append(record.english_title)
+        if record.romaji:
+            values.append(record.romaji)
+        if record.franchise:
+            values.append(record.franchise)
+        return [item for item in values if isinstance(item, str)]
 
     def _all_alias_values(self, record: CharacterRecord) -> list[str]:
         values = [record.canonical_name]
@@ -331,6 +389,10 @@ class CharacterDatabaseRepository:
         invalid = 0
         for record in self._characters.values():
             for item in self._all_alias_values(record):
+                if not item.strip():
+                    invalid += 1
+        for record in self._series.values():
+            for item in self._all_series_values(record):
                 if not item.strip():
                     invalid += 1
         return invalid
@@ -409,9 +471,17 @@ class CharacterDatabaseRepository:
         seen: dict[tuple[int | None, str], int] = {}
         duplicates = 0
         for record in self._characters.values():
-            key = (record.series_id, record.canonical_name.strip().casefold())
+            key = (record.series_id, self.normalize_text(record.canonical_name))
             seen[key] = seen.get(key, 0) + 1
         for count in seen.values():
             if count > 1:
                 duplicates += 1
         return duplicates
+
+    @staticmethod
+    def normalize_text(value: str) -> str:
+        text = unicodedata.normalize("NFKD", value or "")
+        text = "".join(character for character in text if not unicodedata.combining(character))
+        text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
+        text = re.sub(r"\s+", " ", text, flags=re.UNICODE)
+        return text.strip().casefold()

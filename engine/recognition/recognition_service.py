@@ -82,6 +82,7 @@ class RecognitionService:
 
     def _result_metadata(self, result: RecognitionResult) -> dict[str, object]:
         output = result.output
+        assignment = result.assignment
         return {
             "image_id": result.image_id,
             "series": output.series.name if output.series else None,
@@ -103,4 +104,37 @@ class RecognitionService:
             "provider_name": output.provider_name,
             "model_name": output.model_name,
             "model_version": output.model_version,
+            "assigned_character_id": output.assigned_character_id,
+            "assigned_series_id": output.assigned_series_id,
+            "assignment_confidence": output.assignment_confidence,
+            "requires_review": output.requires_review,
+            "auto_assigned": result.auto_assigned,
+            "needs_review": result.needs_review,
+            "review_item_id": result.review_item_id,
+            "canonical_assignment": None
+            if assignment is None
+            else {
+                "character_id": assignment.character_id,
+                "series_id": assignment.series_id,
+                "character_name": assignment.character_name,
+                "series_name": assignment.series_name,
+                "confidence": assignment.confidence,
+                "reason": assignment.reason,
+                "auto_assigned": assignment.auto_assigned,
+                "needs_review": assignment.needs_review,
+            },
+            "candidate_payloads": [
+                {
+                    "character_id": candidate.character_id,
+                    "series_id": candidate.series_id,
+                    "character_name": candidate.character_name,
+                    "series_name": candidate.series_name,
+                    "confidence": candidate.confidence,
+                    "rank": candidate.rank,
+                    "matched_alias": candidate.matched_alias,
+                    "unknown": candidate.unknown,
+                    "score_breakdown": candidate.score_breakdown,
+                }
+                for candidate in result.matched_candidates or output.candidate_payloads
+            ],
         }
