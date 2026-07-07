@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from engine.pipeline import PipelineJob, QueueManager
+from engine.pipeline import PipelineJob, QueueManager, QueueType
 from engine.tagging.tagging_engine import TaggingEngine
 from engine.tagging.tagging_models import TaggingCheckpoint, TaggingResult
 
@@ -32,11 +32,14 @@ class TaggingService:
         if stage != "tagging":
             return None
 
-        return self.engine.process_path(
+        result = self.engine.process_path(
             Path(job.source_path),
             checkpoint=checkpoint,
             metadata=job.metadata,
         )
+        if result is not None:
+            self._publish_dataset_job(job, result)
+        return result
 
     def process_tagging_jobs(
         self,
@@ -53,3 +56,16 @@ class TaggingService:
 
     def _handle_event(self, event: object) -> None:
         return None
+
+    def _publish_dataset_job(self, original_job: PipelineJob, result: TaggingResult) -> None:
+        dataset_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.SEARCH,
+            metadata={
+                **(original_job.metadata or {}),
+                "stage": "dataset",
+                "image_id": result.image_id,
+                "tag_count": len(result.generated_tags),
+            },
+        )
+        self.queue_manager.enqueue(QueueType.SEARCH, dataset_job)

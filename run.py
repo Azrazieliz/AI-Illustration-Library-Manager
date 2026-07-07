@@ -14,6 +14,9 @@ from engine.recognition import RecognitionService
 from engine.search import SearchService
 from engine.knowledge_graph import KnowledgeGraphService
 from engine.tagging import TaggingService
+from engine.dataset import DatasetService
+from engine.export import ExportService
+from engine.collections import CollectionService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -98,6 +101,18 @@ def main() -> None:
     tagging_service = TaggingService(queue_manager=queue_manager)
     _ = tagging_service
     print("Automatic Tagging Engine OK")
+
+    dataset_service = DatasetService(queue_manager=queue_manager)
+    _ = dataset_service
+    print("Dataset Engine OK")
+
+    export_service = ExportService(queue_manager=queue_manager)
+    _ = export_service
+    print("Dataset Export Engine OK")
+
+    collection_service = CollectionService(queue_manager=queue_manager)
+    _ = collection_service
+    print("Collection Manager OK")
 
     print(settings.app_name)
     print(settings.version)
