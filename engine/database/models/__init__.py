@@ -1,4 +1,5 @@
 from engine.database.models.character import Character
+from engine.database.models.duplicate import DuplicateRecord
 from engine.database.models.embedding import Embedding
 from engine.database.models.hash import HashModel
 from engine.database.models.image import Image, image_character_association, image_tag_association
@@ -11,6 +12,7 @@ from engine.database.models.transaction import Transaction
 
 __all__ = [
     "Character",
+    "DuplicateRecord",
     "Embedding",
     "HashModel",
     "Image",

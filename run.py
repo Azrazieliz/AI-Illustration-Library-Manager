@@ -6,6 +6,7 @@ from engine.config import settings
 from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
 from engine.hashing import HashEngine, HashService
+from engine.duplicates import DuplicateEngine, DuplicateService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -58,6 +59,10 @@ def main() -> None:
     hash_service = HashService(queue_manager=queue_manager)
     _ = hash_service  # confirms construction without errors
     print("Hash Engine OK")
+
+    duplicate_service = DuplicateService(queue_manager=queue_manager)
+    _ = duplicate_service
+    print("Duplicate Engine OK")
 
     print(settings.app_name)
     print(settings.version)
