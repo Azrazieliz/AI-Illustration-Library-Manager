@@ -11,7 +11,7 @@ from engine.knowledge_graph.knowledge_graph_models import (
     KnowledgeGraphCheckpoint,
     KnowledgeGraphUpdateResult,
 )
-from engine.pipeline import PipelineJob, QueueManager
+from engine.pipeline import PipelineJob, QueueManager, QueueType
 
 
 class KnowledgeGraphService:
@@ -35,11 +35,14 @@ class KnowledgeGraphService:
         """Consume semantic-search pipeline job and update graph incrementally."""
         if not job.source_path:
             return None
-        return self.engine.process_path(
+        result = self.engine.process_path(
             Path(job.source_path),
             checkpoint=checkpoint,
             metadata=job.metadata,
         )
+        if result is not None:
+            self._publish_tagging_job(job, result)
+        return result
 
     def process_knowledge_graph_jobs(
         self,
@@ -63,6 +66,24 @@ class KnowledgeGraphService:
 
     def shortest_path(self, start_node_id: str, end_node_id: str) -> GraphPath | None:
         return self.engine.shortest_path(start_node_id=start_node_id, end_node_id=end_node_id)
+
+    def _publish_tagging_job(
+        self,
+        original_job: PipelineJob,
+        result: KnowledgeGraphUpdateResult,
+    ) -> None:
+        tagging_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.SEARCH,
+            metadata={
+                **(original_job.metadata or {}),
+                "stage": "tagging",
+                "image_id": result.image_id,
+                "graph_nodes": result.created_nodes,
+                "graph_edges": result.created_edges,
+            },
+        )
+        self.queue_manager.enqueue(QueueType.SEARCH, tagging_job)
 
     def _handle_event(self, event: object) -> None:
         return None

@@ -13,6 +13,7 @@ from engine.embeddings import EmbeddingService
 from engine.recognition import RecognitionService
 from engine.search import SearchService
 from engine.knowledge_graph import KnowledgeGraphService
+from engine.tagging import TaggingService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -93,6 +94,10 @@ def main() -> None:
     knowledge_graph_service = KnowledgeGraphService(queue_manager=queue_manager)
     _ = knowledge_graph_service
     print("Knowledge Graph Engine OK")
+
+    tagging_service = TaggingService(queue_manager=queue_manager)
+    _ = tagging_service
+    print("Automatic Tagging Engine OK")
 
     print(settings.app_name)
     print(settings.version)
