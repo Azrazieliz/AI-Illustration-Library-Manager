@@ -12,6 +12,7 @@ from engine.metadata import MetadataEngine, MetadataService
 from engine.embeddings import EmbeddingService
 from engine.recognition import RecognitionService
 from engine.search import SearchService
+from engine.knowledge_graph import KnowledgeGraphService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -88,6 +89,10 @@ def main() -> None:
     search_service = SearchService(queue_manager=queue_manager)
     _ = search_service
     print("Semantic Search Engine OK")
+
+    knowledge_graph_service = KnowledgeGraphService(queue_manager=queue_manager)
+    _ = knowledge_graph_service
+    print("Knowledge Graph Engine OK")
 
     print(settings.app_name)
     print(settings.version)

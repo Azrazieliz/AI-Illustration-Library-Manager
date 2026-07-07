@@ -28,7 +28,15 @@ class SearchService:
         """Consume SEARCH queue job and index semantic record."""
         if not job.source_path:
             return None
-        return self.engine.index_path(Path(job.source_path), checkpoint=checkpoint)
+
+        stage = (job.metadata or {}).get("stage")
+        if stage == "knowledge_graph":
+            return None
+
+        result = self.engine.index_path(Path(job.source_path), checkpoint=checkpoint)
+        if result is not None:
+            self._publish_knowledge_graph_job(job, result)
+        return result
 
     def process_search_jobs(
         self,
@@ -60,3 +68,20 @@ class SearchService:
 
     def _handle_event(self, event: object) -> None:
         return None
+
+    def _publish_knowledge_graph_job(
+        self,
+        original_job: PipelineJob,
+        result: SearchIndexResult,
+    ) -> None:
+        """Publish stage-marked SEARCH job for knowledge graph updates."""
+        graph_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.SEARCH,
+            metadata={
+                **(original_job.metadata or {}),
+                "stage": "knowledge_graph",
+                "image_id": result.image_id,
+            },
+        )
+        self.queue_manager.enqueue(QueueType.SEARCH, graph_job)
