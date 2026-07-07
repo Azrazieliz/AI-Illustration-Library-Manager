@@ -9,6 +9,7 @@ from engine.collections import (
     CollectionAction,
     CollectionCheckpoint,
     CollectionEngine,
+    CollectionExportBundle,
     CollectionJobPayload,
     CollectionKind,
     CollectionService,
@@ -388,3 +389,125 @@ def test_process_collection_job_from_pipeline(collection_env: None, tmp_path: Pa
     summary = service.summary(result.collection_id)
     assert summary is not None
     assert summary.image_count >= 1
+
+
+def test_collection_import_export(collection_env: None, tmp_path: Path) -> None:
+    first_image = _register_image(tmp_path / "bundle_1.jpg")
+    second_image = _register_image(tmp_path / "bundle_2.jpg")
+
+    service = CollectionService()
+    created = service.create_collection(name="Exportable", metadata={"topic": "phase1"})
+    _ = service.engine.bulk_add_images(created.collection_id, [first_image, second_image])
+
+    exported = service.export_collection(created.collection_id)
+    assert exported.details["name"] == "Exportable"
+
+    bundle = CollectionExportBundle(
+        collection_id=0,
+        name="Imported",
+        kind=CollectionKind.STATIC,
+        parent_id=None,
+        image_ids=[first_image],
+        metadata={"source": "import"},
+        smart_rule={},
+    )
+    imported = service.import_collection(bundle)
+    assert imported.changed is True
+    imported_summary = service.summary(imported.collection_id)
+    assert imported_summary is not None
+    assert imported_summary.image_count == 1
+
+
+def test_collection_merge_split(collection_env: None, tmp_path: Path) -> None:
+    ids = [_register_image(tmp_path / f"merge_split_{idx}.jpg") for idx in range(6)]
+
+    service = CollectionService()
+    target = service.create_collection(name="Target")
+    source_a = service.create_collection(name="Source A")
+    source_b = service.create_collection(name="Source B")
+    _ = service.engine.bulk_add_images(target.collection_id, ids[:2])
+    _ = service.engine.bulk_add_images(source_a.collection_id, ids[2:4])
+    _ = service.engine.bulk_add_images(source_b.collection_id, ids[4:6])
+
+    merged = service.merge_collections(
+        target_collection_id=target.collection_id,
+        source_collection_ids=[source_a.collection_id, source_b.collection_id],
+    )
+    assert merged.changed is True
+    merged_summary = service.summary(target.collection_id)
+    assert merged_summary is not None
+    assert merged_summary.image_count == 6
+
+    split = service.split_collection(
+        source_collection_id=target.collection_id,
+        groups=[[ids[0], ids[1]], [ids[2], ids[3], ids[4]]],
+        names=["Split A", "Split B"],
+    )
+    assert split.changed is True
+    assert len(split.affected_image_ids) == 2
+    remaining = service.summary(target.collection_id)
+    assert remaining is not None
+    assert remaining.image_count == 1
+
+
+def test_collection_duplicate_detection(collection_env: None, tmp_path: Path) -> None:
+    image_ids = [_register_image(tmp_path / f"dup_col_{idx}.jpg") for idx in range(2)]
+
+    service = CollectionService()
+    first = service.create_collection(name="Dup Name", metadata={"kind": "same"})
+    second = service.create_collection(name="Dup Name", metadata={"kind": "same"})
+    _ = service.engine.bulk_add_images(first.collection_id, image_ids)
+    _ = service.engine.bulk_add_images(second.collection_id, image_ids)
+
+    duplicates = service.detect_duplicates()
+    assert duplicates.changed is True
+    groups = duplicates.details.get("groups", [])
+    assert len(groups) >= 1
+
+
+def test_collection_search(collection_env: None) -> None:
+    service = CollectionService()
+    _ = service.create_collection(name="Fantasy Shelf", metadata={"description": "anime fantasy"})
+    _ = service.create_collection(name="SciFi Shelf", metadata={"description": "space opera"})
+
+    results_name = service.search_collections("Fantasy")
+    results_metadata = service.search_collections("space")
+
+    assert len(results_name) >= 1
+    assert results_name[0].name == "Fantasy Shelf"
+    assert len(results_metadata) >= 1
+
+
+def test_rule_based_smart_collection(collection_env: None, tmp_path: Path) -> None:
+    queue_manager = QueueManager()
+    path = tmp_path / "rule_based__sample.jpg"
+    path.write_bytes(b"fake")
+    _ = _build_collection_job(queue_manager, path)
+
+    service = CollectionService(queue_manager=queue_manager)
+    smart = service.create_collection(
+        name="RuleBased",
+        kind=CollectionKind.SMART,
+        smart_rule={"min_confidence": 0.0},
+    )
+
+    refreshed = service.engine.refresh_smart_collection(smart.collection_id)
+    assert refreshed.changed is True
+    summary = service.summary(smart.collection_id)
+    assert summary is not None
+    assert summary.image_count >= 1
+
+
+def test_collection_summary_depth(collection_env: None) -> None:
+    service = CollectionService()
+    root = service.create_collection(name="Root")
+    child = service.create_collection(name="Child", parent_id=root.collection_id)
+    grandchild = service.create_collection(name="Grandchild", parent_id=child.collection_id)
+
+    root_summary = service.summary(root.collection_id)
+    grandchild_summary = service.summary(grandchild.collection_id)
+
+    assert root_summary is not None
+    assert grandchild_summary is not None
+    assert root_summary.depth == 0
+    assert grandchild_summary.depth == 2

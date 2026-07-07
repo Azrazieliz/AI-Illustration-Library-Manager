@@ -3,10 +3,12 @@ from __future__ import annotations
 from engine.collections.collection_engine import CollectionEngine
 from engine.collections.collection_models import (
     CollectionCheckpoint,
+    CollectionExportBundle,
     CollectionHierarchyNode,
     CollectionJobPayload,
     CollectionKind,
     CollectionOperationResult,
+    CollectionSearchResult,
     CollectionSummary,
 )
 from engine.pipeline import PipelineJob, QueueManager
@@ -75,6 +77,42 @@ class CollectionService:
 
     def hierarchy(self) -> list[CollectionHierarchyNode]:
         return self.engine.hierarchy()
+
+    def search_collections(self, query: str) -> list[CollectionSearchResult]:
+        return self.engine.search_collections(query)
+
+    def export_collection(self, collection_id: int) -> CollectionOperationResult:
+        return self.engine.export_collection(collection_id)
+
+    def import_collection(
+        self,
+        bundle: CollectionExportBundle,
+        *,
+        parent_id: int | None = None,
+    ) -> CollectionOperationResult:
+        return self.engine.import_collection(bundle, parent_id=parent_id)
+
+    def merge_collections(self, *, target_collection_id: int, source_collection_ids: list[int]) -> CollectionOperationResult:
+        return self.engine.merge_collections(
+            target_collection_id=target_collection_id,
+            source_collection_ids=source_collection_ids,
+        )
+
+    def split_collection(
+        self,
+        *,
+        source_collection_id: int,
+        groups: list[list[int]],
+        names: list[str] | None = None,
+    ) -> CollectionOperationResult:
+        return self.engine.split_collection(
+            source_collection_id=source_collection_id,
+            groups=groups,
+            names=names,
+        )
+
+    def detect_duplicates(self) -> CollectionOperationResult:
+        return self.engine.detect_duplicates()
 
     def _handle_event(self, event: object) -> None:
         return None

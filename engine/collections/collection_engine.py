@@ -15,9 +15,11 @@ from engine.collections.collection_events import (
 from engine.collections.collection_models import (
     CollectionAction,
     CollectionCheckpoint,
+    CollectionExportBundle,
     CollectionHierarchyNode,
     CollectionJobPayload,
     CollectionKind,
+    CollectionSearchResult,
     CollectionOperationResult,
     CollectionSummary,
 )
@@ -157,13 +159,88 @@ class CollectionEngine:
             changed=True,
         )
 
+    def export_collection(self, collection_id: int) -> CollectionOperationResult:
+        bundle = self.repository.export_collection(collection_id)
+        return CollectionOperationResult(
+            action=CollectionAction.EXPORT,
+            collection_id=collection_id,
+            changed=False,
+            affected_image_ids=list(bundle.image_ids),
+            details=self.builder.import_bundle_payload(bundle),
+        )
+
+    def import_collection(self, bundle: CollectionExportBundle, *, parent_id: int | None = None) -> CollectionOperationResult:
+        imported = self.repository.import_collection(bundle, parent_id=parent_id)
+        self._update_thumbnail(imported.collection_id, repository=self.repository)
+        return CollectionOperationResult(
+            action=CollectionAction.IMPORT,
+            collection_id=imported.collection_id,
+            changed=True,
+            affected_image_ids=sorted(imported.image_ids),
+        )
+
+    def merge_collections(self, *, target_collection_id: int, source_collection_ids: list[int]) -> CollectionOperationResult:
+        merged = self.repository.merge_collections(
+            target_collection_id=target_collection_id,
+            source_collection_ids=source_collection_ids,
+        )
+        self._update_thumbnail(target_collection_id, repository=self.repository)
+        return CollectionOperationResult(
+            action=CollectionAction.MERGE,
+            collection_id=target_collection_id,
+            changed=True,
+            affected_image_ids=merged,
+        )
+
+    def split_collection(
+        self,
+        *,
+        source_collection_id: int,
+        groups: list[list[int]],
+        names: list[str] | None = None,
+    ) -> CollectionOperationResult:
+        created = self.repository.split_collection(
+            source_collection_id=source_collection_id,
+            groups=groups,
+            names=names,
+        )
+        for collection in created:
+            self._update_thumbnail(collection.collection_id, repository=self.repository)
+        self._update_thumbnail(source_collection_id, repository=self.repository)
+        return CollectionOperationResult(
+            action=CollectionAction.SPLIT,
+            collection_id=source_collection_id,
+            changed=len(created) > 0,
+            affected_image_ids=[item.collection_id for item in created],
+        )
+
+    def detect_duplicates(self) -> CollectionOperationResult:
+        duplicates = self.repository.detect_duplicates()
+        flattened = [collection_id for group in duplicates for collection_id in group]
+        return CollectionOperationResult(
+            action=CollectionAction.DETECT_DUPLICATES,
+            collection_id=-1,
+            changed=len(duplicates) > 0,
+            affected_image_ids=flattened,
+            details={"groups": duplicates},
+        )
+
+    def search_collections(self, query: str) -> list[CollectionSearchResult]:
+        return self.repository.search(query)
+
     def summary(self, collection_id: int) -> CollectionSummary | None:
         record = self.repository.get_collection(collection_id)
         if record is None:
             return None
         child_count = len(self.repository.list_children(collection_id))
         descendant_count = self.repository.descendant_count(collection_id)
-        return self.builder.build_summary(record, child_count=child_count, descendant_count=descendant_count)
+        depth = self.repository.depth(collection_id)
+        return self.builder.build_summary(
+            record,
+            child_count=child_count,
+            descendant_count=descendant_count,
+            depth=depth,
+        )
 
     def hierarchy(self) -> list[CollectionHierarchyNode]:
         records = {item.collection_id: item for item in self.repository.list_collections()}
@@ -363,6 +440,105 @@ class CollectionEngine:
                 action=CollectionAction.UPDATE_METADATA,
                 collection_id=collection_id,
                 changed=True,
+            )
+
+        if action == CollectionAction.EXPORT:
+            bundle = repository.export_collection(collection_id)
+            return CollectionOperationResult(
+                action=CollectionAction.EXPORT,
+                collection_id=collection_id,
+                changed=False,
+                affected_image_ids=list(bundle.image_ids),
+                details=self.builder.import_bundle_payload(bundle),
+            )
+
+        if action == CollectionAction.IMPORT:
+            import_bundle = payload.import_bundle or {}
+            name = str(import_bundle.get("name", payload.name or "Imported Collection"))
+            raw_kind = str(import_bundle.get("kind", payload.kind.value)).strip().lower()
+            kind = CollectionKind.SMART if raw_kind == CollectionKind.SMART.value else CollectionKind.STATIC
+            image_ids = [
+                int(item)
+                for item in import_bundle.get("image_ids", [])
+                if isinstance(item, int) or (isinstance(item, str) and item.isdigit())
+            ]
+            bundle = CollectionExportBundle(
+                collection_id=int(import_bundle.get("collection_id", 0) or 0),
+                name=name,
+                kind=kind,
+                parent_id=payload.parent_id,
+                image_ids=image_ids,
+                metadata=import_bundle.get("metadata", {}) if isinstance(import_bundle.get("metadata"), dict) else {},
+                smart_rule=import_bundle.get("smart_rule", {}) if isinstance(import_bundle.get("smart_rule"), dict) else {},
+            )
+            imported = repository.import_collection(bundle, parent_id=payload.parent_id)
+            self._update_thumbnail(imported.collection_id, repository=repository)
+            return CollectionOperationResult(
+                action=CollectionAction.IMPORT,
+                collection_id=imported.collection_id,
+                changed=True,
+                affected_image_ids=sorted(imported.image_ids),
+            )
+
+        if action == CollectionAction.MERGE:
+            source_ids = payload.source_collection_ids
+            if not source_ids and payload.source_collection_id is not None:
+                source_ids = [payload.source_collection_id]
+            merged = repository.merge_collections(target_collection_id=collection_id, source_collection_ids=source_ids)
+            self._update_thumbnail(collection_id, repository=repository)
+            return CollectionOperationResult(
+                action=CollectionAction.MERGE,
+                collection_id=collection_id,
+                changed=True,
+                affected_image_ids=merged,
+            )
+
+        if action == CollectionAction.SPLIT:
+            created = repository.split_collection(
+                source_collection_id=collection_id,
+                groups=payload.split_groups,
+                names=payload.split_names,
+            )
+            for item in created:
+                self._update_thumbnail(item.collection_id, repository=repository)
+            self._update_thumbnail(collection_id, repository=repository)
+            return CollectionOperationResult(
+                action=CollectionAction.SPLIT,
+                collection_id=collection_id,
+                changed=len(created) > 0,
+                affected_image_ids=[item.collection_id for item in created],
+            )
+
+        if action == CollectionAction.DETECT_DUPLICATES:
+            duplicates = repository.detect_duplicates()
+            flattened = [identifier for group in duplicates for identifier in group]
+            return CollectionOperationResult(
+                action=CollectionAction.DETECT_DUPLICATES,
+                collection_id=-1,
+                changed=len(duplicates) > 0,
+                affected_image_ids=flattened,
+                details={"groups": duplicates},
+            )
+
+        if action == CollectionAction.SEARCH:
+            query = payload.search_query or payload.name or ""
+            matches = repository.search(query)
+            return CollectionOperationResult(
+                action=CollectionAction.SEARCH,
+                collection_id=-1,
+                changed=False,
+                details={
+                    "query": query,
+                    "results": [
+                        {
+                            "collection_id": item.collection_id,
+                            "name": item.name,
+                            "score": item.score,
+                            "reason": item.reason,
+                        }
+                        for item in matches
+                    ],
+                },
             )
 
         raise ValueError(f"Unsupported collection action: {action.value}")

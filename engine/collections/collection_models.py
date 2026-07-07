@@ -23,6 +23,12 @@ class CollectionAction(str, Enum):
     BULK_MOVE = "bulk_move"
     REFRESH_SMART = "refresh_smart"
     UPDATE_METADATA = "update_metadata"
+    IMPORT = "import"
+    EXPORT = "export"
+    MERGE = "merge"
+    SPLIT = "split"
+    DETECT_DUPLICATES = "detect_duplicates"
+    SEARCH = "search"
 
 
 @dataclass(slots=True)
@@ -45,6 +51,7 @@ class CollectionOperationResult:
     collection_id: int
     changed: bool
     affected_image_ids: list[int] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -57,6 +64,33 @@ class CollectionSummary:
     child_count: int
     descendant_count: int
     thumbnail_path: str | None
+    metadata_size: int = 0
+    depth: int = 0
+
+
+@dataclass(slots=True)
+class CollectionExportBundle:
+    collection_id: int
+    name: str
+    kind: CollectionKind
+    parent_id: int | None
+    image_ids: list[int]
+    metadata: dict[str, Any]
+    smart_rule: dict[str, Any]
+
+
+@dataclass(slots=True)
+class CollectionSearchResult:
+    collection_id: int
+    name: str
+    score: float
+    reason: str
+
+
+@dataclass(slots=True)
+class CollectionDuplicateGroup:
+    key: str
+    collection_ids: list[int]
 
 
 @dataclass(slots=True)
@@ -94,8 +128,13 @@ class CollectionJobPayload:
     image_ids: list[int] = field(default_factory=list)
     source_collection_id: int | None = None
     target_collection_id: int | None = None
+    source_collection_ids: list[int] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     smart_rule: dict[str, Any] = field(default_factory=dict)
+    import_bundle: dict[str, Any] = field(default_factory=dict)
+    split_groups: list[list[int]] = field(default_factory=list)
+    split_names: list[str] = field(default_factory=list)
+    search_query: str | None = None
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> CollectionJobPayload:
@@ -141,6 +180,37 @@ class CollectionJobPayload:
         if isinstance(target_collection_id, str) and target_collection_id.isdigit():
             target_collection_id = int(target_collection_id)
 
+        source_collection_ids_raw = payload.get("source_collection_ids", [])
+        source_collection_ids: list[int] = []
+        if isinstance(source_collection_ids_raw, list):
+            for item in source_collection_ids_raw:
+                if isinstance(item, int):
+                    source_collection_ids.append(item)
+                elif isinstance(item, str) and item.isdigit():
+                    source_collection_ids.append(int(item))
+
+        split_groups_raw = payload.get("split_groups", [])
+        split_groups: list[list[int]] = []
+        if isinstance(split_groups_raw, list):
+            for group in split_groups_raw:
+                if not isinstance(group, list):
+                    continue
+                parsed: list[int] = []
+                for item in group:
+                    if isinstance(item, int):
+                        parsed.append(item)
+                    elif isinstance(item, str) and item.isdigit():
+                        parsed.append(int(item))
+                if parsed:
+                    split_groups.append(parsed)
+
+        split_names_raw = payload.get("split_names", [])
+        split_names: list[str] = []
+        if isinstance(split_names_raw, list):
+            for item in split_names_raw:
+                if isinstance(item, str) and item.strip():
+                    split_names.append(item.strip())
+
         return cls(
             action=action,
             collection_id=collection_id if isinstance(collection_id, int) else None,
@@ -152,6 +222,11 @@ class CollectionJobPayload:
             image_ids=image_ids,
             source_collection_id=source_collection_id if isinstance(source_collection_id, int) else None,
             target_collection_id=target_collection_id if isinstance(target_collection_id, int) else None,
+            source_collection_ids=source_collection_ids,
             metadata=payload.get("collection_metadata", {}) if isinstance(payload.get("collection_metadata"), dict) else {},
             smart_rule=payload.get("smart_rule", {}) if isinstance(payload.get("smart_rule"), dict) else {},
+            import_bundle=payload.get("import_bundle", {}) if isinstance(payload.get("import_bundle"), dict) else {},
+            split_groups=split_groups,
+            split_names=split_names,
+            search_query=payload.get("search_query") if isinstance(payload.get("search_query"), str) else None,
         )

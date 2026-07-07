@@ -16,11 +16,14 @@ from engine.collections.collection_exceptions import (
 from engine.collections.collection_models import (
     CollectionAction,
     CollectionCheckpoint,
+    CollectionDuplicateGroup,
+    CollectionExportBundle,
     CollectionHierarchyNode,
     CollectionJobPayload,
     CollectionKind,
     CollectionOperationResult,
     CollectionRecord,
+    CollectionSearchResult,
     CollectionSummary,
 )
 from engine.collections.collection_service import CollectionService
@@ -33,8 +36,10 @@ __all__ = [
     "CollectionChanged",
     "CollectionCheckpoint",
     "CollectionCompleted",
+    "CollectionDuplicateGroup",
     "CollectionEngine",
     "CollectionException",
+    "CollectionExportBundle",
     "CollectionFailed",
     "CollectionHierarchyNode",
     "CollectionJobPayload",
@@ -43,6 +48,7 @@ __all__ = [
     "CollectionOperationResult",
     "CollectionPersistenceError",
     "CollectionRecord",
+    "CollectionSearchResult",
     "CollectionService",
     "CollectionSkipped",
     "CollectionStarted",

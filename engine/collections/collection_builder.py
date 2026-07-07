@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from engine.collections.collection_models import (
+    CollectionExportBundle,
     CollectionHierarchyNode,
     CollectionKind,
     CollectionRecord,
@@ -41,6 +42,7 @@ class CollectionBuilder:
         *,
         child_count: int,
         descendant_count: int,
+        depth: int = 0,
     ) -> CollectionSummary:
         return CollectionSummary(
             collection_id=record.collection_id,
@@ -51,6 +53,8 @@ class CollectionBuilder:
             child_count=child_count,
             descendant_count=descendant_count,
             thumbnail_path=record.thumbnail_path,
+            metadata_size=len(record.metadata),
+            depth=depth,
         )
 
     def build_hierarchy_node(self, record: CollectionRecord, children: list[CollectionHierarchyNode]) -> CollectionHierarchyNode:
@@ -65,6 +69,28 @@ class CollectionBuilder:
         if not image_paths:
             return None
         return image_paths[0]
+
+    def build_export_bundle(self, record: CollectionRecord) -> CollectionExportBundle:
+        return CollectionExportBundle(
+            collection_id=record.collection_id,
+            name=record.name,
+            kind=record.kind,
+            parent_id=record.parent_id,
+            image_ids=sorted(record.image_ids),
+            metadata=dict(record.metadata),
+            smart_rule=dict(record.smart_rule),
+        )
+
+    def import_bundle_payload(self, bundle: CollectionExportBundle) -> dict:
+        return {
+            "collection_id": bundle.collection_id,
+            "name": bundle.name,
+            "kind": bundle.kind.value,
+            "parent_id": bundle.parent_id,
+            "image_ids": list(bundle.image_ids),
+            "metadata": dict(bundle.metadata),
+            "smart_rule": dict(bundle.smart_rule),
+        }
 
     def matches_smart_rule(self, payload: dict, smart_rule: dict) -> bool:
         tags_payload = payload.get("tags", [])
