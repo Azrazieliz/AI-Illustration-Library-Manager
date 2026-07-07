@@ -55,6 +55,8 @@ class EmbeddingService:
 
         path = Path(job.source_path)
         result = self.engine.process_path(path, checkpoint=checkpoint)
+        if result is not None:
+            self._publish_recognition_job(job, result)
         return result
 
     def process_embedding_jobs(
@@ -74,6 +76,22 @@ class EmbeddingService:
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
+
+    def _publish_recognition_job(
+        self, original_job: PipelineJob, result: EmbeddingResult
+    ) -> None:
+        """Publish a RECOGNITION queue job for series/character recognition."""
+        recognition_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.RECOGNITION,
+            metadata={
+                "image_id": result.image_id,
+                "model_name": result.embedding.model_name,
+                "model_version": result.embedding.model_version,
+                "dimensions": result.embedding.dimensions,
+            },
+        )
+        self.queue_manager.enqueue(QueueType.RECOGNITION, recognition_job)
 
     def _handle_event(self, event: object) -> None:
         """Handle events from the engine."""

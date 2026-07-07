@@ -10,6 +10,7 @@ from engine.duplicates import DuplicateEngine, DuplicateService
 from engine.thumbnails import ThumbnailEngine, ThumbnailService
 from engine.metadata import MetadataEngine, MetadataService
 from engine.embeddings import EmbeddingService
+from engine.recognition import RecognitionService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -78,6 +79,10 @@ def main() -> None:
     embedding_service = EmbeddingService(queue_manager=queue_manager)
     _ = embedding_service
     print("Embedding Engine OK")
+
+    recognition_service = RecognitionService(queue_manager=queue_manager)
+    _ = recognition_service
+    print("Recognition Engine OK")
 
     print(settings.app_name)
     print(settings.version)
