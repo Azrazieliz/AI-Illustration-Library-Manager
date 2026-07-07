@@ -39,7 +39,7 @@ class MetadataService:
         1. Extract source_path from the job.
         2. Extract metadata from the image.
         3. Persist metadata through the repository.
-        4. Publish a SEARCH queue job with extracted metadata.
+        4. Publish EMBEDDING and SEARCH queue jobs with extracted metadata.
         """
         if not job.source_path:
             return None
@@ -49,6 +49,7 @@ class MetadataService:
         if result is None:
             return None
 
+        self._publish_embedding_job(job, result)
         self._publish_search_job(job, result)
         return result
 
@@ -69,6 +70,22 @@ class MetadataService:
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
+
+    def _publish_embedding_job(
+        self, original_job: PipelineJob, result: MetadataResult
+    ) -> None:
+        """Publish an EMBEDDING queue job for embedding generation."""
+        embedding_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.EMBEDDING,
+            metadata={
+                "image_id": result.image_id,
+                "mime_type": result.metadata.mime_type,
+                "width": result.metadata.width,
+                "height": result.metadata.height,
+            },
+        )
+        self.queue_manager.enqueue(QueueType.EMBEDDING, embedding_job)
 
     def _publish_search_job(
         self, original_job: PipelineJob, result: MetadataResult

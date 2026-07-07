@@ -9,6 +9,7 @@ from engine.hashing import HashEngine, HashService
 from engine.duplicates import DuplicateEngine, DuplicateService
 from engine.thumbnails import ThumbnailEngine, ThumbnailService
 from engine.metadata import MetadataEngine, MetadataService
+from engine.embeddings import EmbeddingService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -73,6 +74,10 @@ def main() -> None:
     metadata_service = MetadataService(queue_manager=queue_manager)
     _ = metadata_service
     print("Metadata Engine OK")
+
+    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    _ = embedding_service
+    print("Embedding Engine OK")
 
     print(settings.app_name)
     print(settings.version)
