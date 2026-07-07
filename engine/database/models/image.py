@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from engine.database.models.character import Character
     from engine.database.models.embedding import Embedding
     from engine.database.models.hash import HashModel
+    from engine.database.models.metadata import MetadataRecord
     from engine.database.models.review import Review
     from engine.database.models.series import Series
     from engine.database.models.tag import Tag
@@ -58,5 +59,6 @@ class Image(BaseModel):
     tags: Mapped[list["Tag"]] = relationship(secondary=image_tag_association, back_populates="images")
     embedding: Mapped["Embedding | None"] = relationship(back_populates="image")
     hash_record: Mapped["HashModel | None"] = relationship(back_populates="image")
+    metadata_record: Mapped["MetadataRecord | None"] = relationship(back_populates="image")
     reviews: Mapped[list["Review"]] = relationship(back_populates="image")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="image")

@@ -14,6 +14,7 @@ from engine.pipeline.job_queue import (
     MetadataQueue,
     RecognitionQueue,
     ReviewQueue,
+    SearchQueue,
     ThumbnailQueue,
     TransactionQueue,
 )
@@ -39,6 +40,7 @@ class QueueManager:
         self.register(RecognitionQueue(callback=self.callback))
         self.register(ReviewQueue(callback=self.callback))
         self.register(MetadataQueue(callback=self.callback))
+        self.register(SearchQueue(callback=self.callback))
         self.register(TransactionQueue(callback=self.callback))
 
     def register(self, queue: object) -> None:

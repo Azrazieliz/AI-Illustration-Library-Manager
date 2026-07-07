@@ -1,4 +1,4 @@
-from engine.pipeline.job_queue import DiscoveryQueue, DuplicateQueue, EmbeddingQueue, HashQueue, IndexQueue, MetadataQueue, RecognitionQueue, ReviewQueue, ThumbnailQueue, TransactionQueue
+from engine.pipeline.job_queue import DiscoveryQueue, DuplicateQueue, EmbeddingQueue, HashQueue, IndexQueue, MetadataQueue, RecognitionQueue, ReviewQueue, SearchQueue, ThumbnailQueue, TransactionQueue
 from engine.pipeline.pipeline_events import JobFailed, JobFinished, JobQueued, JobStarted, QueuePaused, QueueResumed
 from engine.pipeline.pipeline_models import PipelineJob, PipelineJobStatus, QueueType
 from engine.pipeline.pipeline_worker import PipelineWorker
@@ -20,6 +20,7 @@ __all__ = [
     "QueueType",
     "RecognitionQueue",
     "ReviewQueue",
+    "SearchQueue",
     "ThumbnailQueue",
     "TransactionQueue",
     "JobFailed",

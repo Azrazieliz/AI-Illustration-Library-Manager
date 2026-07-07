@@ -30,6 +30,7 @@ class QueueType(str, Enum):
     RECOGNITION = "recognition"
     REVIEW = "review"
     METADATA = "metadata"
+    SEARCH = "search"
     TRANSACTION = "transaction"
 
 

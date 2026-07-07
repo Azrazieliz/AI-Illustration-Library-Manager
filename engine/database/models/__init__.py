@@ -5,6 +5,7 @@ from engine.database.models.hash import HashModel
 from engine.database.models.image import Image, image_character_association, image_tag_association
 from engine.database.models.job import Job
 from engine.database.models.knowledge import Knowledge
+from engine.database.models.metadata import MetadataRecord
 from engine.database.models.review import Review
 from engine.database.models.series import Series
 from engine.database.models.tag import Tag
@@ -19,6 +20,7 @@ __all__ = [
     "Image",
     "Job",
     "Knowledge",
+    "MetadataRecord",
     "Review",
     "Series",
     "Tag",

@@ -149,3 +149,10 @@ class MetadataQueue(BaseQueue[PipelineJob]):
 
     def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
         super().__init__(QueueType.METADATA, callback=callback)
+
+
+class SearchQueue(BaseQueue[PipelineJob]):
+    """Queue for search-indexing jobs published by the metadata engine."""
+
+    def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
+        super().__init__(QueueType.SEARCH, callback=callback)
