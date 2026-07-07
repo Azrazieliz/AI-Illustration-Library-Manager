@@ -7,6 +7,7 @@ from engine.events.event_dispatcher import EventDispatcher
 from engine.logging import get_logger
 from engine.pipeline.job_queue import (
     DiscoveryQueue,
+    DuplicateQueue,
     EmbeddingQueue,
     HashQueue,
     IndexQueue,
@@ -31,6 +32,7 @@ class QueueManager:
         self.register(DiscoveryQueue(callback=self.callback))
         self.register(IndexQueue(callback=self.callback))
         self.register(HashQueue(callback=self.callback))
+        self.register(DuplicateQueue(callback=self.callback))
         self.register(ThumbnailQueue(callback=self.callback))
         self.register(EmbeddingQueue(callback=self.callback))
         self.register(RecognitionQueue(callback=self.callback))

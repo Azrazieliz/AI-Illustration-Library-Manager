@@ -5,8 +5,10 @@ from engine.config import bootstrap_directories
 from engine.config import settings
 from engine.database import get_database_manager
 from engine.filesystem import TransactionEngine
+from engine.hashing import HashEngine, HashService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
+from engine.pipeline import QueueManager
 from engine.scanner import ScannerManager
 from engine.services import (
     CharacterService,
@@ -51,6 +53,11 @@ def main() -> None:
     indexer_service = IndexerService()
     indexer_service.index_paths([Path.cwd()])
     print("Incremental Indexer OK")
+
+    queue_manager = QueueManager()
+    hash_service = HashService(queue_manager=queue_manager)
+    _ = hash_service  # confirms construction without errors
+    print("Hash Engine OK")
 
     print(settings.app_name)
     print(settings.version)

@@ -24,6 +24,7 @@ class QueueType(str, Enum):
     DISCOVERY = "discovery"
     INDEX = "index"
     HASH = "hash"
+    DUPLICATE = "duplicate"
     THUMBNAIL = "thumbnail"
     EMBEDDING = "embedding"
     RECOGNITION = "recognition"

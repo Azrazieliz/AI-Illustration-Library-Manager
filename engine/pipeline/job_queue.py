@@ -117,6 +117,13 @@ class ThumbnailQueue(BaseQueue[PipelineJob]):
         super().__init__(QueueType.THUMBNAIL, callback=callback)
 
 
+class DuplicateQueue(BaseQueue[PipelineJob]):
+    """Queue for duplicate-detection jobs published by the hash engine."""
+
+    def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
+        super().__init__(QueueType.DUPLICATE, callback=callback)
+
+
 class EmbeddingQueue(BaseQueue[PipelineJob]):
     def __init__(self, *, callback: Callable[[object], None] | None = None) -> None:
         super().__init__(QueueType.EMBEDDING, callback=callback)

@@ -17,7 +17,9 @@ class HashModel(BaseModel):
     __tablename__ = "hash"
 
     image_id: Mapped[int] = mapped_column(ForeignKey("image.id"), nullable=False, unique=True)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     phash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ahash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dhash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     image: Mapped["Image"] = relationship(back_populates="hash_record")
