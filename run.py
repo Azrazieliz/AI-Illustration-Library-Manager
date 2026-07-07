@@ -11,6 +11,7 @@ from engine.thumbnails import ThumbnailEngine, ThumbnailService
 from engine.metadata import MetadataEngine, MetadataService
 from engine.embeddings import EmbeddingService
 from engine.recognition import RecognitionService
+from engine.search import SearchService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -83,6 +84,10 @@ def main() -> None:
     recognition_service = RecognitionService(queue_manager=queue_manager)
     _ = recognition_service
     print("Recognition Engine OK")
+
+    search_service = SearchService(queue_manager=queue_manager)
+    _ = search_service
+    print("Semantic Search Engine OK")
 
     print(settings.app_name)
     print(settings.version)

@@ -43,6 +43,7 @@ class RecognitionService:
         if result is None:
             return None
 
+        self._publish_search_job(job, result)
         self._publish_review_job(job, result)
         return result
 
@@ -79,6 +80,25 @@ class RecognitionService:
             },
         )
         self.queue_manager.enqueue(QueueType.REVIEW, review_job)
+
+    def _publish_search_job(self, original_job: PipelineJob, result: RecognitionResult) -> None:
+        search_job = PipelineJob(
+            source_path=original_job.source_path,
+            queue_type=QueueType.SEARCH,
+            metadata={
+                "image_id": result.image_id,
+                "series": result.output.series.name if result.output.series else None,
+                "series_confidence": result.output.series.confidence if result.output.series else None,
+                "characters": [
+                    {"name": label.name, "confidence": label.confidence}
+                    for label in result.output.characters
+                ],
+                "provider_name": result.output.provider_name,
+                "model_name": result.output.model_name,
+                "model_version": result.output.model_version,
+            },
+        )
+        self.queue_manager.enqueue(QueueType.SEARCH, search_job)
 
     def _handle_event(self, event: object) -> None:
         return None
