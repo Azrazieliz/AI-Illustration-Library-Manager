@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import and_
+from sqlalchemy.orm import Session
 
 from engine.database.models.character import Character
 from engine.database.models.image import Image
@@ -11,8 +12,8 @@ from engine.repositories.base_repository import BaseRepository
 class RecognitionRepository(BaseRepository[Image]):
     """Repository that persists recognition assignments for images."""
 
-    def __init__(self) -> None:
-        super().__init__(Image)
+    def __init__(self, session: Session | None = None) -> None:
+        super().__init__(Image, session=session)
 
     def get_image_by_path(self, path: str) -> Image | None:
         """Return image record by original path."""
@@ -24,6 +25,7 @@ class RecognitionRepository(BaseRepository[Image]):
         image: Image,
         series_name: str | None,
         character_names: list[str],
+        commit: bool = True,
     ) -> tuple[Series | None, list[Character]]:
         """Apply recognized series and characters to an image record."""
         series = self._get_or_create_series(series_name) if series_name else None
@@ -40,7 +42,8 @@ class RecognitionRepository(BaseRepository[Image]):
             ]
             image.characters = characters
 
-        self.commit()
+        if commit:
+            self.commit()
         return series, characters
 
     def _get_or_create_series(self, name: str) -> Series:

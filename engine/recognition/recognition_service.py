@@ -65,19 +65,7 @@ class RecognitionService:
         review_job = PipelineJob(
             source_path=original_job.source_path,
             queue_type=QueueType.REVIEW,
-            metadata={
-                "image_id": result.image_id,
-                "review_type": "recognition",
-                "series": result.output.series.name if result.output.series else None,
-                "series_confidence": result.output.series.confidence if result.output.series else None,
-                "characters": [
-                    {"name": label.name, "confidence": label.confidence}
-                    for label in result.output.characters
-                ],
-                "provider_name": result.output.provider_name,
-                "model_name": result.output.model_name,
-                "model_version": result.output.model_version,
-            },
+            metadata={**self._result_metadata(result), "review_type": "recognition"},
         )
         self.queue_manager.enqueue(QueueType.REVIEW, review_job)
 
@@ -85,20 +73,34 @@ class RecognitionService:
         search_job = PipelineJob(
             source_path=original_job.source_path,
             queue_type=QueueType.SEARCH,
-            metadata={
-                "image_id": result.image_id,
-                "series": result.output.series.name if result.output.series else None,
-                "series_confidence": result.output.series.confidence if result.output.series else None,
-                "characters": [
-                    {"name": label.name, "confidence": label.confidence}
-                    for label in result.output.characters
-                ],
-                "provider_name": result.output.provider_name,
-                "model_name": result.output.model_name,
-                "model_version": result.output.model_version,
-            },
+            metadata=self._result_metadata(result),
         )
         self.queue_manager.enqueue(QueueType.SEARCH, search_job)
 
     def _handle_event(self, event: object) -> None:
         return None
+
+    def _result_metadata(self, result: RecognitionResult) -> dict[str, object]:
+        output = result.output
+        return {
+            "image_id": result.image_id,
+            "series": output.series.name if output.series else None,
+            "series_confidence": output.series.confidence if output.series else None,
+            "characters": [
+                {"name": label.name, "confidence": label.confidence}
+                for label in output.characters
+            ],
+            "character_candidates": [
+                {
+                    "name": candidate.name,
+                    "confidence": candidate.confidence,
+                    "rank": candidate.rank,
+                    "occurrences": candidate.occurrences,
+                }
+                for candidate in output.character_candidates
+            ],
+            "overall_confidence": output.overall_confidence,
+            "provider_name": output.provider_name,
+            "model_name": output.model_name,
+            "model_version": output.model_version,
+        }

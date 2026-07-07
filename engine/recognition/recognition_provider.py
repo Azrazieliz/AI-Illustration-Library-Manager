@@ -105,7 +105,7 @@ class MockRecognitionProvider(RecognitionProvider):
         if len(parts) == 1:
             return (series or None, [])
 
-        chars_raw = parts[1]
+        chars_raw = parts[1].replace("|", "+")
         seen: set[str] = set()
         character_names: list[str] = []
         for item in chars_raw.split("+"):

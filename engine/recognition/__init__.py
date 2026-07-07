@@ -13,10 +13,15 @@ from engine.recognition.recognition_exceptions import (
     UnsupportedRecognitionProviderError,
 )
 from engine.recognition.recognition_models import (
+    CharacterCandidate,
+    RecognitionAggregation,
+    RecognitionCache,
     RecognitionCheckpoint,
     RecognitionLabel,
     RecognitionOutput,
     RecognitionResult,
+    aggregate_recognition_results,
+    rank_character_candidates,
 )
 from engine.recognition.recognition_provider import (
     MockRecognitionProvider,
@@ -30,6 +35,9 @@ from engine.recognition.recognition_worker import RecognitionWorker
 __all__ = [
     "get_provider",
     "MockRecognitionProvider",
+    "CharacterCandidate",
+    "RecognitionAggregation",
+    "RecognitionCache",
     "RecognitionCheckpoint",
     "RecognitionCompleted",
     "RecognitionCompletedForPath",
@@ -48,4 +56,6 @@ __all__ = [
     "RecognitionStatistics",
     "RecognitionWorker",
     "UnsupportedRecognitionProviderError",
+    "aggregate_recognition_results",
+    "rank_character_candidates",
 ]

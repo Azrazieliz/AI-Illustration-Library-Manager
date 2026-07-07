@@ -5,7 +5,12 @@ from typing import Callable, Iterable
 
 from engine.logging import get_logger
 from engine.recognition.recognition_events import RecognitionCompleted
-from engine.recognition.recognition_models import RecognitionCheckpoint, RecognitionResult
+from engine.recognition.recognition_models import (
+    RecognitionAggregation,
+    RecognitionCheckpoint,
+    RecognitionResult,
+    aggregate_recognition_results,
+)
 from engine.recognition.recognition_provider import RecognitionProvider
 from engine.recognition.recognition_statistics import RecognitionStatistics
 from engine.recognition.recognition_worker import RecognitionWorker
@@ -35,6 +40,7 @@ class RecognitionEngine:
             max_workers=self.max_workers,
         )
         self.statistics = RecognitionStatistics()
+        self.last_aggregation = RecognitionAggregation()
 
     def process_paths(
         self,
@@ -45,6 +51,7 @@ class RecognitionEngine:
         """Run recognition for all provided paths."""
         results = self.worker.process_paths(paths, checkpoint=checkpoint)
         self.statistics = self.worker.statistics
+        self.last_aggregation = aggregate_recognition_results(results)
         self._emit_completion()
         return results
 
@@ -55,7 +62,10 @@ class RecognitionEngine:
         checkpoint: RecognitionCheckpoint | None = None,
     ) -> RecognitionResult | None:
         """Run recognition for one path."""
-        return self.worker.process_path(path, checkpoint=checkpoint)
+        result = self.worker.process_path(path, checkpoint=checkpoint)
+        self.statistics = self.worker.statistics
+        self.last_aggregation = aggregate_recognition_results([result] if result is not None else [])
+        return result
 
     def _emit_completion(self) -> None:
         self._handle_event(
