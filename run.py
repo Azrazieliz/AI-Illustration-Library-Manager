@@ -17,6 +17,7 @@ from engine.tagging import TaggingService
 from engine.dataset import DatasetService
 from engine.export import ExportService
 from engine.collections import CollectionService
+from engine.library import LibraryService
 from engine.indexer import IndexerService
 from engine.logging import configure, get_logger
 from engine.pipeline import QueueManager
@@ -113,6 +114,10 @@ def main() -> None:
     collection_service = CollectionService(queue_manager=queue_manager)
     _ = collection_service
     print("Collection Manager OK")
+
+    library_service = LibraryService()
+    _ = library_service
+    print("Library Management Foundation OK")
 
     print(settings.app_name)
     print(settings.version)
