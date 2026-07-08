@@ -1,0 +1,13 @@
+{
+  "release": "2.0.0",
+  "channel": "stable",
+  "validated": true,
+  "checks": {
+    "android_manifest": "ok",
+    "gradle_release_config": "ok",
+    "proguard_r8": "ok",
+    "signing_placeholders": "ok",
+    "startup_diagnostics": "ok",
+    "health_checks": "ok"
+  }
+}

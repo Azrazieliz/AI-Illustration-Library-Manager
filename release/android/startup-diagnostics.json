@@ -1,0 +1,12 @@
+{
+  "startup_checks": [
+    "configuration",
+    "logging",
+    "database",
+    "transaction_engine",
+    "service_layer",
+    "scanner",
+    "pipeline"
+  ],
+  "status": "passed"
+}

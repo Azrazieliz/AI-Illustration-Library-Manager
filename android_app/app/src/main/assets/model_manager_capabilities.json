@@ -1,0 +1,15 @@
+{
+  "supports": [
+    "recognition_models",
+    "embedding_models",
+    "future_models"
+  ],
+  "operations": [
+    "download",
+    "update",
+    "pause",
+    "resume",
+    "retry",
+    "checksum_verification"
+  ]
+}

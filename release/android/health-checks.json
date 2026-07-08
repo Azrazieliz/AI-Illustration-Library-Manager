@@ -1,0 +1,10 @@
+{
+  "health_checks": [
+    "bridge_connectivity",
+    "knowledge_pack_repository",
+    "model_download_pipeline",
+    "review_queue_state",
+    "search_index_readiness"
+  ],
+  "status": "passed"
+}

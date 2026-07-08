@@ -1,0 +1,16 @@
+{
+  "resumable": true,
+  "steps": [
+    "Welcome",
+    "Choose Library Folder(s)",
+    "Choose Storage Location",
+    "Configure Recognition Models",
+    "Download Knowledge Packs",
+    "Choose Cache Size",
+    "Run Initial Scan",
+    "Generate Embeddings",
+    "Initial Recognition",
+    "Initial Organization",
+    "Finish"
+  ]
+}

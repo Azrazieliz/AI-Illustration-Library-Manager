@@ -1,0 +1,11 @@
+{
+  "release_version": "2.0.0",
+  "release_channel": "stable",
+  "min_sdk": 30,
+  "target_sdk": 35,
+  "build_system": "Gradle",
+  "android_packaging": {
+    "apk": "release/android/artifacts/ailm-android-2.0.0-release.apk",
+    "aab": "release/android/artifacts/ailm-android-2.0.0-release.aab"
+  }
+}

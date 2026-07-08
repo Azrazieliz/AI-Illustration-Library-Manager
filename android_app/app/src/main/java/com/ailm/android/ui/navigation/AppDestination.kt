@@ -1,0 +1,28 @@
+package com.ailm.android.ui.navigation
+
+enum class AppDestination(val route: String, val title: String) {
+    Splash("splash", "Splash"),
+    FirstLaunchWizard("first_launch_wizard", "First Launch Wizard"),
+    Dashboard("dashboard", "Dashboard"),
+    LibraryBrowser("library_browser", "Library Browser"),
+    FolderBrowser("folder_browser", "Folder Browser"),
+    ImageViewer("image_viewer", "Image Viewer"),
+    RecognitionResults("recognition_results", "Recognition Results"),
+    ReviewQueue("review_queue", "Review Queue"),
+    Search("search", "Search"),
+    AdvancedSearch("advanced_search", "Advanced Search"),
+    SemanticSearch("semantic_search", "Semantic Search"),
+    CharacterPage("character_page", "Character Page"),
+    SeriesPage("series_page", "Series Page"),
+    Collections("collections", "Collections"),
+    Tags("tags", "Tags"),
+    BulkOperations("bulk_operations", "Bulk Operations"),
+    KnowledgePacks("knowledge_packs", "Knowledge Packs"),
+    Downloads("downloads", "Downloads"),
+    Automation("automation", "Automation"),
+    PluginManager("plugin_manager", "Plugin Manager"),
+    Statistics("statistics", "Statistics"),
+    Logs("logs", "Logs"),
+    Settings("settings", "Settings"),
+    About("about", "About"),
+}

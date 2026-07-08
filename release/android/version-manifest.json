@@ -1,0 +1,7 @@
+{
+  "app_name": "AI Illustration Library Manager",
+  "version": "2.0.0",
+  "channel": "stable",
+  "version_code": 20000,
+  "artifact_prefix": "ailm-android-2.0.0"
+}

@@ -1,0 +1,11 @@
+{
+  "installer": "android_package_installer",
+  "supports_upgrade": true,
+  "supports_fresh_install": true,
+  "first_run_wizard_required": true,
+  "checks": [
+    "signature_present",
+    "artifact_checksum",
+    "storage_permission_flow"
+  ]
+}
