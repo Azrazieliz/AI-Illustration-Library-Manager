@@ -29,12 +29,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.create("placeholder") {
-                storeFile = file("keystore/release-placeholder.jks")
-                storePassword = "REPLACE_ME"
-                keyAlias = "REPLACE_ME"
-                keyPassword = "REPLACE_ME"
-            }
+            // Keep release buildable in CI/dev environments without private keystore material.
+            // Production signing credentials should be injected by secure build infrastructure.
+            signingConfig = signingConfigs.getByName("debug")
             buildConfigField("String", "RELEASE_CHANNEL", "\"stable\"")
         }
     }
@@ -59,11 +56,6 @@ android {
 }
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2025.01.00")
-
-    implementation(composeBom)
-    androidTestImplementation(composeBom)
-
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
@@ -76,8 +68,8 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    debugImplementation("androidx.compose.ui:ui-tooling")
+    implementation("androidx.compose.ui:ui:1.7.6")
+    implementation("androidx.compose.material3:material3:1.3.1")
+    implementation("androidx.compose.ui:ui-tooling-preview:1.7.6")
+    debugImplementation("androidx.compose.ui:ui-tooling:1.7.6")
 }

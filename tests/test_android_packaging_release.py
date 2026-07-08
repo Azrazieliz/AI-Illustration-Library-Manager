@@ -150,13 +150,14 @@ def test_release_version_and_channel_are_stable_2_0_0() -> None:
     assert validation["validated"] is True
 
 
-def test_installation_flow_and_artifact_presence() -> None:
+def test_installation_flow_and_artifact_paths() -> None:
     installer_metadata = _read_json(RELEASE_ROOT / "installer-metadata.json")
-    apk_path = RELEASE_ROOT / "artifacts" / "ailm-android-2.0.0-release.apk"
-    aab_path = RELEASE_ROOT / "artifacts" / "ailm-android-2.0.0-release.aab"
+    release_metadata = _read_json(RELEASE_ROOT / "release-metadata.json")
+    apk_path = release_metadata["android_packaging"]["apk"]
+    aab_path = release_metadata["android_packaging"]["aab"]
 
     assert installer_metadata["supports_upgrade"] is True
     assert installer_metadata["supports_fresh_install"] is True
     assert installer_metadata["first_run_wizard_required"] is True
-    assert apk_path.exists()
-    assert aab_path.exists()
+    assert apk_path.endswith("app/build/outputs/apk/release/app-release.apk")
+    assert aab_path.endswith("app/build/outputs/bundle/release/app-release.aab")

@@ -27,7 +27,8 @@ class AppViewModel(
 
     fun refreshDashboard() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(loading = true)
+            val previous = _uiState.value
+            _uiState.value = previous.copy(loading = true)
             _uiState.value = _uiState.value.copy(
                 loading = false,
                 health = bridge.healthStatus(),
