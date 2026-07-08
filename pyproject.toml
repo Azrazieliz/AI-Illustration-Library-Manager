@@ -1,11 +1,12 @@
 [tool.poetry]
 name = "ai-illustration-library-manager"
-version = "0.1.0"
+version = "1.0.0"
 description = "Production-grade AI Illustration Library Manager"
 authors = ["Azrael"]
 
 packages = [
-    { include = "engine" }
+    { include = "engine" },
+    { include = "ui" }
 ]
 
 [tool.poetry.dependencies]
@@ -51,3 +52,4 @@ line-length = 100
 pythonpath = [
     "."
 ]
+

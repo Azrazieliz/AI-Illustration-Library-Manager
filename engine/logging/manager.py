@@ -4,6 +4,7 @@ import logging
 import logging.handlers
 import platform
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +113,20 @@ class LoggerManager:
             handler.flush()
             handler.close()
             self._logger.removeHandler(handler)
+        logging.shutdown()
         self._logger = None
+
+    def report_exception(self, context: str, exc: Exception) -> None:
+        logger = self.get_logger("diagnostics")
+        logger.error(
+            "Unhandled runtime exception",
+            extra={
+                "context": context,
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            },
+        )
 
     def _log_startup_banner(self, app_name: str, version: str) -> None:
         if self._logger is None:
@@ -164,3 +178,4 @@ def configure(level: int | str | None = None, app_name: str | None = None, versi
 def shutdown() -> None:
     """Shutdown the singleton logger."""
     manager.shutdown()
+

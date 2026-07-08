@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "AI Illustration Library Manager"
-    version: str = "0.1.0"
+    version: str = "1.0.0"
 
     workspace: Path = Path.cwd()
 
