@@ -32,3 +32,8 @@ cache/
 # OS
 Thumbs.db
 .DS_Store
+
+# Android Studio / Gradle
+android_app/.gradle/
+android_app/.idea/
+android_app/local.properties

@@ -4,11 +4,19 @@ Production-grade AI Illustration Library Manager.
 
 ## Current Version
 
-v1.0.0
+v2.0.0
 
 ## Status
 
-Release Candidate
+Specification Freeze v1.1 (Frozen)
+
+## Canonical Specification
+
+The definitive architecture and behavior specification is maintained in:
+
+- docs/ARCHITECTURE.md
+
+Other documentation summarizes usage or development workflow and must not redefine frozen architecture.
 
 ## Release Notes
 
@@ -22,19 +30,4 @@ Release Candidate
 - `py -m poetry run python -m compileall engine run.py`
 - `py -m poetry run python run.py`
 - `py -m poetry run pytest`
-
-## Planned Features
-
-- Recursive Scanner
-- Incremental Indexing
-- Character Recognition
-- Series Recognition
-- Duplicate Detection
-- Knowledge Base
-- Rule Engine
-- Transaction System
-- Review Queue
-- Background Jobs
-- Android App
-- Windows Desktop App
 
