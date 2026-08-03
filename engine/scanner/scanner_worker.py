@@ -129,12 +129,14 @@ class ScannerWorker:
             self._status = ScanStatus.CANCELLED
             self.statistics.errors += 1
             self.statistics.complete()
+            self.logger.exception("Scanner error during scan", extra={"root": str(root_path)})
             self._emit(ScanCancelled(event_type="scan_cancelled", root=root_path, reason=str(exc)))
             raise
         except Exception as exc:  # pragma: no cover - defensive fallback
             self._status = ScanStatus.CANCELLED
             self.statistics.errors += 1
             self.statistics.complete()
+            self.logger.exception("Unexpected scanner failure", extra={"root": str(root_path)})
             self._emit(ScanCancelled(event_type="scan_cancelled", root=root_path, reason=str(exc)))
             raise
         else:
@@ -160,13 +162,12 @@ class ScannerWorker:
         if self.callback is not None:
             self.callback(event)
 
-    def _resolve_root(self, root: Path | None) -> Path:
+    def _resolve_root(self, root: Path | None = None) -> Path:
         if root is not None:
             return Path(root).expanduser().resolve()
         if self.config.root_directory is not None:
             return Path(self.config.root_directory).expanduser().resolve()
         return Path.cwd()
-
     def _scan_directory(self, root_path: Path) -> Iterator[Path]:
         if not root_path.exists():
             raise FileNotFoundError(f"Scan root does not exist: {root_path}")

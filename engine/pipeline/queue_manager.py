@@ -68,6 +68,12 @@ class QueueManager:
         job.status = PipelineJobStatus.PENDING
         return self.enqueue(queue_type, job)
 
+    def mark_completed(self, queue_type: QueueType, job: PipelineJob) -> None:
+        self._queues[queue_type].mark_completed(job)
+
+    def mark_failed(self, queue_type: QueueType, job: PipelineJob, error_message: str) -> None:
+        self._queues[queue_type].mark_failed(job, error_message)
+
     def pause_queue(self, queue_type: QueueType) -> None:
         self._queues[queue_type].pause()
 

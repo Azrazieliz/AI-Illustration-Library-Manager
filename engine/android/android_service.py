@@ -5,6 +5,10 @@ from collections.abc import Iterable
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
+import json
+import os
+import traceback
+from threading import Lock
 
 from engine.android.android_exceptions import AndroidStorageError
 from engine.android.android_models import (
@@ -26,13 +30,18 @@ from engine.export.export_service import ExportService
 from engine.library.library_service import LibraryService
 from engine.organizer.organizer_service import OrganizerService
 from engine.pipeline import PipelineJob, QueueType
+from engine.plugin_system import PluginService
 from engine.recognition.recognition_service import RecognitionService
 from engine.rename.rename_service import RenameService
+from engine.review.review_service import ReviewService
 from engine.scanner.scanner_service import ScannerService
 from engine.search.search_service import SearchService
 from engine.search_advanced.search_service import AdvancedSearchService
+from engine.knowledge_packs import KnowledgePackService
+from engine.review.review_models import ReviewStatus
 from engine.services.job_service import JobService
 from engine.services.tag_service import TagService
+from engine.logging import get_logger
 
 
 class AndroidStorageAdapter(Protocol):
@@ -101,6 +110,9 @@ class AndroidService:
         automation_service: AutomationService | Any | None = None,
         export_service: ExportService | Any | None = None,
         library_service: LibraryService | Any | None = None,
+        review_service: ReviewService | Any | None = None,
+        knowledge_pack_service: KnowledgePackService | Any | None = None,
+        plugin_service: PluginService | Any | None = None,
         worker: AndroidWorker | None = None,
         statistics: AndroidStatisticsTracker | None = None,
         settings: AndroidSettings | None = None,
@@ -119,13 +131,28 @@ class AndroidService:
         self.automation_service = automation_service or AutomationService()
         self.export_service = export_service or ExportService()
         self.library_service = library_service or LibraryService()
+        self.review_service = review_service or ReviewService()
+        self.knowledge_pack_service = knowledge_pack_service or KnowledgePackService()
+        self.plugin_service = plugin_service or PluginService()
         self.worker = worker or AndroidWorker()
         self.statistics = statistics or AndroidStatisticsTracker()
         self.settings = settings or AndroidSettings()
+        self.logger = get_logger(self.__class__.__name__)
 
         self._thumbnail_cache: dict[str, bytes] = {}
         self._memory_trimming_hooks: list[Any] = []
         self._storage_adapters: dict[str, AndroidStorageAdapter] = {}
+        self._scan_lock = Lock()
+        self._scan_state: dict[str, Any] = {
+            "status": "idle",
+            "root": None,
+            "discovered_images": 0,
+            "current_file": None,
+            "job_id": None,
+            "error": None,
+            "exception_message": None,
+            "exception_traceback": None,
+        }
 
     def scan_library(self, root: str) -> list[AndroidImage]:
         discovered = self.scanner_service.scan(Path(root))
@@ -133,6 +160,114 @@ class AndroidService:
             AndroidImage(image_id=0, path=str(path), filename=Path(path).name)
             for path in discovered
         ]
+
+    def start_scan(self, root: str) -> AndroidJob:
+        root_path = str(root).strip()
+        if not root_path:
+            raise AndroidStorageError("scan root is required")
+
+        with self._scan_lock:
+            if self._scan_state["status"] in {"running", "paused"}:
+                existing = self.worker.get_job(str(self._scan_state["job_id"]))
+                if existing is not None:
+                    return existing
+
+            self._scan_state = {
+                "status": "running",
+                "root": root_path,
+                "discovered_images": 0,
+                "current_file": None,
+                "job_id": "scan-library",
+                "error": None,
+                "exception_message": None,
+                "exception_traceback": None,
+            }
+
+        def _scan_action() -> int:
+            count = 0
+            try:
+                if "://" in root_path:
+                    raise ValueError(
+                        "Unsupported scan root URI. "
+                        "Provide a filesystem path accessible to the backend process, "
+                        f"but received: {root_path}"
+                    )
+
+                for path in self.scanner_service.scan(Path(root_path)):
+                    count += 1
+                    with self._scan_lock:
+                        self._scan_state["discovered_images"] = count
+                        self._scan_state["current_file"] = str(path)
+                    # Indeterminate progress; keep it moving until completion.
+                    progress = min(99.0, 5.0 + float(count) * 2.0)
+                    self.worker.report_progress(
+                        "scan-library",
+                        progress,
+                        message=f"Scanning... {count} images discovered",
+                    )
+                with self._scan_lock:
+                    self._scan_state["status"] = "completed"
+                self.worker.report_progress("scan-library", 100.0, message=f"Scan completed: {count} images")
+                return count
+            except Exception as exc:
+                traceback_text = traceback.format_exc()
+                self.logger.exception("Scan job failed", extra={"root": root_path})
+                with self._scan_lock:
+                    self._scan_state["status"] = "failed"
+                    self._scan_state["error"] = str(exc)
+                    self._scan_state["exception_message"] = str(exc)
+                    self._scan_state["exception_traceback"] = traceback_text
+                raise
+
+        return self.worker.submit(job_id="scan-library", action=_scan_action)
+
+    def pause_scan(self) -> bool:
+        self.scanner_service.pause_scan()
+        with self._scan_lock:
+            if self._scan_state["status"] == "running":
+                self._scan_state["status"] = "paused"
+        return True
+
+    def resume_scan(self) -> bool:
+        self.scanner_service.resume_scan()
+        with self._scan_lock:
+            if self._scan_state["status"] == "paused":
+                self._scan_state["status"] = "running"
+        return True
+
+    def cancel_scan(self) -> bool:
+        self.scanner_service.cancel_scan()
+        cancelled = self.worker.cancel("scan-library")
+        with self._scan_lock:
+            self._scan_state["status"] = "cancelled"
+        return cancelled
+
+    def scan_status(self) -> dict[str, Any]:
+        with self._scan_lock:
+            status = dict(self._scan_state)
+        job = self.worker.get_job("scan-library")
+        if job is not None:
+            status["progress"] = job.progress
+            if job.message and not status.get("exception_message"):
+                status["exception_message"] = job.message
+            if status.get("status") != "failed" and job.status == "failed":
+                status["status"] = "failed"
+                status["error"] = status.get("error") or job.message
+                status["exception_message"] = status.get("exception_message") or job.message
+            if status.get("status") not in {"completed", "failed", "cancelled"}:
+                status["status"] = job.status
+        else:
+            status["progress"] = 0.0
+        status["error"] = status.get("error") or status.get("exception_message")
+        if not self._is_debug_mode():
+            status.pop("exception_traceback", None)
+        else:
+            status["traceback"] = status.get("exception_traceback")
+        return status
+
+    @staticmethod
+    def _is_debug_mode() -> bool:
+        return os.getenv("AILM_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 
     def recognize_image(self, path: str) -> dict[str, Any] | None:
         self.statistics.record_recognition_request()
@@ -177,6 +312,37 @@ class AndroidService:
     def semantic_search(self, *, query_vector: list[float], top_k: int = 10, min_similarity: float = 0.0) -> list[AndroidSearchResult]:
         return self.search(query_vector=query_vector, top_k=top_k, min_similarity=min_similarity)
 
+    def list_library_images(
+        self,
+        *,
+        query: str | None = None,
+        page: int = 1,
+        page_size: int = 200,
+    ) -> list[AndroidImage]:
+        records = list(self.library_service.list_images())
+
+        if query:
+            term = query.strip().lower()
+            if term:
+                filtered: list[Any] = []
+                for item in records:
+                    payload = self._object_to_dict(item)
+                    path = str(payload.get("original_path") or payload.get("path") or payload.get("file_path") or "")
+                    filename = str(payload.get("filename") or (Path(path).name if path else ""))
+                    metadata_text = str(payload.get("metadata", "")).lower()
+                    if term in path.lower() or term in filename.lower() or term in metadata_text:
+                        filtered.append(item)
+                records = filtered
+
+        def sort_key(item: Any) -> str:
+            payload = self._object_to_dict(item)
+            return str(payload.get("original_path") or payload.get("path") or "").lower()
+
+        records.sort(key=sort_key)
+        page = max(page, 1)
+        page_size = max(page_size, 1)
+        start = (page - 1) * page_size
+        return [self._to_android_image(item) for item in records[start : start + page_size]]
     def get_collections(self, *, query: str | None = None, page: int = 1, page_size: int = 50) -> list[AndroidCollection]:
         if query:
             results = self.collection_service.search_collections(query)
@@ -290,6 +456,67 @@ class AndroidService:
         payload["android_supported_versions"] = list(self.settings.supported_android_versions)
         return payload
 
+    def get_review_queue(self) -> list[dict[str, Any]]:
+        items = self.review_service.filter_reviews(status=ReviewStatus.PENDING)
+        return [self._object_to_dict(item) for item in items]
+
+    def update_review(self, item_id: str, action: str, payload: dict[str, Any] | None = None) -> bool:
+        payload = payload or {}
+        action_key = action.strip().lower()
+        if action_key == "undo":
+            return self.review_service.rollback_last_batch() is not None
+
+        try:
+            review_id = int(item_id)
+        except Exception:
+            return False
+
+        reviewer = payload.get("reviewer")
+        reason = payload.get("reason")
+        if action_key == "approve":
+            _ = self.review_service.approve_review(review_id, reviewer=reviewer, reason=reason)
+            return True
+        if action_key == "reject":
+            _ = self.review_service.reject_review(review_id, reviewer=reviewer, reason=reason)
+            return True
+        if action_key == "skip":
+            _ = self.review_service.skip_review(review_id, reviewer=reviewer, reason=reason)
+            return True
+        return False
+
+    def list_knowledge_packs(self) -> list[dict[str, Any]]:
+        packs = self.knowledge_pack_service.engine.list_installed()
+        return [self._object_to_dict(item) for item in packs]
+
+    def list_plugins(self) -> list[dict[str, Any]]:
+        runtimes = self.plugin_service.engine.repository.list_runtimes()
+        return [self._object_to_dict(item) for item in runtimes]
+
+    def list_downloads(self) -> list[dict[str, Any]]:
+        release_root = Path("release") / "android"
+        metadata_path = release_root / "release-metadata.json"
+        if not metadata_path.exists():
+            return []
+
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        packaging = payload.get("android_packaging", {})
+        out: list[dict[str, Any]] = []
+        for kind in ("apk", "aab"):
+            relative_path = packaging.get(kind)
+            if not relative_path:
+                continue
+            artifact_path = Path(relative_path)
+            if not artifact_path.is_absolute():
+                artifact_path = Path.cwd() / artifact_path
+            out.append(
+                {
+                    "type": kind,
+                    "path": str(artifact_path),
+                    "exists": artifact_path.exists(),
+                }
+            )
+        return out
+
     def register_storage_adapter(self, adapter: AndroidStorageAdapter) -> None:
         self._storage_adapters[adapter.scheme] = adapter
 
@@ -330,7 +557,47 @@ class AndroidService:
         self.statistics.set_background_tasks(self.worker.background_task_count())
         self.statistics.record_bridge_call((perf_counter() - started) * 1000.0)
         return job
+    def _to_android_image(self, image: Any) -> AndroidImage:
+        payload = self._object_to_dict(image)
 
+        raw_id = payload.get("id", payload.get("image_id", 0))
+        try:
+            image_id = int(raw_id or 0)
+        except Exception:
+            image_id = 0
+
+        path = str(payload.get("original_path") or payload.get("path") or payload.get("file_path") or "")
+        filename = str(payload.get("filename") or (Path(path).name if path else ""))
+        if not filename:
+            filename = f"Image {image_id}"
+
+        thumbnail_path = payload.get("thumbnail_path")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "id",
+                    "image_id",
+                    "original_path",
+                    "path",
+                    "file_path",
+                    "filename",
+                    "thumbnail_path",
+                    "metadata",
+                    "_sa_instance_state",
+                }
+            }
+
+        return AndroidImage(
+            image_id=image_id,
+            path=path,
+            filename=filename,
+            thumbnail_path=thumbnail_path,
+            metadata=dict(metadata or {}),
+        )
     def _append_collection_hierarchy(self, out: list[AndroidCollection], node: Any) -> None:
         out.append(
             AndroidCollection(
@@ -362,7 +629,9 @@ class AndroidService:
         if is_dataclass(value):
             return asdict(value)
         if hasattr(value, "__dict__"):
-            return dict(value.__dict__)
+            data = dict(value.__dict__)
+            data.pop("_sa_instance_state", None)
+            return data
         slots = getattr(value, "__slots__", ())
         if isinstance(slots, str):
             slots = (slots,)

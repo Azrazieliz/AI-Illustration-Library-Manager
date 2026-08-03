@@ -11,7 +11,7 @@ import com.ailm.android.ui.viewmodel.AppViewModel
 @Composable
 fun AppNavHost(appViewModel: AppViewModel = viewModel()) {
     val navController = rememberNavController()
-    NavHost(navController = navController, startDestination = AppDestination.Splash.route) {
+    NavHost(navController = navController, startDestination = AppDestination.FirstLaunchWizard.route) {
         AppDestination.entries.forEach { destination ->
             composable(destination.route) {
                 ScreenScaffold(

@@ -20,12 +20,13 @@ class ScannerService:
         config: ScannerConfiguration | None = None,
         statistics: ScannerStatistics | None = None,
         dispatcher: EventDispatcher | None = None,
+        queue_manager: QueueManager | None = None,
     ) -> None:
         self.config = config or ScannerConfiguration()
         self.statistics = statistics or ScannerStatistics()
         self.logger = get_logger(self.__class__.__name__)
         self.dispatcher = dispatcher or EventDispatcher()
-        self.queue_manager = QueueManager()
+        self.queue_manager = queue_manager or QueueManager()
         self.queue_manager.subscribe(self.dispatcher)
         self.worker = ScannerWorker(config=self.config, statistics=self.statistics)
 

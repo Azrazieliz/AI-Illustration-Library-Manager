@@ -49,6 +49,9 @@ class LibraryEngine:
             last_scan_at=self.repository.latest_scan_time(images),
         )
 
+    def list_images(self):
+        return self.repository.list_images()
+
     def statistics(self) -> LibraryStatisticsReport:
         images = self.repository.list_images()
         return LibraryStatisticsReport(

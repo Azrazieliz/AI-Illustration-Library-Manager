@@ -58,6 +58,20 @@ class IncrementalIndexer:
             resolved = path.resolve()
         except OSError:
             return
+        if resolved.suffix.lower() not in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".avif",
+            ".heif",
+            ".heic",
+        }:
+            return
         seen_paths.add(str(resolved))
         if self._checkpoint is not None and str(resolved) in self._checkpoint.processed_paths:
             return

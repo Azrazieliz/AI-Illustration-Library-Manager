@@ -6,19 +6,25 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
-        android:allowBackup="true"
-        android:fullBackupContent="false"
-        android:label="AI Illustration Library Manager"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-        <activity
-            android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
+    android:allowBackup="true"
+    android:fullBackupContent="false"
+    android:label="AI Illustration Library Manager"
+    android:supportsRtl="true"
+    android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+    android:usesCleartextTraffic="true"
+    android:networkSecurityConfig="@xml/network_security_config">
+
+    <activity
+        android:name=".MainActivity"
+        android:exported="true">
+
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
+
+    </activity>
+
+</application>      
 
 </manifest>

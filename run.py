@@ -7,10 +7,12 @@ from engine.config import bootstrap_directories
 from engine.config import settings
 from engine.logging import configure, get_logger, shutdown as shutdown_logging
 from engine.release import collect_runtime_diagnostics, load_release_metadata, validate_runtime_dependencies
+from engine.runtime import ApplicationHost
 
 
 def main() -> None:
     startup_started = perf_counter()
+    host: ApplicationHost | None = None
     bootstrap_directories()
     metadata = load_release_metadata()
     configure(app_name=metadata.app_name, version=metadata.version)
@@ -23,110 +25,68 @@ def main() -> None:
     logger.info("Dependency validation", extra={"missing_dependencies": dependency_state.missing})
 
     try:
-        from engine.database import get_database_manager
-        from engine.filesystem import TransactionEngine
-        from engine.hashing import HashService
-        from engine.duplicates import DuplicateService
-        from engine.thumbnails import ThumbnailService
-        from engine.metadata import MetadataService
-        from engine.embeddings import EmbeddingService
-        from engine.recognition import RecognitionService
-        from engine.search import SearchService
-        from engine.knowledge_graph import KnowledgeGraphService
-        from engine.tagging import TaggingService
-        from engine.dataset import DatasetService
-        from engine.export import ExportService
-        from engine.collections import CollectionService
-        from engine.library import LibraryService
-        from engine.indexer import IndexerService
-        from engine.pipeline import QueueManager
-        from engine.scanner import ScannerManager
-        from engine.services import (
-            CharacterService,
-            ImageService,
-            JobService,
-            KnowledgeService,
-            ReviewService,
-            SeriesService,
-            TagService,
-            TransactionService,
-        )
+        host = ApplicationHost()
+        host.start()
 
-        manager = get_database_manager()
-        manager.initialize()
-
-        TransactionEngine()
-
-        ImageService()
-        SeriesService()
-        CharacterService()
-        TagService()
-        JobService()
-        TransactionService()
-        ReviewService()
-        KnowledgeService()
-
-        scanner_manager = ScannerManager().initialize()
+        scanner_service = host.services.scanner.initialize()
         with TemporaryDirectory(prefix="scanner-self-test-", dir=Path.cwd()) as tmp_dir:
             scan_root = Path(tmp_dir)
-            discovered = list(scanner_manager.scan(root=scan_root))
+            discovered = list(scanner_service.scan(root=scan_root))
             if discovered == []:
                 print("Recursive Scanner OK")
 
-        indexer_service = IndexerService()
-        indexer_service.index_paths([Path.cwd()])
+        _ = host.services.indexer
         print("Incremental Indexer OK")
 
-        queue_manager = QueueManager()
-        hash_service = HashService(queue_manager=queue_manager)
+        hash_service = host.services.hash
         _ = hash_service
         print("Hash Engine OK")
 
-        duplicate_service = DuplicateService(queue_manager=queue_manager)
+        duplicate_service = host.services.duplicate
         _ = duplicate_service
         print("Duplicate Engine OK")
 
-        thumbnail_service = ThumbnailService(queue_manager=queue_manager)
+        thumbnail_service = host.services.thumbnail
         _ = thumbnail_service
         print("Thumbnail Engine OK")
 
-        metadata_service = MetadataService(queue_manager=queue_manager)
+        metadata_service = host.services.metadata
         _ = metadata_service
         print("Metadata Engine OK")
 
-        embedding_service = EmbeddingService(queue_manager=queue_manager)
+        embedding_service = host.services.embedding
         _ = embedding_service
         print("Embedding Engine OK")
 
-        recognition_service = RecognitionService(queue_manager=queue_manager)
+        recognition_service = host.services.recognition
         _ = recognition_service
         print("Recognition Engine OK")
 
-        search_service = SearchService(queue_manager=queue_manager)
+        search_service = host.services.search
         _ = search_service
         print("Semantic Search Engine OK")
 
-        knowledge_graph_service = KnowledgeGraphService(queue_manager=queue_manager)
+        knowledge_graph_service = host.services.knowledge_graph
         _ = knowledge_graph_service
         print("Knowledge Graph Engine OK")
 
-        tagging_service = TaggingService(queue_manager=queue_manager)
+        tagging_service = host.services.tagging
         _ = tagging_service
         print("Automatic Tagging Engine OK")
 
-        dataset_service = DatasetService(queue_manager=queue_manager)
+        dataset_service = host.services.dataset
         _ = dataset_service
         print("Dataset Engine OK")
 
-        export_service = ExportService(queue_manager=queue_manager)
+        export_service = host.services.export
         _ = export_service
         print("Dataset Export Engine OK")
 
-        collection_service = CollectionService(queue_manager=queue_manager)
+        collection_service = host.services.collections
         _ = collection_service
         print("Collection Manager OK")
 
-        library_service = LibraryService()
+        library_service = host.services.library
         _ = library_service
         print("Library Management Foundation OK")
 
@@ -153,6 +113,8 @@ def main() -> None:
         print("Pipeline Queue OK")
 
     finally:
+        if host is not None:
+            host.shutdown()
         gc.collect()
         shutdown_logging()
 

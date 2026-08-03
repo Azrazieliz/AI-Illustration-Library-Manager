@@ -16,6 +16,21 @@ class AndroidBridge:
     def scanLibrary(self, root: str) -> list[AndroidImage]:
         return self._timed_call(self.service.scan_library, root)
 
+    def startScan(self, root: str) -> AndroidJob:
+        return self._timed_call(self.service.start_scan, root)
+
+    def scanStatus(self) -> dict[str, Any]:
+        return self._timed_call(self.service.scan_status)
+
+    def pauseScan(self) -> bool:
+        return self._timed_call(self.service.pause_scan)
+
+    def resumeScan(self) -> bool:
+        return self._timed_call(self.service.resume_scan)
+
+    def cancelScan(self) -> bool:
+        return self._timed_call(self.service.cancel_scan)
+
     def recognizeImage(self, path: str) -> dict[str, Any] | None:
         return self._timed_call(self.service.recognize_image, path)
 
@@ -36,6 +51,9 @@ class AndroidBridge:
 
     def getCollections(self, *, query: str | None = None, page: int = 1, page_size: int = 50) -> list[AndroidCollection]:
         return self._timed_call(self.service.get_collections, query=query, page=page, page_size=page_size)
+
+    def getLibraryImages(self, *, query: str | None = None, page: int = 1, page_size: int = 200) -> list[AndroidImage]:
+        return self._timed_call(self.service.list_library_images, query=query, page=page, page_size=page_size)
 
     def getCharacter(self, identifier: int | str) -> AndroidCharacter | None:
         return self._timed_call(self.service.get_character, identifier)
@@ -72,6 +90,21 @@ class AndroidBridge:
 
     def healthStatus(self) -> dict[str, Any]:
         return self._timed_call(self.service.health_status)
+
+    def getReviewQueue(self) -> list[dict[str, Any]]:
+        return self._timed_call(self.service.get_review_queue)
+
+    def updateReview(self, item_id: str, action: str, payload: dict[str, Any] | None = None) -> bool:
+        return self._timed_call(self.service.update_review, item_id, action, payload)
+
+    def listKnowledgePacks(self) -> list[dict[str, Any]]:
+        return self._timed_call(self.service.list_knowledge_packs)
+
+    def listDownloads(self) -> list[dict[str, Any]]:
+        return self._timed_call(self.service.list_downloads)
+
+    def listPlugins(self) -> list[dict[str, Any]]:
+        return self._timed_call(self.service.list_plugins)
 
     def _timed_call(self, func: Any, *args: Any, **kwargs: Any) -> Any:
         started = perf_counter()

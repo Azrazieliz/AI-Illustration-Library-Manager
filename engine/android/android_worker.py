@@ -4,9 +4,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
+import traceback
 
 from engine.android.android_exceptions import AndroidWorkerError
 from engine.android.android_models import AndroidJob
+from engine.logging import get_logger
 
 
 ProgressCallback = Callable[[AndroidJob], None]
@@ -24,6 +26,7 @@ class AndroidWorker:
     """Background executor for Android bridge tasks with resumable checkpoints."""
 
     def __init__(self, *, max_workers: int = 2) -> None:
+        self._logger = get_logger(self.__class__.__name__)
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="android-worker")
         self._lock = Lock()
         self._futures: dict[str, Future[Any]] = {}
@@ -152,10 +155,14 @@ class AndroidWorker:
             self._emit_progress(job_id)
             return result
         except Exception as exc:
+            tb = traceback.format_exc()
+            self._logger.exception("Android worker job failed", extra={"job_id": job_id})
             with self._lock:
                 job = self._jobs[job_id]
                 job.status = "failed"
                 job.message = str(exc)
+                job.metadata["exception_message"] = str(exc)
+                job.metadata["exception_traceback"] = tb
             self._emit_progress(job_id)
             raise
 

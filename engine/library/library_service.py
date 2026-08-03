@@ -18,6 +18,9 @@ class LibraryService:
     def summary(self) -> LibrarySummary:
         return self.engine.summary()
 
+    def list_images(self):
+        return self.engine.list_images()
+
     def statistics(self) -> LibraryStatisticsReport:
         return self.engine.statistics()
 

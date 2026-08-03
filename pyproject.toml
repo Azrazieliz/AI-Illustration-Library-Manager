@@ -35,6 +35,8 @@ watchdog = "^6.0"
 typer = "^0.17"
 
 rich = "^14.1"
+fastapi = "^0.139.2"
+uvicorn = "^0.51.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4"
