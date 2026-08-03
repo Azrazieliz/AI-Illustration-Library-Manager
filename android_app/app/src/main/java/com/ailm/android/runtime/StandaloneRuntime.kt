@@ -1,18 +1,23 @@
 package com.ailm.android.runtime
 
 import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
-import java.util.concurrent.Executors
 
 object StandaloneRuntime {
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
     )
 
-    private val lock = Any()
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "ailm-standalone-scan").apply { isDaemon = true }
-    }
+    private val stateMutex = Mutex()
+    private val runtimeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Volatile
     private var initialized = false
@@ -33,14 +38,15 @@ object StandaloneRuntime {
         if (initialized) {
             return
         }
-        synchronized(lock) {
-            if (initialized) {
-                return
+        runBlocking {
+            stateMutex.withLock {
+                if (!initialized) {
+                    appContext = context.applicationContext
+                    storageProvider = SafStorageProvider(context.applicationContext)
+                    repository = LocalRepository(LocalDatabase(context.applicationContext))
+                    initialized = true
+                }
             }
-            appContext = context.applicationContext
-            storageProvider = SafStorageProvider(context.applicationContext)
-            repository = LocalRepository(LocalDatabase(context.applicationContext))
-            initialized = true
         }
     }
 
@@ -55,10 +61,13 @@ object StandaloneRuntime {
     fun libraryStatistics(): Map<String, Any> {
         ensureInitialized()
         val stats = repository.statistics()
+        val status = runBlocking {
+            stateMutex.withLock { scanStatus }
+        }
         return mapOf(
             "total_images" to (stats["total_images"] ?: 0),
             "total_size_bytes" to (stats["total_size_bytes"] ?: 0L),
-            "scan_status" to scanStatus,
+            "scan_status" to status,
         )
     }
 
@@ -67,55 +76,58 @@ object StandaloneRuntime {
         val rootUri = root.trim()
         require(rootUri.isNotBlank()) { "scan root is required" }
 
-        synchronized(lock) {
-            if (scanStatus == "running" || scanStatus == "paused") {
-                return snapshotStatus()
+        val existingStatus = runBlocking {
+            stateMutex.withLock {
+                if (scanStatus == "running" || scanStatus == "paused") {
+                    snapshotStatus()
+                } else {
+                    scanStatus = "running"
+                    scanRoot = rootUri
+                    scanProgress = 0.0
+                    scanDiscovered = 0
+                    scanCurrentFile = null
+                    scanError = null
+                    scanPaused = false
+                    scanCancelled = false
+                    null
+                }
             }
-            scanStatus = "running"
-            scanRoot = rootUri
-            scanProgress = 0.0
-            scanDiscovered = 0
-            scanCurrentFile = null
-            scanError = null
-            scanPaused = false
-            scanCancelled = false
+        }
+        if (existingStatus != null) {
+            return existingStatus
         }
 
-        executor.execute {
+        runtimeScope.launch {
             try {
                 if (!storageProvider.exists(rootUri)) {
                     throw IllegalStateException("Selected SAF root is no longer available: $rootUri")
                 }
                 val scannedAt = System.currentTimeMillis()
                 for (node in storageProvider.walkTree(rootUri)) {
-                    synchronized(lock) {
-                        while (scanPaused && !scanCancelled) {
-                            lock.wait()
-                        }
-                    }
-                    if (scanCancelled) {
-                        synchronized(lock) {
+                    val shouldContinue = awaitRunningState()
+                    if (!shouldContinue) {
+                        stateMutex.withLock {
                             scanStatus = "cancelled"
                             scanProgress = 0.0
                         }
-                        return@execute
+                        return@launch
                     }
                     if (node.isDirectory || !node.name.isImageName()) {
                         continue
                     }
                     repository.upsertImage(node, scannedAt)
-                    synchronized(lock) {
+                    stateMutex.withLock {
                         scanDiscovered += 1
                         scanCurrentFile = node.uri
                         scanProgress = if (scanDiscovered < 1) 0.0 else 50.0
                     }
                 }
-                synchronized(lock) {
+                stateMutex.withLock {
                     scanStatus = "completed"
                     scanProgress = 100.0
                 }
             } catch (t: Throwable) {
-                synchronized(lock) {
+                stateMutex.withLock {
                     scanStatus = "failed"
                     scanError = t.message ?: t.javaClass.simpleName
                     scanProgress = 0.0
@@ -123,52 +135,58 @@ object StandaloneRuntime {
             }
         }
 
-        return snapshotStatus()
+        return runBlocking {
+            stateMutex.withLock { snapshotStatus() }
+        }
     }
 
     fun scanStatus(): Map<String, Any> {
         ensureInitialized()
-        synchronized(lock) {
-            return snapshotStatus()
+        return runBlocking {
+            stateMutex.withLock { snapshotStatus() }
         }
     }
 
     fun pauseScan(): Boolean {
         ensureInitialized()
-        synchronized(lock) {
-            if (scanStatus != "running") {
-                return false
+        return runBlocking {
+            stateMutex.withLock {
+                if (scanStatus != "running") {
+                    return@withLock false
+                }
+                scanPaused = true
+                scanStatus = "paused"
+                true
             }
-            scanPaused = true
-            scanStatus = "paused"
-            return true
         }
     }
 
     fun resumeScan(): Boolean {
         ensureInitialized()
-        synchronized(lock) {
-            if (scanStatus != "paused") {
-                return false
+        return runBlocking {
+            stateMutex.withLock {
+                if (scanStatus != "paused") {
+                    return@withLock false
+                }
+                scanPaused = false
+                scanStatus = "running"
+                true
             }
-            scanPaused = false
-            scanStatus = "running"
-            lock.notifyAll()
-            return true
         }
     }
 
     fun cancelScan(): Boolean {
         ensureInitialized()
-        synchronized(lock) {
-            if (scanStatus !in setOf("running", "paused")) {
-                return false
+        return runBlocking {
+            stateMutex.withLock {
+                if (scanStatus !in setOf("running", "paused")) {
+                    return@withLock false
+                }
+                scanCancelled = true
+                scanPaused = false
+                scanStatus = "cancelled"
+                true
             }
-            scanCancelled = true
-            scanPaused = false
-            scanStatus = "cancelled"
-            lock.notifyAll()
-            return true
         }
     }
 
@@ -258,6 +276,21 @@ object StandaloneRuntime {
 
     private fun ensureInitialized() {
         check(initialized) { "StandaloneRuntime is not initialized" }
+    }
+
+    private suspend fun awaitRunningState(): Boolean {
+        while (true) {
+            val (paused, cancelled) = stateMutex.withLock {
+                scanPaused to scanCancelled
+            }
+            if (cancelled) {
+                return false
+            }
+            if (!paused) {
+                return true
+            }
+            delay(50)
+        }
     }
 
     private fun snapshotStatus(): Map<String, Any> {

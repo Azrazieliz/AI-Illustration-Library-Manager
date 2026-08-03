@@ -32,8 +32,8 @@ class SafStorageProvider(
             yield(item)
 
             if (node.isDirectory) {
-                val children = node.listFiles()
-                for (child in children.asReversed()) {
+                val children = node.listFiles().toList()
+                for (child: DocumentFile in children.asReversed()) {
                     stack.add(child to node.uri.toString())
                 }
             }
