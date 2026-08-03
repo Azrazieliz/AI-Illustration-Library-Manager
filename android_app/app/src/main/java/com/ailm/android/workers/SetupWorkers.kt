@@ -9,7 +9,7 @@ class InitialSetupWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        // Battery-aware and resumable execution is delegated to WorkManager constraints and backend checkpoints.
+        // Battery-aware and resumable execution is delegated to WorkManager constraints and local runtime checkpoints.
         return Result.success()
     }
 }
@@ -19,7 +19,7 @@ class ModelDownloadWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        // Download/pause/resume/retry/checksum are delegated to the Android backend bridge service.
+        // Download/pause/resume/retry/checksum are delegated to the standalone Android runtime.
         return Result.success()
     }
 }

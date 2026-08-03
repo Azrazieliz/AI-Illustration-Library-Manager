@@ -1,10 +1,9 @@
 package com.ailm.android.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.ailm.android.bridge.AndroidBackendBridge
-import com.ailm.android.bridge.BackendDiscovery
-import com.ailm.android.bridge.HttpBackendBridge
+import com.ailm.android.runtime.StandaloneRuntime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -13,8 +12,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 data class AppUiState(
     val loading: Boolean = false,
@@ -26,7 +23,6 @@ data class AppUiState(
     val knowledgePacks: List<Map<String, Any>> = emptyList(),
     val reviewQueue: List<Map<String, Any>> = emptyList(),
     val tags: List<String> = emptyList(),
-    val backendUrl: String = "",
     val selectedLibraryUri: String = "",
     val scanStatus: String = "idle",
     val scanProgress: Double = 0.0,
@@ -36,41 +32,18 @@ data class AppUiState(
     val errorMessage: String? = null,
 )
 
-class AppViewModel(
-    private val bridge: AndroidBackendBridge = HttpBackendBridge(),
-) : ViewModel() {
-
-    companion object {
-        private const val FALLBACK_BACKEND_URL = "http://192.168.1.40:8000"
-    }
+class AppViewModel : ViewModel() {
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     private var scanPollingJob: Job? = null
 
-    fun initializeConfiguration(backendUrl: String, libraryUri: String) {
-        val normalizedUrl = backendUrl.trim().ifBlank { FALLBACK_BACKEND_URL }
-        bridge.setBaseUrl(normalizedUrl)
+    fun initializeConfiguration(context: Context, libraryUri: String) {
+        StandaloneRuntime.initialize(context.applicationContext)
         _uiState.value = _uiState.value.copy(
-            backendUrl = normalizedUrl,
             selectedLibraryUri = libraryUri,
             firstLaunchCompleted = libraryUri.isNotBlank(),
         )
-
-        viewModelScope.launch(Dispatchers.IO) {
-            BackendDiscovery.startDiscovery { discoveredUrl ->
-                bridge.setBaseUrl(discoveredUrl)
-                viewModelScope.launch(Dispatchers.Main) {
-                    _uiState.value = _uiState.value.copy(backendUrl = discoveredUrl)
-                }
-            }
-        }
-    }
-
-    fun setBackendUrl(url: String) {
-        val normalized = url.trim().ifBlank { bridge.getBaseUrl() }
-        bridge.setBaseUrl(normalized)
-        _uiState.value = _uiState.value.copy(backendUrl = normalized)
     }
 
     fun setLibraryUri(uri: String) {
@@ -93,14 +66,14 @@ class AppViewModel(
             }
 
             try {
-                val health = bridge.healthStatus()
-                val stats = bridge.libraryStatistics()
-                val images = bridge.getLibraryImages(pageSize = 250)
-                val collections = bridge.getCollections()
-                val downloads = bridge.listDownloads()
-                val knowledgePacks = bridge.listKnowledgePacks()
-                val reviewQueue = bridge.getReviewQueue()
-                val tags = bridge.getTags()
+                val health = StandaloneRuntime.healthStatus()
+                val stats = StandaloneRuntime.libraryStatistics()
+                val images = StandaloneRuntime.getLibraryImages(pageSize = 250)
+                val collections = StandaloneRuntime.getCollections()
+                val downloads = StandaloneRuntime.listDownloads()
+                val knowledgePacks = StandaloneRuntime.listKnowledgePacks()
+                val reviewQueue = StandaloneRuntime.getReviewQueue()
+                val tags = StandaloneRuntime.getTags()
 
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
@@ -114,7 +87,6 @@ class AppViewModel(
                         knowledgePacks = knowledgePacks,
                         reviewQueue = reviewQueue,
                         tags = tags,
-                        backendUrl = current.backendUrl,
                         selectedLibraryUri = current.selectedLibraryUri,
                         scanStatus = current.scanStatus,
                         scanProgress = current.scanProgress,
@@ -144,7 +116,7 @@ class AppViewModel(
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                bridge.startScan(root)
+                StandaloneRuntime.startScan(root)
                 withContext(Dispatchers.Main) {
                     _uiState.value = _uiState.value.copy(scanStatus = "running", errorMessage = null)
                 }
@@ -160,7 +132,7 @@ class AppViewModel(
 
     fun pauseScan() {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { bridge.pauseScan() }
+            runCatching { StandaloneRuntime.pauseScan() }
             refreshScanStatus()
             ensureScanPolling()
         }
@@ -168,7 +140,7 @@ class AppViewModel(
 
     fun resumeScan() {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { bridge.resumeScan() }
+            runCatching { StandaloneRuntime.resumeScan() }
             refreshScanStatus()
             ensureScanPolling()
         }
@@ -176,7 +148,7 @@ class AppViewModel(
 
     fun cancelScan() {
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { bridge.cancelScan() }
+            runCatching { StandaloneRuntime.cancelScan() }
             refreshScanStatus()
         }
     }
@@ -193,14 +165,9 @@ class AppViewModel(
 
     fun selectedImageUrl(): String? {
         val image = _uiState.value.selectedImage ?: return null
-        val direct = image["file_url"]?.toString()?.takeIf { it.isNotBlank() }
+        return image["file_url"]?.toString()?.takeIf { it.isNotBlank() }
             ?: image["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() }
-        if (direct != null) {
-            return direct
-        }
-        val path = image["path"]?.toString()?.takeIf { it.isNotBlank() } ?: return null
-        val encoded = URLEncoder.encode(path, StandardCharsets.UTF_8.toString())
-        return "${bridge.getBaseUrl()}/file?path=$encoded"
+            ?: image["path"]?.toString()?.takeIf { it.isNotBlank() }
     }
 
     fun approveReview(itemId: String) {
@@ -238,7 +205,7 @@ class AppViewModel(
 
     private suspend fun updateScanState() {
         try {
-            val status = bridge.scanStatus()
+            val status = StandaloneRuntime.scanStatus()
             val state = status["status"]?.toString()?.ifBlank { "idle" } ?: "idle"
             val progress = status["progress"].asDoubleOrZero()
             val discovered = status["discovered_images"].asIntOrZero()
@@ -278,7 +245,7 @@ class AppViewModel(
     private fun submitReviewAction(itemId: String, action: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                bridge.updateReview(itemId = itemId, action = action)
+                StandaloneRuntime.updateReview(itemId = itemId, action = action)
                 refreshDashboard()
             } catch (t: Throwable) {
                 withContext(Dispatchers.Main) {

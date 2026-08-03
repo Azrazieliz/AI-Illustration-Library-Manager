@@ -41,7 +41,6 @@ import com.ailm.android.ui.viewmodel.AppUiState
 import com.ailm.android.ui.viewmodel.AppViewModel
 
 private const val PREFS_NAME = "ailm_android"
-private const val PREF_BACKEND_URL = "backend_url"
 private const val PREF_LIBRARY_TREE_URI = "library_tree_uri"
 
 @Composable
@@ -55,8 +54,6 @@ fun ScreenScaffold(
     val prefs = remember(context) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
-
-    var backendUrlInput by rememberSaveable { mutableStateOf("") }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree(),
@@ -74,22 +71,14 @@ fun ScreenScaffold(
     }
 
     LaunchedEffect(Unit) {
-        val persistedUrl = prefs.getString(PREF_BACKEND_URL, null).orEmpty()
         val persistedUri = prefs.getString(PREF_LIBRARY_TREE_URI, null).orEmpty()
-        appViewModel.initializeConfiguration(persistedUrl, persistedUri)
-        backendUrlInput = if (persistedUrl.isBlank()) state.backendUrl else persistedUrl
+        appViewModel.initializeConfiguration(context, persistedUri)
         appViewModel.refreshDashboard()
         appViewModel.refreshScanStatus()
     }
 
     val chooseFolder: () -> Unit = {
         folderPickerLauncher.launch(null)
-    }
-    val saveBackendUrl: (String) -> Unit = { rawUrl ->
-        val normalized = rawUrl.trim()
-        appViewModel.setBackendUrl(normalized)
-        prefs.edit().putString(PREF_BACKEND_URL, normalized).apply()
-        appViewModel.refreshDashboard()
     }
 
     when (destination) {
@@ -100,9 +89,6 @@ fun ScreenScaffold(
 
         AppDestination.FirstLaunchWizard -> FirstLaunchScreen(
             state = state,
-            backendUrlInput = backendUrlInput,
-            onBackendUrlChanged = { backendUrlInput = it },
-            onSaveBackendUrl = saveBackendUrl,
             onChooseFolder = chooseFolder,
             onStartScan = appViewModel::startScan,
             onPauseScan = appViewModel::pauseScan,
@@ -252,8 +238,8 @@ fun ScreenScaffold(
         AppDestination.PluginManager -> DataOverviewScreen(
             title = "Plugin Manager",
             lines = listOf(
-                "Plugins are reported by backend via /plugins/list.",
-                "Use Settings to verify backend URL before loading plugins.",
+                "Plugins are surfaced by the standalone runtime.",
+                "Standalone runtime is active for Android.",
             ),
             onNavigate = onNavigate,
         )
@@ -266,7 +252,7 @@ fun ScreenScaffold(
         AppDestination.Logs -> DataOverviewScreen(
             title = "Logs",
             lines = listOf(
-                "Backend errors are shown on Dashboard.",
+                "Runtime errors are shown on Dashboard.",
                 "Current error: ${state.errorMessage ?: "none"}",
             ),
             onNavigate = onNavigate,
@@ -274,9 +260,6 @@ fun ScreenScaffold(
 
         AppDestination.Settings -> SettingsScreen(
             state = state,
-            backendUrlInput = backendUrlInput,
-            onBackendUrlChanged = { backendUrlInput = it },
-            onSaveBackendUrl = saveBackendUrl,
             onChooseFolder = chooseFolder,
             onRefresh = {
                 appViewModel.refreshDashboard()
@@ -289,7 +272,7 @@ fun ScreenScaffold(
             title = "About",
             lines = listOf(
                 "AI Illustration Library Manager",
-                "Android frontend connected to Python backend",
+                "Android standalone runtime edition",
                 "Version 2.0.0",
             ),
             onNavigate = onNavigate,
@@ -325,9 +308,6 @@ private fun SplashScreen(
 @Composable
 private fun FirstLaunchScreen(
     state: AppUiState,
-    backendUrlInput: String,
-    onBackendUrlChanged: (String) -> Unit,
-    onSaveBackendUrl: (String) -> Unit,
     onChooseFolder: () -> Unit,
     onStartScan: () -> Unit,
     onPauseScan: () -> Unit,
@@ -344,18 +324,7 @@ private fun FirstLaunchScreen(
     ) {
         Text("First Launch Wizard", style = MaterialTheme.typography.headlineMedium)
 
-        OutlinedTextField(
-            value = backendUrlInput,
-            onValueChange = onBackendUrlChanged,
-            label = { Text("Backend URL") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onSaveBackendUrl(backendUrlInput) }) {
-                Text("Save Backend")
-            }
             Button(onClick = onRefreshStatus) {
                 Text("Refresh Status")
             }
@@ -424,7 +393,7 @@ private fun DashboardScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Health: ${state.health["status"] ?: state.health["healthy"] ?: "unknown"}")
-                Text("Backend URL: ${state.backendUrl.ifBlank { "not set" }}")
+                Text("Runtime: Android standalone")
                 Text("Library URI configured: ${if (state.selectedLibraryUri.isBlank()) "no" else "yes"}")
                 Text("Total images: ${state.stats["total_images"] ?: state.images.size}")
                 Text("Collections: ${state.collections.size}")
@@ -528,7 +497,7 @@ private fun LibraryBrowserScreen(
         if (images.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "No images returned by the backend.",
+                    text = "No images found in local runtime storage.",
                     modifier = Modifier.padding(12.dp),
                 )
             }
@@ -658,7 +627,7 @@ private fun ReviewQueueScreen(
 
         if (items.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
-                Text("No review items returned by backend.", modifier = Modifier.padding(12.dp))
+                Text("No review items available in local runtime.", modifier = Modifier.padding(12.dp))
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -767,9 +736,6 @@ private fun SearchScreen(
 @Composable
 private fun SettingsScreen(
     state: AppUiState,
-    backendUrlInput: String,
-    onBackendUrlChanged: (String) -> Unit,
-    onSaveBackendUrl: (String) -> Unit,
     onChooseFolder: () -> Unit,
     onRefresh: () -> Unit,
     onNavigate: (AppDestination) -> Unit,
@@ -782,18 +748,7 @@ private fun SettingsScreen(
     ) {
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
 
-        OutlinedTextField(
-            value = backendUrlInput,
-            onValueChange = onBackendUrlChanged,
-            label = { Text("Backend URL") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onSaveBackendUrl(backendUrlInput) }) {
-                Text("Save Backend URL")
-            }
             Button(onClick = onRefresh) {
                 Text("Refresh Data")
             }
@@ -801,7 +756,7 @@ private fun SettingsScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Configured backend: ${state.backendUrl.ifBlank { "not set" }}")
+                Text("Runtime mode: Android standalone")
                 Text("Library URI:")
                 Text(
                     text = state.selectedLibraryUri.ifBlank { "No folder selected." },
@@ -916,7 +871,7 @@ private fun MapListScreen(
         if (items.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "No data returned by the backend.",
+                    text = "No data available in local runtime.",
                     modifier = Modifier.padding(12.dp),
                 )
             }
@@ -962,7 +917,7 @@ private fun TagScreen(
         if (tags.isEmpty()) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "No tags returned by the backend.",
+                    text = "No tags available in local runtime.",
                     modifier = Modifier.padding(12.dp),
                 )
             }
