@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <application
+    android:name=".startup.AilmApplication"
     android:allowBackup="true"
     android:fullBackupContent="false"
     android:label="AI Illustration Library Manager"

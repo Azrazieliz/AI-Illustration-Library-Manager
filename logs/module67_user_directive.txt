@@ -1,0 +1,862 @@
+﻿Module 6 + 7 â€” Complete Local AI Feature Layer + Final AI Architecture + Module 1 Rework
+
+This is the final major implementation pass before Module 8.
+
+Read the ENTIRE Android project before making any modifications.
+
+Read every existing runtime, repository, AI, database, worker, ViewModel, startup, settings, search, indexing, file management, and recognition component.
+
+The application already contains Modules 1â€“5.
+
+DO NOT recreate existing systems.
+
+DO NOT create parallel implementations.
+
+DO NOT bypass existing abstractions.
+
+Every new feature must reuse the architecture introduced by Modules 2â€“5.
+
+The goal is to complete the application's AI capabilities while leaving exactly one canonical implementation for every subsystem.
+
+----------------------------------
+GENERAL RULES
+----------------------------------
+
+Do not redesign the UI.
+
+Do not change File Manager behavior.
+
+Do not change workbook philosophy.
+
+Do not introduce cloud AI.
+
+Everything executes locally.
+
+Everything executes through:
+
+StandaloneRuntime
+
+â†“
+
+LocalAiManager
+
+â†“
+
+Execution Layer
+
+â†“
+
+Repository
+
+â†“
+
+Backend
+
+Never bypass this chain.
+
+----------------------------------
+PART A
+COMPLETE AI FEATURES
+----------------------------------
+
+Implement production-ready support for:
+
+â€¢ OCR
+â€¢ Image Captioning
+â€¢ Character Recognition
+â€¢ Series Recognition
+â€¢ Artist Recognition
+â€¢ Tag Prediction
+â€¢ Metadata Extraction
+â€¢ Prompt Generation
+â€¢ Embedding Generation
+â€¢ Similarity Search
+â€¢ Duplicate Detection
+â€¢ Image Classification
+â€¢ Object Detection (generic infrastructure)
+â€¢ Face/character feature extraction
+â€¢ Knowledge Pack execution
+â€¢ Batch processing
+â€¢ Multi-stage AI pipelines
+
+Do NOT hardcode any model.
+
+Everything must use the backend abstraction already created.
+
+----------------------------------
+PIPELINES
+----------------------------------
+
+Implement reusable execution pipelines.
+
+Examples:
+
+Recognition Pipeline
+
+Image
+
+â†“
+
+Preprocessing
+
+â†“
+
+Execution
+
+â†“
+
+Post-processing
+
+â†“
+
+Confidence scoring
+
+â†“
+
+Repository update
+
+â†“
+
+Caller
+
+Caption Pipeline
+
+Image
+
+â†“
+
+Execution
+
+â†“
+
+Post-processing
+
+â†“
+
+Prompt formatter
+
+â†“
+
+Repository
+
+Semantic Search Pipeline
+
+Embedding generation
+
+â†“
+
+Embedding cache
+
+â†“
+
+Similarity computation
+
+â†“
+
+Ranking
+
+â†“
+
+Results
+
+Prompt Generation Pipeline
+
+Image
+
+â†“
+
+Recognition
+
+â†“
+
+Tags
+
+â†“
+
+Metadata
+
+â†“
+
+Prompt builder
+
+â†“
+
+Prompt output
+
+----------------------------------
+KNOWLEDGE PACKS
+----------------------------------
+
+Complete the Knowledge Pack execution infrastructure.
+
+Support:
+
+â€¢ installation
+â€¢ activation
+â€¢ versioning
+â€¢ dependencies
+â€¢ validation
+â€¢ compatibility
+â€¢ upgrades
+â€¢ rollback
+â€¢ execution
+
+Reuse existing database.
+
+----------------------------------
+MODEL MANAGEMENT
+----------------------------------
+
+Complete production support for:
+
+â€¢ installed models
+â€¢ available models
+â€¢ updates
+â€¢ version checks
+â€¢ compatibility
+â€¢ checksum validation
+â€¢ integrity verification
+â€¢ dependencies
+â€¢ backend compatibility
+â€¢ hardware compatibility
+
+----------------------------------
+SMART SEARCH
+----------------------------------
+
+Complete semantic search.
+
+Implement:
+
+â€¢ embedding generation
+â€¢ embedding storage
+â€¢ embedding cache
+â€¢ nearest-neighbor search
+â€¢ ranking
+â€¢ hybrid search
+â€¢ metadata weighting
+
+Reuse existing search infrastructure whenever possible.
+
+----------------------------------
+RECOGNITION
+----------------------------------
+
+Recognition infrastructure should support:
+
+characters
+
+series
+
+artists
+
+tags
+
+collections
+
+folders
+
+future entity types
+
+without architectural changes.
+
+----------------------------------
+CACHE
+----------------------------------
+
+Complete caching for:
+
+models
+
+sessions
+
+embeddings
+
+knowledge packs
+
+recognition results
+
+caption results
+
+prompt results
+
+search results
+
+No duplicated caches.
+
+----------------------------------
+PERFORMANCE
+----------------------------------
+
+Optimize:
+
+execution queue
+
+memory usage
+
+batch execution
+
+database access
+
+repository calls
+
+cache lookups
+
+startup
+
+thread usage
+
+background workers
+
+Do not introduce parallel schedulers.
+
+----------------------------------
+VALIDATION
+----------------------------------
+
+Implement production validation for:
+
+model outputs
+
+confidence
+
+missing metadata
+
+corrupted embeddings
+
+corrupted cache
+
+knowledge pack integrity
+
+database consistency
+
+execution failures
+
+retry policies
+
+----------------------------------
+PART B
+FINAL AI ARCHITECTURE AUDIT
+----------------------------------
+
+After implementation:
+
+Search the ENTIRE Android project.
+
+Audit every AI subsystem.
+
+Verify there is exactly ONE implementation for:
+
+AI Manager
+
+Scheduler
+
+Dispatcher
+
+Queue
+
+Backend Manager
+
+Backend Selector
+
+Runtime Selector
+
+Execution Session
+
+Execution Context
+
+Execution Cache
+
+Session Cache
+
+Model Cache
+
+Embedding Cache
+
+Prompt Cache
+
+Recognition Cache
+
+Repository
+
+Schema
+
+Runtime Gateway
+
+Hardware Detector
+
+Resource Manager
+
+Validation Service
+
+Knowledge Pack Manager
+
+Semantic Search
+
+Recognition Pipeline
+
+Caption Pipeline
+
+Prompt Pipeline
+
+Similarity Pipeline
+
+Duplicate Detection
+
+Model Registry
+
+Update Manager
+
+Settings Manager
+
+History Manager
+
+Health Monitor
+
+Progress Manager
+
+Retry Manager
+
+Memory Manager
+
+Model Lifetime Manager
+
+No duplicate implementations.
+
+If duplicates exist:
+
+â€¢ remove them
+
+â€¢ preserve one canonical implementation
+
+â€¢ redirect every caller
+
+----------------------------------
+############################################
+PART C
+MODULE 1 REWORK (FINAL ARCHITECTURAL REFACTOR)
+############################################
+
+This section must ONLY begin after Modules 2â€“7 are fully implemented and verified.
+
+Its purpose is NOT to add new functionality.
+
+Its purpose is to transform the original application architecture into the final production architecture now that every subsystem exists.
+
+When Module 1 was originally implemented, much of the application's infrastructure did not yet exist.
+
+As a consequence, several compromises were necessary:
+
+â€¢ temporary abstractions
+â€¢ temporary wrappers
+â€¢ placeholder managers
+â€¢ duplicated initialization paths
+â€¢ compatibility layers
+â€¢ startup workarounds
+â€¢ service forwarding
+â€¢ redundant helper functions
+â€¢ duplicated ownership
+â€¢ transitional APIs
+
+Those compromises were acceptable because later modules had not yet been built.
+
+Now that Modules 2â€“7 exist, those temporary architectural decisions must disappear.
+
+The application should now look as though it had always been designed around the final architecture.
+
+----------------------------------
+PRIMARY OBJECTIVE
+----------------------------------
+
+Rework Module 1 so it becomes a thin application bootstrap instead of an application that owns business logic.
+
+Module 1 should only be responsible for:
+
+â€¢ application startup
+â€¢ dependency wiring
+â€¢ lifecycle initialization
+â€¢ startup validation
+â€¢ runtime creation
+â€¢ worker registration
+â€¢ application shutdown
+
+Nothing more.
+
+Every business feature implemented during Modules 2â€“7 must remain inside its own subsystem.
+
+----------------------------------
+EXPECTED FINAL RESPONSIBILITIES
+----------------------------------
+
+Module 1 must NEVER contain:
+
+â€¢ AI logic
+â€¢ database logic
+â€¢ import logic
+â€¢ export logic
+â€¢ recognition logic
+â€¢ search logic
+â€¢ execution logic
+â€¢ model management
+â€¢ queue management
+â€¢ knowledge pack logic
+â€¢ cache management
+â€¢ validation logic
+â€¢ prompt generation
+â€¢ OCR
+â€¢ captioning
+â€¢ embedding logic
+â€¢ semantic search
+â€¢ duplicate detection
+
+Instead, Module 1 should simply construct and connect the already existing subsystems.
+
+----------------------------------
+PROBLEMS ENCOUNTERED DURING DEVELOPMENT
+----------------------------------
+
+Throughout development, several architectural compromises accumulated because the application was being built incrementally.
+
+Examples include:
+
+â€¢ initialization code temporarily duplicated across startup paths
+
+â€¢ helper methods created before the final managers existed
+
+â€¢ compatibility wrappers that forwarded calls from old APIs to new ones
+
+â€¢ runtime entry points duplicated while subsystems were still under construction
+
+â€¢ temporary repository forwarding methods
+
+â€¢ transitional validation helpers
+
+â€¢ duplicated service ownership while modules were migrated
+
+â€¢ startup code containing responsibilities that later became dedicated managers
+
+â€¢ legacy execution paths preserved only for compatibility
+
+â€¢ placeholder orchestration code that became unnecessary once LocalAiManager was introduced
+
+These were acceptable during development, but should not exist in the finished architecture.
+
+----------------------------------
+REWORK REQUIREMENTS
+----------------------------------
+
+Search the ENTIRE Android project.
+
+Identify every remaining piece of transitional architecture introduced during earlier modules.
+
+Examples include:
+
+â€¢ obsolete wrappers
+
+â€¢ compatibility layers
+
+â€¢ duplicated startup code
+
+â€¢ duplicated initialization
+
+â€¢ duplicated dependency creation
+
+â€¢ duplicated runtime ownership
+
+â€¢ duplicated repositories
+
+â€¢ duplicated managers
+
+â€¢ duplicated workers
+
+â€¢ duplicated validation
+
+â€¢ duplicated caches
+
+â€¢ duplicated helper methods
+
+â€¢ dead code
+
+â€¢ unreachable code
+
+â€¢ unused interfaces
+
+â€¢ obsolete forwarding methods
+
+â€¢ temporary adapters
+
+â€¢ deprecated execution paths
+
+If any of these still exist:
+
+â€¢ remove them
+
+â€¢ redirect every caller
+
+â€¢ preserve only one canonical implementation
+
+----------------------------------
+STARTUP REFACTOR
+----------------------------------
+
+Reduce startup to a clean dependency graph.
+
+The application should initialize approximately in this order:
+
+Application
+
+â†“
+
+StandaloneRuntime
+
+â†“
+
+LocalAiManager
+
+â†“
+
+Repositories
+
+â†“
+
+Workers
+
+â†“
+
+Application Ready
+
+Startup should not contain business logic.
+
+Startup should only assemble existing components.
+
+----------------------------------
+DEPENDENCY OWNERSHIP
+----------------------------------
+
+Every major subsystem must have exactly one owner.
+
+For example:
+
+Database
+â†’ LocalDatabase
+
+Fusion Database
+â†’ FusionDatabaseRepository
+
+AI
+â†’ LocalAiManager
+
+Execution
+â†’ LocalAiRuntimePipeline
+
+Import
+â†’ ExternalImportPipeline
+
+Search
+â†’ LocalRepository
+
+Workers
+â†’ SetupWorkers
+
+Settings
+â†’ dedicated settings manager
+
+Caches
+â†’ dedicated cache managers
+
+Module 1 should only reference these owners.
+
+It should never reimplement their functionality.
+
+----------------------------------
+FINAL GOAL
+----------------------------------
+
+After the refactor, the application should appear as though it had been designed from the beginning with the final architecture introduced by Modules 2â€“7.
+
+There should be:
+
+â€¢ one startup path
+
+â€¢ one initialization path
+
+â€¢ one runtime owner
+
+â€¢ one dependency graph
+
+â€¢ one owner per subsystem
+
+â€¢ zero temporary architecture
+
+â€¢ zero compatibility layers
+
+â€¢ zero duplicate ownership
+
+â€¢ zero obsolete forwarding code
+
+â€¢ zero dead startup logic
+
+Module 1 should become a lightweight composition layer that assembles the application and delegates all behavior to the canonical implementations created in Modules 2â€“7.
+
+----------------------------------
+FINAL APPLICATION EXECUTION CHAIN
+----------------------------------
+
+Verify the application executes through exactly one path.
+
+Application
+
+â†“
+
+StandaloneRuntime
+
+â†“
+
+LocalAiManager
+
+â†“
+
+Execution Scheduler
+
+â†“
+
+Queue
+
+â†“
+
+Runtime Selector
+
+â†“
+
+Backend Selector
+
+â†“
+
+Execution Session
+
+â†“
+
+Pipeline
+
+â†“
+
+Repository
+
+â†“
+
+Database
+
+â†“
+
+Caller
+
+No alternative execution paths.
+
+----------------------------------
+FINAL APPLICATION AUDIT
+----------------------------------
+
+Search the ENTIRE Android project.
+
+Audit every major subsystem:
+
+Runtime
+
+Database
+
+Repository
+
+Import
+
+Export
+
+Recognition
+
+Captioning
+
+Prompt generation
+
+Knowledge Packs
+
+Semantic Search
+
+Embeddings
+
+Caching
+
+Workers
+
+Settings
+
+Startup
+
+File operations
+
+Search
+
+Indexing
+
+Thumbnail management
+
+Validation
+
+AI execution
+
+Module ownership
+
+For each subsystem:
+
+â€¢ verify there is one canonical implementation
+
+â€¢ remove duplicate business logic
+
+â€¢ remove obsolete implementations
+
+â€¢ redirect all callers
+
+----------------------------------
+BUILD
+----------------------------------
+
+Perform static diagnostics first.
+
+Fix compile issues before building.
+
+Run assembleDebug exactly once at the very end.
+
+----------------------------------
+FINAL REPORT
+----------------------------------
+
+Report:
+
+â€¢ every modified file
+
+â€¢ every new file
+
+â€¢ every deleted file
+
+â€¢ every duplicate removed
+
+â€¢ every subsystem consolidated
+
+â€¢ final runtime architecture
+
+â€¢ final AI architecture
+
+â€¢ final startup architecture
+
+â€¢ final execution chain
+
+â€¢ final ownership map
+
+â€¢ final database version
+
+â€¢ final build result
+
+Confirm:
+
+BUILD SUCCESSFUL
+
+Do not begin Module 8 work.
+Module 8 remains completely untouched.

@@ -3,14 +3,23 @@ package com.ailm.android.workers
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.ailm.android.runtime.StandaloneRuntime
+import com.ailm.android.startup.AppBootstrap
 
 class InitialSetupWorker(
     appContext: Context,
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        // Battery-aware and resumable execution is delegated to WorkManager constraints and local runtime checkpoints.
-        return Result.success()
+        return runCatching {
+            AppBootstrap.initializeRuntime(applicationContext)
+            StandaloneRuntime.detectAiHardwareProfile()
+            StandaloneRuntime.validateLocalAiInfrastructure()
+            StandaloneRuntime.resumeAiQueue()
+            Result.success()
+        }.getOrElse {
+            Result.retry()
+        }
     }
 }
 
@@ -19,7 +28,12 @@ class ModelDownloadWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        // Download/pause/resume/retry/checksum are delegated to the standalone Android runtime.
-        return Result.success()
+        return runCatching {
+            AppBootstrap.initializeRuntime(applicationContext)
+            StandaloneRuntime.resumeAiQueue()
+            Result.success()
+        }.getOrElse {
+            Result.retry()
+        }
     }
 }
