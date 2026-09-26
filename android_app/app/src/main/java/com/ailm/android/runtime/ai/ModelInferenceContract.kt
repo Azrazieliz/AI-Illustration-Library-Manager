@@ -132,6 +132,9 @@ internal data class ModelInferenceContract(
         }
 
         fun validationIssues(model: AiModelDescriptor): List<AiValidationIssue> {
+            if (AiRuntimeType.fromRaw(model.requiredRuntime) == AiRuntimeType.LLAMA_CPP) {
+                return emptyList()
+            }
             if (model.supportedTasks.isEmpty()) {
                 return listOf(
                     AiValidationIssue(
