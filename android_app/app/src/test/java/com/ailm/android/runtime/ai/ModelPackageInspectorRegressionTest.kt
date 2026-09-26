@@ -375,6 +375,105 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
+    fun `role-aware contract resolver maps Buffalo tasks to their own artifacts`() {
+        val inspector = ModelPackageInspector()
+        val roles = setOf("detector", "landmark_2d", "landmark_3d", "gender_age", "face_embedding")
+
+        assertEquals("detector", inspector.resolveContractArtifactRole("face_detection", emptyMap(), roles))
+        assertEquals("face_embedding", inspector.resolveContractArtifactRole("face_embedding", emptyMap(), roles))
+        assertEquals("landmark_2d", inspector.resolveContractArtifactRole("landmark_2d", emptyMap(), roles))
+        assertEquals("landmark_3d", inspector.resolveContractArtifactRole("landmark_3d", emptyMap(), roles))
+        assertEquals("gender_age", inspector.resolveContractArtifactRole("gender_age", emptyMap(), roles))
+    }
+
+    @Test
+    fun `explicit artifact role takes precedence over task aliases`() {
+        val inspector = ModelPackageInspector()
+        val roles = setOf("detector", "face_embedding")
+        val contract = mapOf<String, Any>("artifact_role" to "face_embedding")
+
+        assertEquals(
+            "face_embedding",
+            inspector.resolveContractArtifactRole("face_detection", contract, roles),
+        )
+    }
+
+    @Test
+    fun `role-aware contract resolver maps every Florence stage role without package-primary fallback`() {
+        val inspector = ModelPackageInspector()
+        val roles = setOf("vision_encoder", "embed_tokens", "encoder", "decoder", "decoder_with_past")
+
+        roles.forEach { role ->
+            assertEquals(role, inspector.resolveContractArtifactRole(role, emptyMap(), roles))
+        }
+    }
+
+    @Test
+    fun `single-artifact tasks without a role keep package-primary validation behavior`() {
+        val inspector = ModelPackageInspector()
+        assertNull(
+            inspector.resolveContractArtifactRole(
+                "classification",
+                emptyMap(),
+                emptySet(),
+            ),
+        )
+    }
+
+    @Test
+    fun `real Buffalo package has no cross-role tensor binding false positives`() {
+        val inspector = ModelPackageInspector()
+        val zip = File("../../AsterionCore/buffalo_l.zip")
+        assumeTrue("Real Buffalo-L ZIP must exist", zip.exists())
+
+        val result = inspector.inspect(zip, File("build/buffalo-role-aware-extraction"))
+        val crossRoleIssues = result.issues.filter {
+            it.code in setOf("tensor_input_missing", "tensor_output_missing")
+        }
+        assertFalse(
+            "Buffalo role contracts must validate against their own ONNX artifacts: $crossRoleIssues",
+            crossRoleIssues.any {
+                it.message.contains("face_embedding") ||
+                    it.message.contains("landmark_2d") ||
+                    it.message.contains("landmark_3d") ||
+                    it.message.contains("gender_age") ||
+                    it.message.contains("face_detection")
+            },
+        )
+
+        val contracts = result.metadata["inference_contracts"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        assertEquals("detector", (contracts["face_detection"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("face_embedding", (contracts["face_embedding"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("landmark_2d", (contracts["landmark_2d"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("landmark_3d", (contracts["landmark_3d"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("gender_age", (contracts["gender_age"] as? Map<*, *>)?.get("artifact_role"))
+    }
+
+    @Test
+    fun `real Florence package keeps role-specific contracts isolated from the primary vision graph`() {
+        val inspector = ModelPackageInspector()
+        val zip = File("../../AsterionCore/Florence-2-Base.zip")
+        assumeTrue("Real Florence ZIP must exist", zip.exists())
+
+        val result = inspector.inspect(zip, File("build/florence-role-aware-extraction"))
+        val contracts = result.metadata["inference_contracts"] as? Map<*, *> ?: emptyMap<Any, Any>()
+
+        assertEquals("vision_encoder", (contracts["vision_encoder"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("embed_tokens", (contracts["embed_tokens"] as? Map<*, *>)?.get("artifact_role"))
+        assertEquals("encoder", (contracts["encoder"] as? Map<*, *>)?.get("artifact_role"))
+
+        val bindingIssues = result.issues.filter {
+            it.code in setOf("tensor_input_missing", "tensor_output_missing")
+        }
+        assertFalse(
+            "Florence stage contracts must not be checked against an unrelated package-primary graph: $bindingIssues",
+            bindingIssues.any {
+                it.message.contains("embed_tokens") || it.message.contains("encoder")
+            },
+        )
+    }
+
+    @Test
     fun `ZIP package is properly extracted and inspected`() {
         withTempDir { root ->
             val packageDir = File(root, "package")
