@@ -38,7 +38,7 @@ internal data class ModelInferenceContract(
             require(inputs.isNotEmpty()) { "Inference contract for '$taskType' must define inputs" }
             val outputs = raw["outputs"].asMapList().map(TensorOutputContract::parse)
             require(outputs.isNotEmpty()) { "Inference contract for '$taskType' must define outputs" }
-            if (taskType == "face_embedding") {
+            if (taskType in setOf("face_embedding", "face_feature_extraction")) {
                 require(inputs.size == 1 && inputs.single().name == "input.1" && inputs.single().dataType == "float32") {
                     "ArcFace face_embedding requires one float32 input named input.1"
                 }
@@ -505,7 +505,7 @@ internal class ModelInputPreprocessor(
         if (taskType == "face_detection") {
             return prepareScrfdImage(input, preprocessing, payload)
         }
-        if (taskType == "face_embedding") {
+        if (taskType in setOf("face_embedding", "face_feature_extraction")) {
             return prepareArcFaceImage(input, preprocessing, payload)
         }
         if (taskType == "landmark_2d" || taskType == "landmark_3d" || taskType == "gender_age") {
