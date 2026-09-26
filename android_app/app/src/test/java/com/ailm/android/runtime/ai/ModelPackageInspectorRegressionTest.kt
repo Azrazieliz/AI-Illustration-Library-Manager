@@ -4,6 +4,7 @@ import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import java.util.zip.ZipFile
 
 /**
  * Regression tests for ModelPackageInspector fixes:
@@ -351,6 +352,80 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
+    fun `wrong Buffalo role assignment fails against the assigned graph instead of another package artifact`() {
+        withExtractedRealPackage("buffalo_l.zip") { root ->
+            File(root, "metadata.json").writeText(
+                """
+                {
+                  "task": "face_detection",
+                  "model_artifacts": [
+                    {"path": "det_10g.onnx", "role": "face_embedding"},
+                    {"path": "w600k_r50.onnx", "role": "detector"},
+                    {"path": "2d106det.onnx", "role": "landmark_2d"},
+                    {"path": "1k3d68.onnx", "role": "landmark_3d"},
+                    {"path": "genderage.onnx", "role": "gender_age"}
+                  ]
+                }
+                """.trimIndent(),
+            )
+
+            val result = ModelPackageInspector().inspect(root, File(root, "inspection-output"))
+            assertFalse("Incorrect role assignment must make package inspection invalid", result.valid)
+            assertTrue(
+                "face_embedding output 683 must be checked against the artifact assigned to face_embedding",
+                result.issues.any {
+                    it.code == "tensor_output_missing" &&
+                        it.message.contains("face_embedding") &&
+                        it.message.contains("683") &&
+                        it.message.contains("artifact role 'face_embedding'")
+                },
+            )
+        }
+    }
+
+    @Test
+    fun `genuinely missing tensor in an explicitly assigned role remains a blocking inspection error`() {
+        withExtractedRealPackage("buffalo_l.zip") { root ->
+            File(root, "metadata.json").writeText(
+                """
+                {
+                  "task": "classification",
+                  "model_artifacts": [
+                    {"path": "det_10g.onnx", "role": "detector"},
+                    {"path": "w600k_r50.onnx", "role": "face_embedding"},
+                    {"path": "2d106det.onnx", "role": "landmark_2d"},
+                    {"path": "1k3d68.onnx", "role": "landmark_3d"},
+                    {"path": "genderage.onnx", "role": "gender_age"}
+                  ],
+                  "inference_contracts": {
+                    "classification": {
+                      "artifact_role": "detector",
+                      "tokenizer": {"type": "none"},
+                      "image_preprocessing": {"enabled": true, "width": 640, "height": 640, "channels": 3, "color_space": "rgb", "resize_mode": "stretch", "scale": 1.0, "mean": [0.0], "std": [1.0]},
+                      "inputs": [{"name": "input.1", "source": "image", "data_type": "float32", "layout": "nchw", "shape": [-1, 3, 640, 640]}],
+                      "outputs": [{"name": "definitely_missing_output", "index": 0, "data_type": "float32", "shape": [1, 1]}],
+                      "output_decoder": {"type": "classification", "output_name": "definitely_missing_output", "labels": ["x"]},
+                      "confidence_scoring": {"type": "identity", "threshold": 0.0}
+                    }
+                  }
+                }
+                """.trimIndent(),
+            )
+
+            val result = ModelPackageInspector().inspect(root, File(root, "inspection-output"))
+            assertFalse("A genuinely missing output tensor must remain blocking", result.valid)
+            assertTrue(
+                result.issues.any {
+                    it.code == "tensor_output_missing" &&
+                        it.message.contains("classification") &&
+                        it.message.contains("definitely_missing_output") &&
+                        it.message.contains("artifact role 'detector'")
+                },
+            )
+        }
+    }
+
+    @Test
     fun `Qwen GGUF zip imports by descriptor metadata and keeps llama_cpp backend metadata`() {
         val inspector = ModelPackageInspector()
         val zip = File("../../AsterionCore/qwen2.5-coder-3b-instruct-q4_k_m.zip")
@@ -372,6 +447,27 @@ class ModelPackageInspectorRegressionTest {
         assertTrue("Qwen-VL package should be recognized as LLAMA_CPP runtime", result.runtime == "llama_cpp")
         assertTrue("Qwen-VL package should resolve multimodal task metadata through vision projector relation", result.metadata["llama_cpp"] as? Map<*, *> != null)
         assertTrue("Qwen-VL package should preserve multimodal metadata signal", (result.metadata["llama_cpp"] as? Map<*, *>)?.get("multimodal") == true)
+    }
+
+    private fun withExtractedRealPackage(zipName: String, block: (File) -> Unit) {
+        val zip = File("../../AsterionCore/$zipName")
+        assumeTrue("Real package ZIP must exist: $zipName", zip.isFile)
+        withTempDir { root ->
+            val destination = File(root, "package")
+            destination.mkdirs()
+            ZipFile(zip).use { archive ->
+                archive.entries().asSequence().forEach { entry ->
+                    if (entry.isDirectory) return@forEach
+                    val target = File(destination, entry.name)
+                    require(target.canonicalPath.startsWith(destination.canonicalPath + File.separator)) {
+                        "Archive contains an invalid path"
+                    }
+                    target.parentFile?.mkdirs()
+                    archive.getInputStream(entry).use { input -> target.outputStream().use(input::copyTo) }
+                }
+            }
+            block(destination)
+        }
     }
 
     @Test
