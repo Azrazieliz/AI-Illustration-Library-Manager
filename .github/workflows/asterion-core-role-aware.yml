@@ -19,6 +19,8 @@ jobs:
           distribution: temurin
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v4
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
       - name: Compile debug unit tests
         run: ./gradlew :app:compileDebugUnitTestKotlin --no-daemon --max-workers=1 --console=plain
       - name: Model package inspector regression tests
