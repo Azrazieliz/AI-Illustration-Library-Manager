@@ -17,6 +17,7 @@ internal data class ModelPackageInspection(
     val metadata: Map<String, Any>,
     val files: List<String>,
     val issues: List<ModelPackageIssue>,
+    val artifactBindingsByRole: Map<String, ModelArtifactBindings> = emptyMap(),
 ) {
     companion object {
         private val NON_BLOCKING_IMPORT_ISSUES = setOf(
@@ -74,15 +75,31 @@ internal class ModelPackageInspector {
         addPaddleOcrReadiness(normalizedMetadata, packageRoot, files, issues)
         val artifact = resolveArtifact(source, packageRoot, files, normalizedMetadata, issues)
         val runtime = artifact?.let(::runtimeFor).orEmpty()
-        val bindings = artifact?.takeIf { runtime.isNotBlank() && runtime != AiRuntimeType.LLAMA_CPP.raw }?.let { model ->
-            runCatching { ModelArtifactInspector.inspect(model, runtime) }.getOrElse { error ->
+        val executableArtifactsByRole = resolveExecutableArtifactsByRole(packageRoot, files, normalizedMetadata)
+        val bindingCache = linkedMapOf<String, ModelArtifactBindings?>()
+        fun bindingsFor(model: File): ModelArtifactBindings? {
+            val modelRuntime = runtimeFor(model)
+            if (modelRuntime.isBlank() || modelRuntime == AiRuntimeType.LLAMA_CPP.raw) {
+                return null
+            }
+            val key = model.absolutePath
+            if (bindingCache.containsKey(key)) {
+                return bindingCache[key]
+            }
+            val resolved = runCatching { ModelArtifactInspector.inspect(model, modelRuntime) }.getOrElse { error ->
                 issues += ModelPackageIssue(
                     "tensor_metadata_unreadable",
                     "Unable to inspect ${model.name}: ${error.message ?: error.javaClass.simpleName}",
                 )
                 null
             }
+            bindingCache[key] = resolved
+            return resolved
         }
+        val bindings = artifact?.let(::bindingsFor)
+        val artifactBindingsByRole = executableArtifactsByRole.mapNotNull { (role, model) ->
+            bindingsFor(model)?.let { role to it }
+        }.toMap()
         val declaredCapabilities = discoverValues(normalizedMetadata, CAPABILITY_KEYS)
         val declaredTasks = (discoverValues(normalizedMetadata, TASK_KEYS) +
             normalizedMetadata["task"].asDeclaredValues() +
@@ -118,7 +135,9 @@ internal class ModelPackageInspector {
             bindings?.let { synthesizeStandardClassificationContract(this, declaredExecutionTasks, it, filesByName, issues) }
             bindings?.let { synthesizeNomicVisionEmbeddingContract(this, declaredExecutionTasks, it, filesByName, issues) }
             bindings?.let { synthesizeNomicTextEmbeddingContract(this, declaredExecutionTasks, it, filesByName, issues) }
-            bindings?.let { synthesizeScrfdDetectionContract(this, declaredExecutionTasks, it, artifact, issues) }
+            val detectorArtifact = executableArtifactsByRole["detector"] ?: executableArtifactsByRole["face_detector"] ?: artifact
+            val detectorBindings = artifactBindingsByRole["detector"] ?: artifactBindingsByRole["face_detector"] ?: bindings
+            detectorBindings?.let { synthesizeScrfdDetectionContract(this, declaredExecutionTasks, it, detectorArtifact, issues) }
             synthesizeBuffaloEmbeddingContract(this, files, issues)
             synthesizeBuffaloLandmark2dContract(this, files, issues)
             synthesizeBuffaloLandmark3dContract(this, files, issues)
@@ -144,7 +163,9 @@ internal class ModelPackageInspector {
             }
             addTokenizerAssets(filesByName, this, issues)
             addLabelAssets(filesByName, this)
-            bindings?.let { addTensorBindings(this, it, issues) }
+            if (bindings != null || artifactBindingsByRole.isNotEmpty()) {
+                addTensorBindings(this, bindings, artifactBindingsByRole, issues)
+            }
             addImagePreprocessing(this, bindings, issues)
             if (runtime == AiRuntimeType.LLAMA_CPP.raw) {
                 synthesizeQwenGgufMetadata(this, artifact)
@@ -222,6 +243,7 @@ internal class ModelPackageInspector {
             metadata = resolvedMetadata,
             files = relativeFiles,
             issues = issues,
+            artifactBindingsByRole = artifactBindingsByRole,
         )
     }
 
@@ -240,6 +262,7 @@ internal class ModelPackageInspector {
         val imageInput = bindings.inputs.single()
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "face_detection" to mapOf(
+                "artifact_role" to "detector",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf("enabled" to true, "width" to 640, "height" to 640, "channels" to 3, "color_space" to "rgb", "resize_mode" to "center_crop", "scale" to (1.0 / 128.0), "mean" to listOf(127.5), "std" to listOf(128.0)),
                 "inputs" to listOf(mapOf("name" to imageInput.name, "source" to "image", "data_type" to imageInput.dataType, "layout" to "nchw", "shape" to imageInput.shape)),
@@ -297,6 +320,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "face_embedding" to mapOf(
+                "artifact_role" to "face_embedding",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -373,6 +397,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "landmark_2d" to mapOf(
+                "artifact_role" to "landmark_2d",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -429,6 +454,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "landmark_3d" to mapOf(
+                "artifact_role" to "landmark_3d",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -483,6 +509,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "gender_age" to mapOf(
+                "artifact_role" to "gender_age",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -580,6 +607,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "vision_encoder" to mapOf(
+                "artifact_role" to "vision_encoder",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -598,6 +626,7 @@ internal class ModelPackageInspector {
                 "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
             ),
             "embed_tokens" to mapOf(
+                "artifact_role" to "embed_tokens",
                 "tokenizer" to mapOf("type" to "none"),
                 "inputs" to listOf(mapOf("name" to "input_ids", "source" to "numeric", "data_type" to "int64", "layout" to "sequence", "shape" to listOf(-1, -1), "payload_key" to "input_ids")),
                 "outputs" to listOf(mapOf("name" to "inputs_embeds", "index" to 0, "data_type" to "float32", "shape" to listOf(-1, -1, 768))),
@@ -605,6 +634,7 @@ internal class ModelPackageInspector {
                 "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
             ),
             "encoder" to mapOf(
+                "artifact_role" to "encoder",
                 "tokenizer" to mapOf("type" to "none"),
                 "inputs" to listOf(
                     mapOf("name" to "attention_mask", "source" to "numeric", "data_type" to "int64", "layout" to "sequence", "shape" to listOf(-1, -1), "payload_key" to "attention_mask"),
@@ -940,6 +970,27 @@ internal class ModelPackageInspector {
             "PaddleOCR dict.txt has $entryCount entries for 18385 recognizer classes; blank and special-token offsets are not established by this package.",
         )
     }
+
+    private fun resolveExecutableArtifactsByRole(
+        packageRoot: File,
+        files: List<File>,
+        metadata: Map<String, Any>,
+    ): Map<String, File> = metadata["model_artifacts"].asMapList()
+        .mapNotNull { entry ->
+            val role = entry["role"]?.toString()?.trim()?.takeIf(String::isNotBlank)?.let(::normalizeCapability)
+            val path = entry["path"]?.toString()?.trim()?.takeIf(String::isNotBlank)
+            if (role == null || path == null) {
+                return@mapNotNull null
+            }
+            val artifact = files.firstOrNull { file ->
+                file.relativeTo(packageRoot).invariantSeparatorsPath == path || file.name == path
+            } ?: return@mapNotNull null
+            if (runtimeFor(artifact).isBlank()) {
+                return@mapNotNull null
+            }
+            role to artifact
+        }
+        .toMap()
 
     private fun resolveArtifact(
         source: File,
@@ -1512,14 +1563,31 @@ internal class ModelPackageInspector {
 
     private fun addTensorBindings(
         metadata: MutableMap<String, Any>,
-        bindings: ModelArtifactBindings,
+        defaultBindings: ModelArtifactBindings?,
+        bindingsByRole: Map<String, ModelArtifactBindings>,
         issues: MutableList<ModelPackageIssue>,
     ) {
         val contracts = metadata[INFERENCE_CONTRACTS_KEY].asStringMap() ?: return
-        val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
-        val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
         metadata[INFERENCE_CONTRACTS_KEY] = contracts.mapValues { (task, value) ->
             val contract = value.asStringMap()?.toMutableMap() ?: return@mapValues value
+            val artifactRole = contract["artifact_role"]
+                ?.toString()
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?.let(::normalizeCapability)
+            val bindings = artifactRole?.let(bindingsByRole::get) ?: defaultBindings
+            if (artifactRole != null && bindings == null) {
+                issues += ModelPackageIssue(
+                    "artifact_role_binding_missing",
+                    "$task declares artifact role '$artifactRole', but no executable artifact bindings were resolved for that role.",
+                )
+                return@mapValues contract
+            }
+            if (bindings == null) {
+                return@mapValues contract
+            }
+            val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
+            val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
             val inputs = contract["inputs"].asMapList().map { raw ->
                 val input = raw.toMutableMap()
                 val name = input["name"]?.toString()?.trim().orEmpty()
@@ -1529,7 +1597,8 @@ internal class ModelPackageInspector {
                     issues += ModelPackageIssue("tensor_input_name_missing", "$task is missing an input tensor name.")
                 } else if (tensor == null) {
                     if (source != "image") {
-                        issues += ModelPackageIssue("tensor_input_missing", "$task declares input '$name', which is absent from the model artifact.")
+                        val target = artifactRole?.let { "artifact role '$it'" } ?: "the model artifact"
+                        issues += ModelPackageIssue("tensor_input_missing", "$task declares input '$name', which is absent from $target.")
                     }
                 } else {
                     input.putIfAbsent("data_type", tensor.dataType)
@@ -1551,7 +1620,8 @@ internal class ModelPackageInspector {
                 if (name.isBlank()) {
                     issues += ModelPackageIssue("tensor_output_name_missing", "$task is missing an output tensor name or index.")
                 } else if (tensor == null) {
-                    issues += ModelPackageIssue("tensor_output_missing", "$task declares output '$name', which is absent from the model artifact.")
+                    val target = artifactRole?.let { "artifact role '$it'" } ?: "the model artifact"
+                    issues += ModelPackageIssue("tensor_output_missing", "$task declares output '$name', which is absent from $target.")
                 } else {
                     output.putIfAbsent("index", tensor.index)
                     output.putIfAbsent("data_type", tensor.dataType)
