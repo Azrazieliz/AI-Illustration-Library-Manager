@@ -4,6 +4,8 @@ import org.junit.Assert.*
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 /**
  * Regression tests for ModelPackageInspector fixes:
@@ -482,19 +484,23 @@ class ModelPackageInspectorRegressionTest {
             File(packageDir, "model.onnx").writeText("ONNX")
             File(packageDir, "metadata.json").writeText("""{"task": "classification"}""")
 
-            // Create ZIP file
+            // Create ZIP file without relying on a host-specific shell.
             val zipFile = File(root, "model.zip")
-            val srcDir = packageDir
-            ProcessBuilder("powershell", "-Command",
-                "Compress-Archive -Path '${srcDir}\\*' -DestinationPath '${zipFile.absolutePath}' -Force"
-            ).start().waitFor()
-
-            if (zipFile.exists()) {
-                val inspector = ModelPackageInspector()
-                val result = inspector.inspect(zipFile, File(root, "extracted"))
-
-                assertNotNull("Should extract and resolve ZIP package", result.artifact)
+            ZipOutputStream(zipFile.outputStream().buffered()).use { zip ->
+                packageDir.walkTopDown()
+                    .filter(File::isFile)
+                    .forEach { file ->
+                        val relative = file.relativeTo(packageDir).invariantSeparatorsPath
+                        zip.putNextEntry(ZipEntry(relative))
+                        file.inputStream().use { it.copyTo(zip) }
+                        zip.closeEntry()
+                    }
             }
+
+            val inspector = ModelPackageInspector()
+            val result = inspector.inspect(zipFile, File(root, "extracted"))
+
+            assertNotNull("Should extract and resolve ZIP package", result.artifact)
         }
     }
 }
