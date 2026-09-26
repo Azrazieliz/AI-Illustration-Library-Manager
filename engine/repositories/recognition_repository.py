@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -9,8 +10,14 @@ from sqlalchemy.orm import Session
 from engine.character_database.character_database_models import CharacterRecord, SeriesRecord
 from engine.database.models.character import Character
 from engine.database.models.image import Image
+from engine.database.models.recognition_history import RecognitionHistory
 from engine.database.models.series import Series
-from engine.recognition.recognition_models import RecognitionAssignment, RecognitionContext, RecognitionOutput
+from engine.recognition.recognition_models import (
+    RecognitionAssignment,
+    RecognitionCandidate,
+    RecognitionContext,
+    RecognitionOutput,
+)
 from engine.repositories.base_repository import BaseRepository
 from engine.repositories.review_repository import ReviewRepository
 
@@ -140,6 +147,45 @@ class RecognitionRepository(BaseRepository[Image]):
         character_names = [assignment.character_name] if assignment.character_name else []
         return self.apply_recognition(image=image, series_name=series_name, character_names=character_names, commit=commit)
 
+    def append_history(
+        self,
+        *,
+        image: Image,
+        output: RecognitionOutput,
+        assignment: RecognitionAssignment | None,
+        execution_time: float | None,
+    ) -> RecognitionHistory:
+        """Persist the source-backed result of one recognition attempt."""
+        if execution_time is not None and (not isfinite(execution_time) or execution_time < 0):
+            raise ValueError("Recognition execution time must be finite and non-negative")
+        if output.overall_confidence is not None and not isfinite(output.overall_confidence):
+            raise ValueError("Recognition confidence must be finite when provided")
+
+        record = RecognitionHistory(
+            image_uuid=image.uuid,
+            model=output.model_name,
+            model_version=output.model_version,
+            candidates=self._candidate_payloads(output),
+            selected_candidate=self._assignment_payload(assignment) if assignment is not None else None,
+            confidence=output.overall_confidence,
+            runtime=output.provider_name,
+            execution_time=execution_time,
+            review_uuid=None,
+        )
+        self.session.add(record)
+        return record
+
+    def list_history(self, *, image_id: int) -> list[RecognitionHistory]:
+        image = self.get_by_id(image_id)
+        if image is None:
+            return []
+        return list(
+            self.session.query(RecognitionHistory)
+            .filter(RecognitionHistory.image_uuid == image.uuid)
+            .order_by(RecognitionHistory.id)
+            .all()
+        )
+
     def _metadata_context(self, image: Image) -> dict[str, Any]:
         metadata = image.metadata_record
         if metadata is None:
@@ -191,6 +237,62 @@ class RecognitionRepository(BaseRepository[Image]):
         self.add(character)
         self.flush()
         return character
+
+    @staticmethod
+    def _candidate_payloads(output: RecognitionOutput) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if output.series is not None:
+            payloads.append(
+                {
+                    "kind": "series",
+                    "name": output.series.name,
+                    "confidence": output.series.confidence,
+                }
+            )
+        payloads.extend(
+            {
+                "kind": "character",
+                "name": candidate.name,
+                "confidence": candidate.confidence,
+                "rank": candidate.rank,
+                "occurrences": candidate.occurrences,
+            }
+            for candidate in output.character_candidates
+        )
+        payloads.extend(
+            {"kind": "matched_character", **RecognitionRepository._candidate_payload(candidate)}
+            for candidate in output.candidate_payloads
+        )
+        return payloads
+
+    @staticmethod
+    def _candidate_payload(candidate: RecognitionCandidate) -> dict[str, Any]:
+        return {
+            "character_id": candidate.character_id,
+            "series_id": candidate.series_id,
+            "character_name": candidate.character_name,
+            "series_name": candidate.series_name,
+            "confidence": candidate.confidence,
+            "normalized_label": candidate.normalized_label,
+            "matched_alias": candidate.matched_alias,
+            "source_labels": list(candidate.source_labels),
+            "score_breakdown": dict(candidate.score_breakdown),
+            "rank": candidate.rank,
+            "unknown": candidate.unknown,
+        }
+
+    @staticmethod
+    def _assignment_payload(assignment: RecognitionAssignment) -> dict[str, Any]:
+        return {
+            "character_id": assignment.character_id,
+            "series_id": assignment.series_id,
+            "character_name": assignment.character_name,
+            "series_name": assignment.series_name,
+            "confidence": assignment.confidence,
+            "auto_assigned": assignment.auto_assigned,
+            "needs_review": assignment.needs_review,
+            "reason": assignment.reason,
+        }
 
     @staticmethod
     def _extract_names(text: str) -> list[str]:

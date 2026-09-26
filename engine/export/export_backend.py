@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from threading import Lock
+from typing import TYPE_CHECKING
 
 from engine.export.export_models import ExportFormatType, ExportRecord
+
+if TYPE_CHECKING:
+    from engine.repositories.export_repository import ExportRepository
 
 
 class ExportBackend(ABC):
@@ -43,3 +47,23 @@ class InMemoryExportBackend(ExportBackend):
     def list_for_format(self, format_type: ExportFormatType) -> list[ExportRecord]:
         with self._lock:
             return list(self._records.get(format_type, {}).values())
+
+
+class RepositoryExportBackend(ExportBackend):
+    """SQLite-backed export backend used by the production composition root."""
+
+    def __init__(self, repository: ExportRepository | None = None) -> None:
+        if repository is None:
+            from engine.repositories.export_repository import ExportRepository
+
+            repository = ExportRepository()
+        self.repository = repository
+
+    def get(self, format_type: ExportFormatType, image_id: int) -> ExportRecord | None:
+        return self.repository.get_export_record(format_type=format_type, image_id=image_id)
+
+    def upsert(self, record: ExportRecord) -> bool:
+        return self.repository.upsert_export_record(record)
+
+    def list_for_format(self, format_type: ExportFormatType) -> list[ExportRecord]:
+        return self.repository.list_export_records(format_type=format_type)

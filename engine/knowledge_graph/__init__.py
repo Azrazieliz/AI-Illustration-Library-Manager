@@ -1,4 +1,5 @@
 from engine.knowledge_graph.knowledge_graph_backend import (
+    DurableKnowledgeGraphBackend,
     InMemoryKnowledgeGraphBackend,
     KnowledgeGraphBackend,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "GraphPath",
     "GraphTraversalResult",
     "InMemoryKnowledgeGraphBackend",
+    "DurableKnowledgeGraphBackend",
     "KnowledgeGraphBackend",
     "KnowledgeGraphBackendError",
     "KnowledgeGraphBatchCompleted",

@@ -3,16 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import delete, text
 
 from engine.collections.collection_models import CollectionRecord
 from engine.database.models.character import Character
+from engine.database.models.dataset import DatasetRecord
 from engine.database.models.embedding import Embedding
 from engine.database.models.hash import HashModel
 from engine.database.models.image import Image
 from engine.database.models.job import Job
 from engine.database.models.knowledge import Knowledge
 from engine.database.models.metadata import MetadataRecord
+from engine.database.models.maintenance_state import MaintenanceStateRecord
 from engine.database.models.review import Review
 from engine.database.models.series import Series
 from engine.database.models.tag import Tag
@@ -33,10 +35,13 @@ from engine.repositories.review_repository import ReviewRepository
 from engine.repositories.search_repository import SearchRepository
 from engine.repositories.tag_repository import TagRepository
 from engine.repositories.thumbnail_repository import ThumbnailRepository
+from engine.database.session import session_scope
 
 
 class MaintenanceRepository:
     """Read/write repository facade used by maintenance actions."""
+
+    _state_key = "default"
 
     def __init__(self) -> None:
         self.image_repository = ImageRepository()
@@ -54,6 +59,31 @@ class MaintenanceRepository:
         self.duplicate_repository = DuplicateRepository()
         self.tag_repository = TagRepository()
         self.session = self.image_repository.session
+
+    @classmethod
+    def reset_state(cls) -> None:
+        with session_scope() as session:
+            session.execute(delete(MaintenanceStateRecord))
+
+    def load_maintenance_state(self) -> dict[str, Any] | None:
+        record = (
+            self.session.query(MaintenanceStateRecord)
+            .filter(MaintenanceStateRecord.state_key == self._state_key)
+            .one_or_none()
+        )
+        return None if record is None else dict(record.state_payload or {})
+
+    def save_maintenance_state(self, payload: dict[str, Any]) -> None:
+        record = (
+            self.session.query(MaintenanceStateRecord)
+            .filter(MaintenanceStateRecord.state_key == self._state_key)
+            .one_or_none()
+        )
+        if record is None:
+            self.session.add(MaintenanceStateRecord(state_key=self._state_key, state_payload=payload))
+        else:
+            record.state_payload = payload
+        self.session.commit()
 
     def scan_images(self) -> list[Image]:
         return list(self.session.query(Image).order_by(Image.id).all())
@@ -96,13 +126,18 @@ class MaintenanceRepository:
     def scan_knowledge(self) -> list[Knowledge]:
         return list(self.session.query(Knowledge).order_by(Knowledge.id).all())
 
-    def scan_dataset(self) -> dict[int, list[str]]:
-        return {int(k): list(v) for k, v in self.dataset_repository._dataset_provenance.items()}
+    def scan_dataset(self) -> list[DatasetRecord]:
+        return self.dataset_repository.list_dataset_records()
 
     def scan_exports(self) -> dict[str, Any]:
+        manifests: dict[tuple[str, int], dict[str, Any]] = {}
+        provenance: dict[tuple[str, int], list[str]] = {}
+        for format_type, image_id, manifest, sources in self.export_repository.list_export_state():
+            manifests[(format_type, image_id)] = manifest
+            provenance[(format_type, image_id)] = sources
         return {
-            "manifests": {k: dict(v) for k, v in self.export_repository._manifest_store.items()},
-            "provenance": {k: list(v) for k, v in self.export_repository._provenance_store.items()},
+            "manifests": manifests,
+            "provenance": provenance,
             "formats": [item.value for item in ExportFormatType],
         }
 
@@ -115,7 +150,7 @@ class MaintenanceRepository:
     def repair_embeddings(self, image_id: int, vector_path: str) -> Embedding:
         existing = self.embedding_repository.get_by_image_id(image_id)
         if existing is not None:
-            existing.vector_path = vector_path
+            self.embedding_repository.update_embedding_record(existing, vector_path=vector_path)
             self.session.commit()
             return existing
         record = self.embedding_repository.create_embedding_record(

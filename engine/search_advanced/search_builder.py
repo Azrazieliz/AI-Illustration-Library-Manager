@@ -155,6 +155,26 @@ class AdvancedSearchBuilder:
         self.validate_query(query)
         return query
 
+    def query_to_payload(self, query: AdvancedSearchQuery) -> dict[str, Any]:
+        sort_by = query.sort_by.value if isinstance(query.sort_by, AdvancedSortBy) else str(query.sort_by)
+        sort_direction = query.sort_direction.value if isinstance(query.sort_direction, AdvancedSortDirection) else str(query.sort_direction)
+        return {
+            "query_text": query.query_text,
+            "page": query.page,
+            "page_size": query.page_size,
+            "sort_by": sort_by,
+            "sort_direction": sort_direction,
+            "filters": self._serialize_filters(query.filters),
+            "weights": asdict(query.weights),
+            "semantic_query": query.semantic_query,
+            "preview_mode": query.preview_mode,
+            "include_facets": query.include_facets,
+            "include_explanations": query.include_explanations,
+            "use_cache": query.use_cache,
+            "saved_search_id": query.saved_search_id,
+            "query_id": query.query_id,
+        }
+
     def validate_query(self, query: AdvancedSearchQuery) -> None:
         if query.page <= 0:
             raise AdvancedSearchQueryError("page must be greater than zero")

@@ -1,10 +1,23 @@
 package com.ailm.android.runtime.ai
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.ailm.android.runtime.LocalDatabase
+import com.ailm.android.workers.ModelDownloadWorker
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
 import java.util.UUID
 import org.json.JSONObject
@@ -14,11 +27,20 @@ class LocalAiManager(
     database: LocalDatabase,
     scope: CoroutineScope,
 ) {
+    private val runtimeScope = scope
     private val appContext = context.applicationContext
     private val repository = LocalAiRepository(database)
     private val settingsManager = LocalAiSettingsManager(repository)
     private val hardwareDetector = LocalAiHardwareDetector(appContext)
     private val backendManager = LocalAiBackendManager()
+    private val providerPackageManager = RuntimeProviderPackageManager(
+        context = appContext,
+        repository = repository,
+        backendManager = backendManager,
+        modelResolver = { modelId, version ->
+            if (version.isBlank()) repository.getModel(modelId) else repository.getModel(modelId, version)
+        },
+    )
     private val resourceManager = LocalAiResourceManager(
         hardwareProvider = { hardwareDetector.detectProfile() },
         settingsProvider = { settingsManager.getSettings() },
@@ -27,8 +49,10 @@ class LocalAiManager(
     private val runtimeGateway = DefaultLocalAiRuntimeGateway(
         validationService = validationService,
     )
+    private val modelRegistry = LocalAiModelRegistry(repository)
+    private val packageInspector = ModelPackageInspector()
     private val runtimeSelector = LocalAiRuntimeSelector(
-        settingsProvider = { settingsManager.getSettings() },
+        hardwareProvider = { hardwareDetector.detectProfile() },
     )
     private val backendSelector = LocalAiBackendSelector(backendManager)
     private val resultValidator = LocalAiResultValidator()
@@ -45,8 +69,21 @@ class LocalAiManager(
     private val memoryManager = LocalAiMemoryManager(
         hardwareProvider = { hardwareDetector.detectProfile() },
         settingsProvider = { settingsManager.getSettings() },
+        cacheBytesProvider = modelCache::totalBytes,
     )
-    private val modelLifetimeManager = LocalAiModelLifetimeManager(sessionCache)
+    private val executionPlanner = LocalAiExecutionPlanner(
+        modelRegistry = modelRegistry,
+        hardwareProvider = { hardwareDetector.detectProfile() },
+        memoryStateProvider = memoryManager::currentState,
+        concurrentTaskProvider = { repository.listTasks(limit = 200).count { it.status == "running" } },
+        availableBackendsProvider = backendManager::snapshotBackends,
+    )
+    private val modelLifetimeManager = LocalAiModelLifetimeManager(
+        sessionCache = sessionCache,
+        hardwareProvider = { hardwareDetector.detectProfile() },
+        memoryStateProvider = memoryManager::currentState,
+        scope = runtimeScope,
+    )
     private val runtimeHealthMonitor = LocalAiRuntimeHealthMonitor(repository)
     private val taskDispatcher = LocalAiTaskDispatcher(
         queue = executionQueue,
@@ -85,8 +122,8 @@ class LocalAiManager(
             if (initialized) {
                 return
             }
-            bootstrapBuiltinBackend()
-            bootstrapBuiltinSemanticModel()
+            bootstrapNativeBackends()
+            providerPackageManager.discover()
             bootstrapAssetCapabilities()
             settingsManager.getSettings()
             executionScheduler.start()
@@ -139,6 +176,8 @@ class LocalAiManager(
                 "execution_cache" to "LocalAiExecutionCache",
                 "session_cache" to "LocalAiSessionCache",
                 "runtime_health_monitor" to "LocalAiRuntimeHealthMonitor",
+                "model_registry" to "LocalAiModelRegistry",
+                "execution_planner" to "LocalAiExecutionPlanner",
             ),
         )
     }
@@ -197,6 +236,36 @@ class LocalAiManager(
         return backendManager.listBackends()
     }
 
+    fun discoverRuntimeProviderPackages(): List<Map<String, Any>> {
+        ensureInitialized()
+        return providerPackageManager.discover().map(RuntimeProviderPackageResult::toMap)
+    }
+
+    fun installRuntimeProviderPackage(packagePath: String): Map<String, Any> {
+        ensureInitialized()
+        return providerPackageManager.install(File(packagePath)).toMap()
+    }
+
+    fun updateRuntimeProviderPackage(packagePath: String): Map<String, Any> {
+        ensureInitialized()
+        return providerPackageManager.update(File(packagePath)).toMap()
+    }
+
+    fun removeRuntimeProviderPackage(providerId: String): Map<String, Any> {
+        ensureInitialized()
+        return providerPackageManager.remove(providerId).toMap()
+    }
+
+    fun setRuntimeProviderPackageEnabled(providerId: String, enabled: Boolean): Map<String, Any> {
+        ensureInitialized()
+        return providerPackageManager.setEnabled(providerId, enabled).toMap()
+    }
+
+    fun runtimeProviderPackageHealth(): List<Map<String, Any>> {
+        ensureInitialized()
+        return providerPackageManager.health()
+    }
+
     fun registerAvailableModel(payload: Map<String, Any>): Map<String, Any> {
         ensureInitialized()
         val descriptor = payloadToModelDescriptor(
@@ -209,6 +278,7 @@ class LocalAiManager(
         if (!validation.valid) {
             return mapOf(
                 "ok" to false,
+                "status" to "incompatible",
                 "message" to "Model descriptor is invalid",
                 "validation" to validation.toMap(),
             )
@@ -245,30 +315,34 @@ class LocalAiManager(
         }
 
         val sourceFile = File(sourcePath)
-        if (!sourceFile.exists() || !sourceFile.isFile) {
+        if (!sourceFile.exists()) {
             return mapOf(
                 "ok" to false,
-                "message" to "source_path does not exist: $sourcePath",
+                "message" to "Model package source does not exist: $sourcePath",
             )
         }
 
-        val installId = UUID.randomUUID().toString()
+        val installId = payload["install_id"]?.toString()?.trim().orEmpty()
+            .ifBlank { UUID.randomUUID().toString() }
         val now = System.currentTimeMillis()
+        val existingRun = repository.getInstallRun(installId)
         val expectedHash = payload["hash_sha256"]?.toString()?.trim().orEmpty().lowercase()
+        val installAction = payload["install_action"]?.toString()?.trim().orEmpty().ifBlank { "local_import" }
+        val sourceUri = payload["source_uri"]?.toString()?.trim().orEmpty().ifBlank { sourcePath }
 
         repository.upsertInstallRun(
             AiInstallRunRecord(
                 installId = installId,
                 modelId = modelId,
                 version = version,
-                action = "local_import",
-                sourceUri = sourcePath,
+                action = installAction,
+                sourceUri = sourceUri,
                 expectedHash = expectedHash,
                 actualHash = "",
                 status = "running",
                 details = payload,
-                retryCount = 0,
-                createdAtMs = now,
+                retryCount = existingRun?.retryCount ?: 0,
+                createdAtMs = existingRun?.createdAtMs ?: now,
                 startedAtMs = now,
                 finishedAtMs = 0L,
                 errorMessage = "",
@@ -276,17 +350,16 @@ class LocalAiManager(
         )
 
         return runCatching {
-            val sizeBytes = sourceFile.length()
-            val computedHash = sha256Hex(sourceFile)
-            if (expectedHash.isNotBlank() && !computedHash.equals(expectedHash, ignoreCase = true)) {
+            val packageHash = if (sourceFile.isFile) sha256Hex(sourceFile) else ""
+            if (expectedHash.isNotBlank() && sourceFile.isFile && !packageHash.equals(expectedHash, ignoreCase = true)) {
                 val details = mapOf(
                     "source_path" to sourcePath,
-                    "size_bytes" to sizeBytes,
+                    "size_bytes" to sourceFile.length(),
                 )
                 repository.updateInstallRun(
                     installId = installId,
                     status = "failed",
-                    actualHash = computedHash,
+                    actualHash = packageHash,
                     details = details,
                     errorMessage = "SHA-256 mismatch",
                     retryCount = 0,
@@ -298,49 +371,98 @@ class LocalAiManager(
                     "message" to "SHA-256 mismatch",
                     "install_id" to installId,
                     "expected_hash" to expectedHash,
-                    "actual_hash" to computedHash,
+                    "actual_hash" to packageHash,
                 )
             }
 
-            val descriptor = payloadToModelDescriptor(
-                payload = payload + mapOf(
-                    "version" to version,
-                    "size_bytes" to sizeBytes,
-                    "hash_sha256" to computedHash,
-                    "source_uri" to sourcePath,
-                ),
-                installed = true,
-                installState = "installed",
-                installPath = sourcePath,
-            )
-
-            val validation = validationService.validateModelDescriptor(descriptor)
-            if (!validation.valid) {
+            val extractionDirectory = File(appContext.filesDir, "model-packages/$installId")
+            val inspection = packageInspector.inspect(sourceFile, extractionDirectory)
+            if (!inspection.valid) {
+                val issueSummary = inspection.issues.joinToString("; ") { "${it.code}: ${it.message}" }
+                val errorMessage = "Model package inspection failed: $issueSummary"
                 repository.updateInstallRun(
                     installId = installId,
                     status = "failed",
-                    actualHash = computedHash,
-                    details = validation.toMap(),
-                    errorMessage = "Model descriptor validation failed",
+                    actualHash = packageHash,
+                    details = inspection.toMap(),
+                    errorMessage = errorMessage,
                     retryCount = 0,
                     startedAtMs = now,
                     finishedAtMs = System.currentTimeMillis(),
                 )
                 return mapOf(
                     "ok" to false,
-                    "message" to "Model descriptor validation failed",
+                    "status" to "rejected",
+                    "message" to "Model package cannot be executed from its distributed files",
+                    "inspection" to inspection.toMap(),
+                    "error" to errorMessage,
+                )
+            }
+
+            val primary = inspection.artifact ?: throw IllegalStateException("No executable artifact found in package")
+            val sizeBytes = primary.length()
+            val computedHash = if (sourceFile.isFile && sourceFile.extension.equals("zip", ignoreCase = true)) packageHash else sha256Hex(primary)
+            val inspectedMetadata = payload["metadata"].toStringMap() + inspection.metadata + mapOf(
+                "package_source_path" to sourcePath,
+                "package_hash_sha256" to packageHash,
+            )
+
+            // Record artifact path and dependencies so runtimes can load auxiliary files.
+            val artifactFiles = listOf(primary.absolutePath)
+            val dependencyPaths = emptyList<String>()
+
+            val descriptor = payloadToModelDescriptor(
+                payload = payload + mapOf(
+                    "version" to version,
+                    "size_bytes" to sizeBytes,
+                    "hash_sha256" to computedHash,
+                    "source_uri" to sourceUri,
+                    "source_path" to primary.absolutePath,
+                    "required_runtime" to inspection.runtime,
+                    "supported_runtimes" to listOf(inspection.runtime),
+                    "supported_tasks" to inspection.supportedTasks,
+                    "metadata" to inspectedMetadata + mapOf("artifact_files" to artifactFiles),
+                    "dependencies" to dependencyPaths,
+                ),
+                installed = true,
+                installState = "installed",
+                installPath = primary.absolutePath,
+            )
+
+            val validation = validationService.validateModelDescriptor(descriptor)
+            if (!validation.valid) {
+                val reason = validation.issues.joinToString(" | ") { issue ->
+                    "descriptor_validation_failed:${issue.code}:${issue.message}"
+                }
+                repository.updateInstallRun(
+                    installId = installId,
+                    status = "failed",
+                    actualHash = computedHash,
+                    details = validation.toMap(),
+                    errorMessage = reason.ifBlank { "Model descriptor validation failed" },
+                    retryCount = 0,
+                    startedAtMs = now,
+                    finishedAtMs = System.currentTimeMillis(),
+                )
+                return mapOf(
+                    "ok" to false,
+                    "status" to "rejected",
+                    "message" to reason.ifBlank { "Model package validation failed" },
                     "validation" to validation.toMap(),
                 )
             }
 
             repository.upsertModel(descriptor)
+            registerModelCapabilities(descriptor, inspection)
             repository.updateInstallRun(
                 installId = installId,
                 status = "succeeded",
                 actualHash = computedHash,
                 details = mapOf(
                     "source_path" to sourcePath,
+                    "artifact_path" to primary.absolutePath,
                     "size_bytes" to sizeBytes,
+                    "package" to inspection.toMap(),
                     "imported_at_ms" to System.currentTimeMillis(),
                 ),
                 errorMessage = "",
@@ -358,6 +480,7 @@ class LocalAiManager(
                     "payload" to mapOf("trigger" to "local_import"),
                 ),
             )
+            scheduleIdleBenchmark(descriptor)
 
             mapOf(
                 "ok" to true,
@@ -387,8 +510,16 @@ class LocalAiManager(
         ensureInitialized()
         val modelId = payload["model_id"]?.toString()?.trim().orEmpty()
         val version = payload["version"]?.toString()?.trim().orEmpty().ifBlank { "1.0.0" }
+        val sourceUri = payload["source_uri"]?.toString()?.trim().orEmpty()
+        val expectedHash = payload["hash_sha256"]?.toString()?.trim().orEmpty().lowercase()
         if (modelId.isBlank()) {
             return mapOf("ok" to false, "message" to "model_id is required")
+        }
+        if (Uri.parse(sourceUri).scheme?.lowercase() != "https") {
+            return mapOf("ok" to false, "message" to "source_uri must be a direct HTTPS model package URL")
+        }
+        if (!expectedHash.matches(Regex("[0-9a-f]{64}"))) {
+            return mapOf("ok" to false, "message" to "hash_sha256 must be the expected 64-character SHA-256 for the package")
         }
 
         val descriptor = payloadToModelDescriptor(
@@ -397,6 +528,15 @@ class LocalAiManager(
             installState = "queued",
             installPath = "",
         )
+        val validation = validationService.validateModelDescriptor(descriptor)
+        if (!validation.valid) {
+            return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "message" to "Model descriptor validation failed",
+                "validation" to validation.toMap(),
+            )
+        }
         repository.upsertModel(descriptor)
 
         val installId = UUID.randomUUID().toString()
@@ -406,9 +546,9 @@ class LocalAiManager(
                 installId = installId,
                 modelId = modelId,
                 version = version,
-                action = "download_registration",
-                sourceUri = payload["source_uri"]?.toString().orEmpty(),
-                expectedHash = descriptor.hashSha256,
+                action = "download",
+                sourceUri = sourceUri,
+                expectedHash = expectedHash,
                 actualHash = "",
                 status = "registered",
                 details = payload,
@@ -419,24 +559,107 @@ class LocalAiManager(
                 errorMessage = "",
             ),
         )
-
-        val task = enqueueTask(
-            payload = mapOf(
-                "task_type" to "download_registration",
-                "model_id" to modelId,
-                "version" to version,
-                "runtime_hint" to descriptor.requiredRuntime,
-                "priority" to ((payload["priority"] as? Number)?.toInt() ?: 5),
-                "payload" to payload,
-            ),
-        )
+        enqueueModelDownload(installId)
 
         return mapOf(
             "ok" to true,
             "install_id" to installId,
-            "task" to task,
+            "status" to "queued",
             "model" to descriptor.toMap(),
         )
+    }
+
+    private fun enqueueModelDownload(installId: String) {
+        val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build(),
+            )
+            .setInputData(workDataOf(ModelDownloadWorker.INSTALL_ID_KEY to installId))
+            .addTag("ailm_model_download")
+            .build()
+        WorkManager.getInstance(appContext).enqueueUniqueWork(
+            "ailm.model.download.$installId",
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
+    }
+
+    private fun downloadPackage(run: AiInstallRunRecord): File {
+        val sourceUri = Uri.parse(run.sourceUri)
+        require(sourceUri.scheme?.lowercase() == "https") { "Model downloads require an HTTPS source URI" }
+        val extension = sourceUri.lastPathSegment
+            ?.substringAfterLast('.', missingDelimiterValue = "")
+            ?.lowercase()
+            ?.takeIf { it.matches(Regex("[a-z0-9]{1,16}")) }
+            ?: throw IllegalArgumentException("Model download URL must identify a package file extension")
+        val downloadsDirectory = File(appContext.filesDir, "model-downloads").apply { mkdirs() }
+        val target = File(downloadsDirectory, "${run.installId}.$extension")
+        val temporary = File(downloadsDirectory, "${run.installId}.$extension.part")
+        temporary.delete()
+
+        val connection = (URL(run.sourceUri).openConnection() as? HttpURLConnection)
+            ?: throw IOException("Model download URL is not an HTTP connection")
+        try {
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 60_000
+            connection.requestMethod = "GET"
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                throw IOException("Model download failed with HTTP $responseCode")
+            }
+            connection.inputStream.use { input ->
+                temporary.outputStream().use { output -> input.copyTo(output) }
+            }
+            target.delete()
+            if (!temporary.renameTo(target)) {
+                throw IOException("Could not finalize downloaded model package")
+            }
+            return target
+        } finally {
+            temporary.delete()
+            connection.disconnect()
+        }
+    }
+
+    fun downloadRegisteredModel(installId: String): Map<String, Any> {
+        ensureInitialized()
+        val run = repository.getInstallRun(installId)
+            ?: return mapOf("ok" to false, "message" to "Model download run was not found", "retryable" to false)
+        if (run.action != "download") {
+            return mapOf("ok" to false, "message" to "Install run is not a model download", "retryable" to false)
+        }
+
+        return runCatching {
+            val downloaded = downloadPackage(run)
+            importLocalModel(
+                run.details + mapOf(
+                    "install_id" to run.installId,
+                    "install_action" to "download",
+                    "source_uri" to run.sourceUri,
+                    "source_path" to downloaded.absolutePath,
+                    "hash_sha256" to run.expectedHash,
+                ),
+            )
+        }.getOrElse { error ->
+            repository.updateInstallRun(
+                installId = run.installId,
+                status = "failed",
+                actualHash = "",
+                details = run.details + mapOf("source_uri" to run.sourceUri),
+                errorMessage = error.message ?: error.javaClass.simpleName,
+                retryCount = run.retryCount + 1,
+                startedAtMs = System.currentTimeMillis(),
+                finishedAtMs = System.currentTimeMillis(),
+            )
+            mapOf(
+                "ok" to false,
+                "message" to (error.message ?: error.javaClass.simpleName),
+                "retryable" to (error is IOException),
+            )
+        }
     }
 
     fun removeModel(payload: Map<String, Any>): Map<String, Any> {
@@ -567,10 +790,25 @@ class LocalAiManager(
 
     fun enqueueTask(payload: Map<String, Any>): Map<String, Any> {
         ensureInitialized()
-        val taskType = payload["task_type"]?.toString()?.trim().orEmpty().ifBlank { "custom" }
-        val modelId = payload["model_id"]?.toString()?.trim().orEmpty()
-        val version = payload["version"]?.toString()?.trim().orEmpty()
-        val runtimeHint = payload["runtime_hint"]?.toString()?.trim().orEmpty()
+        val taskType = AiTaskTypes.normalize(payload["task_type"]?.toString()?.trim().orEmpty().ifBlank { "custom" })
+        val requestedModelId = payload["model_id"]?.toString()?.trim().orEmpty()
+        val requestedVersion = payload["version"]?.toString()?.trim().orEmpty()
+        val executionPlan = if (AiTaskTypes.isExecutionTask(taskType)) {
+            executionPlanner.plan(taskType, requestedModelId, requestedVersion)
+        } else {
+            null
+        }
+        if (AiTaskTypes.isExecutionTask(taskType) && executionPlan?.model == null) {
+            return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "task_type" to taskType,
+                "message" to "No installed ONNX or TensorFlow Lite model is compatible with '$taskType'",
+            )
+        }
+        val modelId = executionPlan?.model?.modelId ?: requestedModelId
+        val version = executionPlan?.model?.version ?: requestedVersion
+        val runtimeHint = executionPlan?.runtimeCandidates?.firstOrNull().orEmpty()
         val priority = (payload["priority"] as? Number)?.toInt() ?: 0
         val maxRetries = (payload["max_retries"] as? Number)?.toInt() ?: settingsManager.getSettings().maxQueueRetries
         val timeoutMs = (payload["timeout_ms"] as? Number)?.toLong() ?: settingsManager.getSettings().defaultTaskTimeoutMs
@@ -579,7 +817,8 @@ class LocalAiManager(
             ?.mapNotNull { it?.toString()?.trim() }
             ?.filter { it.isNotBlank() }
             ?: emptyList()
-        val taskPayload = (payload["payload"] as? Map<*, *>)?.toStringKeyMap() ?: payload
+        val taskPayload = ((payload["payload"] as? Map<*, *>)?.toStringKeyMap() ?: payload) +
+            (executionPlan?.let { mapOf("execution_plan" to it.toMap()) } ?: emptyMap())
 
         val task = executionScheduler.enqueue(
             taskType = taskType,
@@ -617,7 +856,14 @@ class LocalAiManager(
         val timeoutMs = payload["timeout_ms"].toLongValue(defaultValue = DEFAULT_SEMANTIC_TIMEOUT_MS)
             .coerceIn(1_000L, 60_000L)
 
-        val model = bootstrapBuiltinSemanticModel()
+        val plan = executionPlanner.plan("similarity_search")
+        val model = plan.model ?: return mapOf(
+            "ok" to false,
+            "status" to "incompatible",
+            "matches" to emptyList<Map<String, Any>>(),
+            "result" to mapOf("matches" to emptyList<Map<String, Any>>()),
+            "message" to "No installed ONNX or TensorFlow Lite model is compatible with similarity_search",
+        )
         val taskPayload = linkedMapOf<String, Any>(
             "query" to payload["query"]?.toString().orEmpty(),
             "candidates" to rawCandidates,
@@ -634,7 +880,7 @@ class LocalAiManager(
             taskType = "similarity_search",
             modelId = model.modelId,
             version = model.version,
-            runtimeHint = BUILTIN_RUNTIME_ID,
+            runtimeHint = plan.runtimeCandidates.firstOrNull().orEmpty().ifBlank { model.requiredRuntime },
             priority = 20,
             maxRetries = 0,
             timeoutMs = timeoutMs,
@@ -701,9 +947,8 @@ class LocalAiManager(
             )
         }
 
-        val model = resolvePipelineModel(payload)
-        val runtimeHint = payload["runtime_hint"]?.toString()?.trim().orEmpty()
-            .ifBlank { model.requiredRuntime.ifBlank { BUILTIN_RUNTIME_ID } }
+        val requestedModelId = payload["model_id"]?.toString()?.trim().orEmpty()
+        val requestedVersion = payload["version"]?.toString()?.trim().orEmpty()
         val priority = payload["priority"].toIntValue(defaultValue = DEFAULT_PIPELINE_PRIORITY)
         val maxRetries = payload["max_retries"].toIntValue(defaultValue = 1).coerceAtLeast(0)
         val timeoutMs = payload["timeout_ms"].toLongValue(defaultValue = DEFAULT_PIPELINE_STAGE_TIMEOUT_MS)
@@ -715,8 +960,8 @@ class LocalAiManager(
             pipelineType = normalizedTaskType,
             payload = payload,
             stages = stages,
-            model = model,
-            runtimeHint = runtimeHint,
+            requestedModelId = requestedModelId,
+            requestedVersion = requestedVersion,
             priority = priority,
             maxRetries = maxRetries,
             timeoutMs = timeoutMs,
@@ -1026,6 +1271,18 @@ class LocalAiManager(
             val storageSupport = loadAssetJson("storage_support.json")
             if (storageSupport != null) {
                 val providers = storageSupport.optJSONArray("android_storage")
+                val implemented = storageSupport.optJSONArray("implemented_storage")
+                    ?.let { values ->
+                        buildSet {
+                            for (i in 0 until values.length()) {
+                                values.optString(i, "").trim().takeIf(String::isNotBlank)?.let(::add)
+                            }
+                        }
+                    }
+                    ?: emptySet()
+                val integration = storageSupport.optString("integration", "adapter_only")
+                    .trim()
+                    .ifBlank { "adapter_only" }
                 if (providers != null) {
                     for (i in 0 until providers.length()) {
                         val provider = providers.optString(i, "").trim()
@@ -1037,8 +1294,12 @@ class LocalAiManager(
                                 capabilityId = "asset.storage.$provider",
                                 providerId = "asset:storage_support",
                                 capabilityType = "storage_provider",
-                                status = "available",
-                                metadata = mapOf("value" to provider),
+                                status = if (provider in implemented) "available" else integration,
+                                metadata = mapOf(
+                                    "value" to provider,
+                                    "integration" to integration,
+                                    "implemented" to (provider in implemented),
+                                ),
                                 registeredAtMs = System.currentTimeMillis(),
                                 updatedAtMs = System.currentTimeMillis(),
                             ),
@@ -1051,50 +1312,19 @@ class LocalAiManager(
         }
     }
 
-    private fun bootstrapBuiltinBackend() {
-        val alreadyRegistered = backendManager.snapshotBackends().any {
-            it.runtimeId.equals(BUILTIN_RUNTIME_ID, ignoreCase = true)
+    private fun bootstrapNativeBackends() {
+        val resolver: (String, String) -> AiModelDescriptor? = { modelId, version ->
+            if (version.isBlank()) repository.getModel(modelId) else repository.getModel(modelId, version)
         }
-        if (!alreadyRegistered) {
-            backendManager.registerBackend(LocalHeuristicAiBackend(runtimeId = BUILTIN_RUNTIME_ID))
+        listOf(
+            OnnxRuntimeBackend(resolver, appContext),
+            TensorFlowLiteBackend(resolver, appContext),
+            LlamaCppBackend(resolver, appContext),
+        ).forEach { backend ->
+            if (backendManager.snapshotBackends().none { it.runtimeId.equals(backend.runtimeId, ignoreCase = true) }) {
+                backendManager.registerBackend(backend)
+            }
         }
-    }
-
-    private fun bootstrapBuiltinSemanticModel(): AiModelDescriptor {
-        val now = System.currentTimeMillis()
-        val existing = repository.getModel(BUILTIN_MODEL_ID, BUILTIN_MODEL_VERSION)
-        val modelRoot = File(appContext.filesDir, "local_ai_models").apply { mkdirs() }
-        val modelFile = File(modelRoot, "${BUILTIN_MODEL_ID}_${BUILTIN_MODEL_VERSION}.model")
-        if (!modelFile.exists()) {
-            modelFile.writeText("AILM local semantic model marker")
-        }
-
-        val descriptor = AiModelDescriptor(
-            modelId = BUILTIN_MODEL_ID,
-            version = BUILTIN_MODEL_VERSION,
-            displayName = "Local Semantic Baseline",
-            sizeBytes = modelFile.length(),
-            hashSha256 = sha256Hex(modelFile),
-            supportedTasks = AiTaskTypes.EXECUTION_TASKS.sorted(),
-            requiredRuntime = BUILTIN_RUNTIME_ID,
-            supportedRuntimes = listOf(BUILTIN_RUNTIME_ID, AiRuntimeType.CUSTOM.raw),
-            dependencies = emptyList(),
-            requiredHardware = emptyMap(),
-            compatibility = mapOf("local_only" to true),
-            metadata = mapOf(
-                "builtin" to true,
-                "provider" to "LocalHeuristicAiBackend",
-            ),
-            source = "builtin",
-            sourceUri = "asset://local_heuristic_backend",
-            installed = true,
-            installState = "installed",
-            installPath = modelFile.absolutePath,
-            createdAtMs = existing?.createdAtMs ?: now,
-            updatedAtMs = now,
-        )
-        repository.upsertModel(descriptor)
-        return descriptor
     }
 
     private fun executePipelineStages(
@@ -1102,8 +1332,8 @@ class LocalAiManager(
         pipelineType: String,
         payload: Map<String, Any>,
         stages: List<String>,
-        model: AiModelDescriptor,
-        runtimeHint: String,
+        requestedModelId: String,
+        requestedVersion: String,
         priority: Int,
         maxRetries: Int,
         timeoutMs: Long,
@@ -1112,8 +1342,21 @@ class LocalAiManager(
         val stageOutputs = linkedMapOf<String, Map<String, Any>>()
         val taskIds = mutableListOf<String>()
         var dependencyTaskId = ""
+        var finalStageModel: AiModelDescriptor? = null
 
         stages.forEachIndexed { index, stageType ->
+            val stagePlan = executionPlanner.plan(stageType, requestedModelId, requestedVersion)
+            val stageModel = stagePlan.model ?: return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "pipeline_id" to pipelineId,
+                "pipeline_type" to pipelineType,
+                "task_ids" to taskIds,
+                "stages" to stageRecords,
+                "message" to "No installed ONNX or TensorFlow Lite model is compatible with '$stageType'",
+            )
+            val stageRuntimeHint = stagePlan.runtimeCandidates.firstOrNull().orEmpty()
+                .ifBlank { stageModel.requiredRuntime }
             val stagePayload = buildStagePayload(
                 payload = payload,
                 pipelineId = pipelineId,
@@ -1125,9 +1368,9 @@ class LocalAiManager(
             )
             val task = executionScheduler.enqueue(
                 taskType = stageType,
-                modelId = model.modelId,
-                version = model.version,
-                runtimeHint = runtimeHint,
+                modelId = stageModel.modelId,
+                version = stageModel.version,
+                runtimeHint = stageRuntimeHint,
                 priority = priority,
                 maxRetries = maxRetries,
                 timeoutMs = timeoutMs,
@@ -1135,6 +1378,7 @@ class LocalAiManager(
                 payload = stagePayload,
             )
             taskIds += task.taskId
+            finalStageModel = stageModel
 
             val completedTask = awaitTaskTerminalState(task.taskId, timeoutMs + TASK_SETTLE_WINDOW_MS)
             if (completedTask == null) {
@@ -1157,6 +1401,9 @@ class LocalAiManager(
             stageRecords += mapOf(
                 "stage_type" to stageType,
                 "task_id" to completedTask.taskId,
+                "model_id" to stageModel.modelId,
+                "model_version" to stageModel.version,
+                "runtime_hint" to stageRuntimeHint,
                 "status" to completedTask.status,
                 "message" to completedTask.result["message"]?.toString().orEmpty().ifBlank {
                     completedTask.errorMessage.ifBlank { completedTask.status }
@@ -1185,7 +1432,7 @@ class LocalAiManager(
         val cacheReceipt = persistPipelineOutputCache(
             pipelineId = pipelineId,
             pipelineType = pipelineType,
-            model = model,
+            model = checkNotNull(finalStageModel),
             payload = payload,
             stages = stageRecords,
             finalStageOutput = finalStageOutput,
@@ -1318,24 +1565,6 @@ class LocalAiManager(
         return stagePayload
     }
 
-    private fun resolvePipelineModel(payload: Map<String, Any>): AiModelDescriptor {
-        val modelId = payload["model_id"]?.toString()?.trim().orEmpty()
-        val version = payload["version"]?.toString()?.trim().orEmpty()
-        if (modelId.isBlank()) {
-            return bootstrapBuiltinSemanticModel()
-        }
-
-        val resolved = if (version.isBlank()) {
-            repository.getModel(modelId)
-        } else {
-            repository.getModel(modelId, version)
-        }
-        if (resolved != null && resolved.installed) {
-            return resolved
-        }
-        return bootstrapBuiltinSemanticModel()
-    }
-
     private fun persistPipelineOutputCache(
         pipelineId: String,
         pipelineType: String,
@@ -1438,6 +1667,32 @@ class LocalAiManager(
             ?: emptyList()
     }
 
+    private fun registerModelCapabilities(
+        model: AiModelDescriptor,
+        inspection: ModelPackageInspection,
+    ) {
+        val now = System.currentTimeMillis()
+        inspection.capabilities.forEach { capability ->
+            repository.upsertCapability(
+                AiCapabilityDescriptor(
+                    capabilityId = "model.${model.modelId}.${model.version}.$capability",
+                    providerId = "model:${model.modelId}@${model.version}",
+                    capabilityType = "model_capability",
+                    status = "available",
+                    metadata = mapOf(
+                        "model_id" to model.modelId,
+                        "version" to model.version,
+                        "runtime" to model.requiredRuntime,
+                        "tasks" to model.supportedTasks,
+                        "package_files" to inspection.files,
+                    ),
+                    registeredAtMs = now,
+                    updatedAtMs = now,
+                ),
+            )
+        }
+    }
+
     private fun payloadToModelDescriptor(
         payload: Map<String, Any>,
         installed: Boolean,
@@ -1459,11 +1714,20 @@ class LocalAiManager(
             ?.mapNotNull { it?.toString()?.trim()?.takeIf { dependency -> dependency.isNotBlank() } }
             ?: emptyList()
 
+        val sizeBytes = (payload["size_bytes"] as? Number)?.toLong() ?: payload["size_bytes"]?.toString()?.toLongOrNull() ?: 0L
+        val metadata = modelRegistryMetadata(
+            payload = payload,
+            sizeBytes = sizeBytes,
+            requiredRuntime = requiredRuntime,
+            supportedRuntimes = supportedRuntimes,
+            installed = installed,
+            installState = installState,
+        )
         return AiModelDescriptor(
             modelId = modelId,
             version = version,
             displayName = payload["display_name"]?.toString()?.trim().orEmpty().ifBlank { modelId },
-            sizeBytes = (payload["size_bytes"] as? Number)?.toLong() ?: payload["size_bytes"]?.toString()?.toLongOrNull() ?: 0L,
+            sizeBytes = sizeBytes,
             hashSha256 = payload["hash_sha256"]?.toString()?.trim().orEmpty().lowercase(),
             supportedTasks = supportedTasks,
             requiredRuntime = requiredRuntime,
@@ -1471,7 +1735,7 @@ class LocalAiManager(
             dependencies = dependencies,
             requiredHardware = payload["required_hardware"].toStringMap(),
             compatibility = payload["compatibility"].toStringMap(),
-            metadata = payload["metadata"].toStringMap(),
+            metadata = metadata,
             source = payload["source"]?.toString()?.trim().orEmpty().ifBlank { "manual" },
             sourceUri = payload["source_uri"]?.toString()?.trim().orEmpty(),
             installed = installed,
@@ -1480,6 +1744,67 @@ class LocalAiManager(
             createdAtMs = (payload["created_at_ms"] as? Number)?.toLong() ?: now,
             updatedAtMs = now,
         )
+    }
+
+    private fun modelRegistryMetadata(
+        payload: Map<String, Any>,
+        sizeBytes: Long,
+        requiredRuntime: String,
+        supportedRuntimes: List<String>,
+        installed: Boolean,
+        installState: String,
+    ): Map<String, Any> {
+        val metadata = payload["metadata"].toStringMap().toMutableMap()
+        val sourceName = payload["source_path"]?.toString().orEmpty().ifBlank { payload["source_uri"]?.toString().orEmpty() }
+        val quantization = payload["quantization"]?.toString()?.trim().orEmpty()
+            .ifBlank { Regex("(?i)(q\\d+(?:_[a-z0-9]+)?|fp16|fp32|int8)").find(sourceName)?.value ?: "unknown" }
+        val profile = hardwareDetector.detectProfile()
+        metadata["quantization"] = quantization
+        metadata["context_length"] = payload["context_length"]?.toString()?.toIntOrNull() ?: 0
+        metadata["embedding_dimension"] = payload["embedding_dimension"]?.toString()?.toIntOrNull() ?: 0
+        metadata["memory_requirement_bytes"] = payload["memory_requirement_bytes"]?.toString()?.toLongOrNull()
+            ?: (sizeBytes * 2L).coerceAtLeast(16L * 1024L * 1024L)
+        metadata["preferred_backend"] = requiredRuntime.ifBlank { supportedRuntimes.firstOrNull().orEmpty() }
+        metadata["supported_backends"] = supportedRuntimes
+        metadata["current_status"] = if (installed) installState else "available"
+        metadata["hardware_compatibility"] = mapOf(
+            "npu_available" to profile.npuAvailable,
+            "gpu_available" to profile.gpuAvailable,
+            "cpu_cores" to profile.cpuCores,
+            "compatible" to true,
+        )
+        metadata.putIfAbsent("benchmark_results", mapOf("status" to "not_benchmarked"))
+        return metadata
+    }
+
+    private fun scheduleIdleBenchmark(model: AiModelDescriptor) {
+        runtimeScope.launch {
+            repeat(60) {
+                val busy = repository.listTasks(limit = 200).any { task -> task.status in setOf("pending", "running") }
+                if (!busy) {
+                    val refreshed = repository.getModel(model.modelId, model.version) ?: return@launch
+                    val benchmark = refreshed.metadata["benchmark_results"] as? Map<*, *>
+                    if (benchmark?.get("status") == "estimated_idle") return@launch
+                    val estimatedMemory = refreshed.metadata["memory_requirement_bytes"]?.toString()?.toLongOrNull()
+                        ?: refreshed.sizeBytes.coerceAtLeast(1L)
+                    val score = (100 - (estimatedMemory / (128L * 1024L * 1024L)).toInt()).coerceIn(1, 100)
+                    repository.upsertModel(
+                        refreshed.copy(
+                            metadata = refreshed.metadata + mapOf(
+                                "benchmark_results" to mapOf(
+                                    "status" to "estimated_idle",
+                                    "score" to score,
+                                    "measured_at_ms" to System.currentTimeMillis(),
+                                ),
+                            ),
+                            updatedAtMs = System.currentTimeMillis(),
+                        ),
+                    )
+                    return@launch
+                }
+                delay(1_000L)
+            }
+        }
     }
 
     private fun compareVersions(a: String, b: String): Int {
@@ -1596,9 +1921,6 @@ class LocalAiManager(
 
     companion object {
         private const val TAG = "AilmLocalAiManager"
-        private const val BUILTIN_RUNTIME_ID = "local_heuristic"
-        private const val BUILTIN_MODEL_ID = "ailm_local_semantic"
-        private const val BUILTIN_MODEL_VERSION = "1.0.0"
         private const val DEFAULT_SEMANTIC_TIMEOUT_MS = 7_500L
         private const val DEFAULT_PIPELINE_STAGE_TIMEOUT_MS = 12_000L
         private const val DEFAULT_PIPELINE_PRIORITY = 12

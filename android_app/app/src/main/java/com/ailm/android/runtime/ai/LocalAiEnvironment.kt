@@ -1,8 +1,12 @@
 package com.ailm.android.runtime.ai
 
 import android.app.ActivityManager
+import android.os.BatteryManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
+import android.os.PowerManager
 import android.os.StatFs
 
 class LocalAiHardwareDetector(
@@ -19,6 +23,12 @@ class LocalAiHardwareDetector(
         val abiList = Build.SUPPORTED_ABIS?.toList() ?: emptyList()
         val simd = detectSimdFeatures(abiList)
         val pm = context.packageManager
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val batteryStatus = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val charging = batteryStatus == BatteryManager.BATTERY_STATUS_CHARGING ||
+            batteryStatus == BatteryManager.BATTERY_STATUS_FULL
+        val thermalStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) powerManager.currentThermalStatus else 0
 
         return AiHardwareProfile(
             cpuCores = runtime.availableProcessors().coerceAtLeast(1),
@@ -35,6 +45,11 @@ class LocalAiHardwareDetector(
             threadCount = runtime.availableProcessors().coerceAtLeast(1),
             simdFeatures = simd,
             abiList = abiList,
+            batterySaverEnabled = powerManager.isPowerSaveMode,
+            charging = charging,
+            thermalStatus = thermalStatus,
+            deviceManufacturer = Build.MANUFACTURER.orEmpty(),
+            deviceModel = Build.MODEL.orEmpty(),
             capturedAtMs = now,
         )
     }

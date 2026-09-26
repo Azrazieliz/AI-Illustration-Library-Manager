@@ -1,0 +1,166 @@
+package com.ailm.android.runtime
+
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
+import org.json.JSONArray
+import org.json.JSONObject
+
+class AiWorkflowCoordinator(
+    private val database: LocalDatabase,
+    private val repository: LocalRepository,
+) {
+    fun applyImageWorkflow(imageId: Int, response: Map<String, Any>): Map<String, Any> {
+        if (!response["ok"].asBoolean()) return mapOf("accepted" to false, "reason" to "pipeline_failed")
+
+        val stages = collectStages(response)
+        val accepted = mutableListOf<String>()
+        val reviewReasons = mutableListOf<String>()
+        val profile = readProfile(imageId)
+        if (!profile.optBoolean("manual_override", false) && profile.optJSONObject("normalization")?.optBoolean("manual_override", false) != true) {
+            stages["ocr"]?.resultMap()?.optText("text")?.takeIf { it.isNotBlank() }?.let { profile.put("ocr", it) }
+            stages["captioning"]?.resultMap()?.optText("caption")?.takeIf { it.isNotBlank() }?.let { profile.put("caption", it) }
+            stages["embedding_generation"]?.get("embedding")?.let { profile.put("embedding", JSONArray(it as? List<*> ?: emptyList<Any>())) }
+            stages["nsfw_classification"]?.resultMap()?.let { nsfw -> profile.put("nsfw", JSONObject(nsfw)) }
+            profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
+            writeProfile(imageId, profile)
+        }
+
+        acceptRecognition(imageId, stages["character_recognition"], FusionDatabaseSchema.TABLE_CHARACTERS, "character_id", "canonical_name", FusionDatabaseSchema.TABLE_IMAGE_CHARACTERS, accepted, reviewReasons)
+        acceptRecognition(imageId, stages["series_recognition"], FusionDatabaseSchema.TABLE_SERIES, "series_code", "canonical_title", FusionDatabaseSchema.TABLE_IMAGE_SERIES, accepted, reviewReasons)
+
+        val tags = stages["tag_prediction"]?.resultMap()?.stringList("tags").orEmpty()
+        if (tags.isNotEmpty()) {
+            repository.setTags(imageId, tags)
+            tags.forEach { tag -> linkTag(imageId, tag) }
+            accepted += "tag_prediction"
+        }
+
+        if (reviewReasons.isNotEmpty()) queueReview(imageId, reviewReasons.joinToString("; "))
+        repository.rebuildSearchIndex()
+        return mapOf("accepted" to accepted.isNotEmpty(), "accepted_stages" to accepted.distinct(), "queued_for_review" to reviewReasons.isNotEmpty(), "review_reasons" to reviewReasons)
+    }
+
+    private fun acceptRecognition(
+        imageId: Int,
+        stage: Map<String, Any>?,
+        entityTable: String,
+        entityIdColumn: String,
+        entityNameColumn: String,
+        linkTable: String,
+        accepted: MutableList<String>,
+        reviewReasons: MutableList<String>,
+    ) {
+        val result = stage?.resultMap() ?: return
+        val candidate = result["candidates"].mapList().firstOrNull() ?: mapOf("name" to result.optText("top_match"), "confidence" to 0.0)
+        val name = candidate.optText("name").ifBlank { result.optText("top_match") }
+        val confidence = candidate["confidence"].asDouble()
+        if (name.isBlank() || confidence < ACCEPTANCE_THRESHOLD) {
+            if (name.isNotBlank()) reviewReasons += "Low-confidence recognition: $name (${formatConfidence(confidence)})"
+            return
+        }
+        val entityId = resolveEntityId(entityTable, entityIdColumn, entityNameColumn, name) ?: run {
+            reviewReasons += "Unresolved canonical recognition: $name"
+            return
+        }
+        val values = ContentValues().apply {
+            put("image_id", imageId)
+            put(entityIdColumn, entityId)
+            put("confidence", confidence)
+            put("source", "ai")
+            put("added_at_ms", System.currentTimeMillis())
+        }
+        database.writableDatabase.insertWithOnConflict(linkTable, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+        accepted += stage["task_type"]?.toString().orEmpty()
+    }
+
+    private fun linkTag(imageId: Int, rawTag: String) {
+        val tag = rawTag.trim()
+        if (tag.isBlank()) return
+        val tagId = resolveEntityId(FusionDatabaseSchema.TABLE_TAGS, "tag_id", "canonical_name", tag)
+            ?: "ai-tag:${tag.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')}".also { id ->
+                val values = ContentValues().apply {
+                    put("tag_id", id)
+                    put("canonical_name", tag)
+                    put("category", "ai")
+                    put("parent_tag_id", "")
+                    put("metadata_json", JSONObject(mapOf("source" to "ai", "confidence" to 0.8)).toString())
+                    put("created_at_ms", System.currentTimeMillis())
+                    put("updated_at_ms", System.currentTimeMillis())
+                }
+                database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_TAGS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+            }
+        val values = ContentValues().apply {
+            put("image_id", imageId)
+            put("tag_id", tagId)
+            put("confidence", 0.8)
+            put("source", "ai")
+            put("added_at_ms", System.currentTimeMillis())
+        }
+        database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_IMAGE_TAGS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
+    private fun resolveEntityId(table: String, idColumn: String, nameColumn: String, name: String): String? = database.readableDatabase.rawQuery(
+        "SELECT $idColumn FROM $table WHERE LOWER($nameColumn) = LOWER(?) LIMIT 1",
+        arrayOf(name.trim()),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty().ifBlank { null } else null }
+
+    private fun readProfile(imageId: Int): JSONObject = database.readableDatabase.rawQuery(
+        "SELECT metadata_json FROM ${FusionDatabaseSchema.TABLE_IMAGE_PROFILES} WHERE image_id = ? LIMIT 1",
+        arrayOf(imageId.toString()),
+    ).use { cursor -> if (cursor.moveToFirst()) runCatching { JSONObject(cursor.getString(0).orEmpty()) }.getOrElse { JSONObject() } else JSONObject() }
+
+    private fun writeProfile(imageId: Int, metadata: JSONObject) {
+        val values = ContentValues().apply {
+            put("image_id", imageId)
+            put("source_uri", repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty())
+            put("metadata_json", metadata.toString())
+            put("updated_at_ms", System.currentTimeMillis())
+        }
+        database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_IMAGE_PROFILES, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    private fun queueReview(imageId: Int, reason: String) {
+        val imageUri = repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty()
+        if (imageUri.isBlank()) return
+        val values = ContentValues().apply {
+            put("status", "pending")
+            put("reason", reason)
+            put("last_updated_ms", System.currentTimeMillis())
+        }
+        val changed = database.writableDatabase.update("review_items", values, "image_uri = ? AND status != 'approved'", arrayOf(imageUri))
+        if (changed == 0) {
+            values.put("image_uri", imageUri)
+            database.writableDatabase.insertWithOnConflict("review_items", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+        }
+    }
+
+    private fun collectStages(response: Map<String, Any>): Map<String, Map<String, Any>> {
+        val stages = linkedMapOf<String, Map<String, Any>>()
+        fun visit(value: Any?) {
+            when (value) {
+                is Map<*, *> -> {
+                    val map = value.entries.filter { it.key != null && it.value != null }.associate { it.key.toString() to it.value as Any }
+                    val type = map["task_type"]?.toString()?.trim().orEmpty()
+                    if (type.isNotBlank()) stages[type] = map
+                    map.values.forEach(::visit)
+                }
+                is List<*> -> value.forEach(::visit)
+            }
+        }
+        visit(response)
+        return stages
+    }
+
+    private fun Map<String, Any>.resultMap(): Map<String, Any> = (this["result"] as? Map<*, *>)?.entries
+        ?.filter { it.key != null && it.value != null }?.associate { it.key.toString() to it.value as Any } ?: this
+    private fun Map<String, Any>.optText(key: String): String = this[key]?.toString()?.trim().orEmpty()
+    private fun Map<String, Any>.stringList(key: String): List<String> = (this[key] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }.orEmpty()
+    private fun Any?.mapList(): List<Map<String, Any>> = (this as? List<*>)?.mapNotNull { item ->
+        (item as? Map<*, *>)?.entries?.filter { it.key != null && it.value != null }?.associate { it.key.toString() to it.value as Any }
+    }.orEmpty()
+    private fun Any?.asBoolean(): Boolean = this as? Boolean ?: this?.toString()?.equals("true", ignoreCase = true) == true
+    private fun Any?.asDouble(): Double = (this as? Number)?.toDouble() ?: this?.toString()?.toDoubleOrNull() ?: 0.0
+    private fun formatConfidence(value: Double): String = "%.2f".format(value.coerceIn(0.0, 1.0))
+
+    private companion object { const val ACCEPTANCE_THRESHOLD = 0.75 }
+}

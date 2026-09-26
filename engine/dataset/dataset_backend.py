@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from engine.dataset.dataset_models import DatasetEntry
+
+if TYPE_CHECKING:
+    from engine.repositories.dataset_repository import DatasetRepository
 
 
 class DatasetBackend(ABC):
@@ -30,3 +34,20 @@ class InMemoryDatasetBackend(DatasetBackend):
         created = entry.image_id not in self._entries
         self._entries[entry.image_id] = entry
         return created
+
+
+class PersistentDatasetBackend(DatasetBackend):
+    """Durable backend that stores dataset artifacts by immutable Fusion UUID."""
+
+    def __init__(self, repository: DatasetRepository | None = None) -> None:
+        if repository is None:
+            from engine.repositories.dataset_repository import DatasetRepository
+
+            repository = DatasetRepository()
+        self.repository = repository
+
+    def get(self, image_id: int) -> DatasetEntry | None:
+        return self.repository.get_dataset_entry(image_id)
+
+    def upsert(self, entry: DatasetEntry) -> bool:
+        return self.repository.upsert_dataset_entry(entry)

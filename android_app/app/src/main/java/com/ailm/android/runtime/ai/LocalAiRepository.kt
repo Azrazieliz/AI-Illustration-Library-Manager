@@ -165,6 +165,16 @@ class LocalAiRepository(
         return count > 0
     }
 
+    fun getInstallRun(installId: String): AiInstallRunRecord? {
+        val sql = "SELECT * FROM ${LocalAiSchema.TABLE_INSTALL_RUNS} WHERE install_id = ? LIMIT 1"
+        database.readableDatabase.rawQuery(sql, arrayOf(installId)).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                return null
+            }
+            return cursorToInstallRun(cursor)
+        }
+    }
+
     fun listInstallRuns(limit: Int = 100): List<AiInstallRunRecord> {
         val rows = mutableListOf<AiInstallRunRecord>()
         val sql = """
@@ -1045,6 +1055,11 @@ class LocalAiRepository(
             threadCount = map["thread_count"].toIntValue(defaultValue = 1),
             simdFeatures = (map["simd_features"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList(),
             abiList = (map["abi_list"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList(),
+            batterySaverEnabled = map["battery_saver_enabled"].toBooleanValue(defaultValue = false),
+            charging = map["charging"].toBooleanValue(defaultValue = false),
+            thermalStatus = map["thermal_status"].toIntValue(defaultValue = 0),
+            deviceManufacturer = map["device_manufacturer"]?.toString().orEmpty(),
+            deviceModel = map["device_model"]?.toString().orEmpty(),
             capturedAtMs = map["captured_at_ms"].toLongValue(defaultValue = System.currentTimeMillis()),
         )
     }

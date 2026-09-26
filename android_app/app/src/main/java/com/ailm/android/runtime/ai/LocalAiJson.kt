@@ -16,6 +16,9 @@ object LocalAiJson {
         if (raw.isBlank()) {
             return emptyMap()
         }
+        if (raw.trimStart().startsWith("{")) {
+            return decodeObjectFallback(raw)
+        }
         return runCatching { fromJsonObject(JSONObject(raw)) }
             .getOrElse { emptyMap() }
     }
@@ -87,12 +90,117 @@ object LocalAiJson {
 
     private fun fromJsonArray(array: JSONArray): List<Any> {
         val result = mutableListOf<Any>()
-        for (index in 0 until array.length()) {
+        for (index in 0 until safeArrayLength(array)) {
             val value = fromJsonValue(array.opt(index))
             if (value != null) {
                 result += value
             }
         }
         return result
+    }
+
+    private fun safeArrayLength(array: JSONArray): Int {
+        return try {
+            array.length()
+        } catch (_: RuntimeException) {
+            var count = 0
+            while (runCatching { array.opt(count) }.getOrNull() != null) {
+                count += 1
+            }
+            count
+        }
+    }
+
+    private fun decodeObjectFallback(raw: String): Map<String, Any> {
+        val body = raw.trim().removePrefix("{").removeSuffix("}")
+        return splitTopLevel(body, ',').mapNotNull { member ->
+            val separator = findTopLevelSeparator(member, ':')
+            if (separator < 0) return@mapNotNull null
+            val key = decodeString(member.substring(0, separator).trim()) ?: return@mapNotNull null
+            val value = decodeFallbackValue(member.substring(separator + 1).trim()) ?: return@mapNotNull null
+            key to value
+        }.toMap()
+    }
+
+    private fun decodeFallbackValue(raw: String): Any? = when {
+        raw.startsWith("{") -> decodeObjectFallback(raw)
+        raw.startsWith("[") -> splitTopLevel(raw.removePrefix("[").removeSuffix("]"), ',')
+            .filter(String::isNotBlank)
+            .mapNotNull { decodeFallbackValue(it.trim()) }
+        raw.startsWith("\"") -> decodeString(raw)
+        raw == "true" -> true
+        raw == "false" -> false
+        raw == "null" -> null
+        raw.contains('.') -> raw.toFloatOrNull()
+        else -> raw.toLongOrNull() ?: raw
+    }
+
+    private fun decodeString(raw: String): String? {
+        val value = raw.trim()
+        if (value.length < 2 || value.first() != '"' || value.last() != '"') return null
+        return buildString {
+            var escaped = false
+            value.substring(1, value.length - 1).forEach { character ->
+                if (escaped) {
+                    append(
+                        when (character) {
+                            'n' -> '\n'
+                            'r' -> '\r'
+                            't' -> '\t'
+                            '\\' -> '\\'
+                            '"' -> '"'
+                            else -> character
+                        },
+                    )
+                    escaped = false
+                } else if (character == '\\') {
+                    escaped = true
+                } else {
+                    append(character)
+                }
+            }
+        }
+    }
+
+    private fun splitTopLevel(raw: String, delimiter: Char): List<String> {
+        val result = mutableListOf<String>()
+        var start = 0
+        var depth = 0
+        var inString = false
+        var escaped = false
+        raw.forEachIndexed { index, character ->
+            when {
+                escaped -> escaped = false
+                inString && character == '\\' -> escaped = true
+                inString && character == '"' -> inString = false
+                !inString && character == '"' -> inString = true
+                !inString && character in "[{" -> depth += 1
+                !inString && character in "]}" -> depth -= 1
+                !inString && character == delimiter && depth == 0 -> {
+                    result += raw.substring(start, index)
+                    start = index + 1
+                }
+            }
+        }
+        result += raw.substring(start)
+        return result
+    }
+
+    private fun findTopLevelSeparator(raw: String, delimiter: Char): Int {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        raw.forEachIndexed { index, character ->
+            when {
+                escaped -> escaped = false
+                inString && character == '\\' -> escaped = true
+                inString && character == '"' -> inString = false
+                !inString && character == '"' -> inString = true
+                !inString && character in "[{" -> depth += 1
+                !inString && character in "]}" -> depth -= 1
+                !inString && character == delimiter && depth == 0 -> return index
+            }
+        }
+        return -1
     }
 }

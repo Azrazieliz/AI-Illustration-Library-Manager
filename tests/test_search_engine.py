@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from engine.config import settings
 from engine.database.database import database_manager
-from engine.embeddings import EmbeddingService
+from engine.embeddings import EmbeddingService, MockProvider
 from engine.pipeline import PipelineJob, QueueManager, QueueType
-from engine.recognition import RecognitionService
+from engine.recognition import MockRecognitionProvider, RecognitionService
 from engine.repositories.embedding_repository import EmbeddingRepository
 from engine.repositories.image_repository import ImageRepository
 from engine.search import (
@@ -54,12 +55,15 @@ def _register_image(path: Path) -> int:
 def _build_search_ready_record(queue_manager: QueueManager, path: Path) -> int:
     image_id = _register_image(path)
 
-    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    embedding_service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
     embedding_job = PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
     embed_result = embedding_service.process_embedding_job(embedding_job)
     assert embed_result is not None
 
-    recognition_service = RecognitionService(queue_manager=queue_manager)
+    recognition_service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     recognition_job = queue_manager.dequeue(QueueType.RECOGNITION)
     assert recognition_job is not None
     recognition_result = recognition_service.process_recognition_job(recognition_job)
@@ -178,7 +182,9 @@ def test_query_top_k_and_threshold(search_env: None, tmp_path: Path) -> None:
     engine = SearchEngine()
     engine.index_paths(paths)
 
-    query_vector = engine._load_vector("synthetic-query")
+    query_artifact = tmp_path / "query.npy"
+    np.save(query_artifact, np.asarray([1.0] * 512, dtype=np.float32), allow_pickle=False)
+    query_vector = engine._load_vector(str(query_artifact))
     result = engine.search(query_vector=query_vector, top_k=2, min_similarity=0.1)
 
     assert len(result.matches) <= 2

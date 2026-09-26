@@ -16,8 +16,8 @@ from engine.knowledge_packs.knowledge_pack_models import KnowledgePackConflict, 
 MAX_INSTALLED_STORAGE_BYTES = 5 * 1024 * 1024 * 1024
 
 
-class KnowledgePackRepository:
-    """Repository facade for installed downloadable external knowledge packs."""
+class InMemoryKnowledgePackRepository:
+    """Explicit in-memory adapter retained for isolated tests and injected experiments."""
 
     def __init__(self, *, builder: KnowledgePackBuilder | None = None) -> None:
         self.builder = builder or KnowledgePackBuilder()
@@ -206,3 +206,6 @@ class KnowledgePackRepository:
             raise KnowledgePackStorageLimitError(
                 f"Installed knowledge pack size would exceed 5 GB ({projected} bytes)"
             )
+
+
+from engine.repositories.knowledge_pack_repository_durable import DurableKnowledgePackRepository as KnowledgePackRepository

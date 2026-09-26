@@ -1,6 +1,7 @@
 package com.ailm.android.runtime.ai
 
 import android.content.Context
+import android.os.Debug
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +35,12 @@ class LocalAiBackendManager {
 
     fun snapshotBackends(): List<AiBackendRuntime> {
         return backends.values.sortedBy { it.runtimeId }
+    }
+
+    fun snapshotProviders(availableOnly: Boolean = false): List<AiRuntimeProvider> {
+        return snapshotBackends()
+            .filterIsInstance<AiRuntimeProvider>()
+            .filter { !availableOnly || it.providerState == AiRuntimeProviderState.AVAILABLE }
     }
 
     fun listBackends(): List<Map<String, Any>> {
@@ -79,6 +86,22 @@ class LocalAiValidationService(
     private val backendManager: LocalAiBackendManager,
     private val resourceManager: LocalAiResourceManager,
 ) {
+    private fun normalizeRuntimeName(raw: String): String {
+        val candidate = raw.trim()
+            .lowercase()
+            .replace('-', '_')
+            .replace('.', '_')
+            .replace(' ', '_')
+            .replace(Regex("_+"), "_")
+        return when (candidate) {
+            "tflite", "tensorflow_lite", "lite" -> AiRuntimeType.TFLITE.raw
+            "onnx" -> AiRuntimeType.ONNX.raw
+            "llama_cpp", "llama_cpp", "llama_cpp" -> AiRuntimeType.LLAMA_CPP.raw
+            "gguf" -> AiRuntimeType.LLAMA_CPP.raw
+            else -> candidate
+        }
+    }
+
     fun validateModelDescriptor(model: AiModelDescriptor): AiValidationReport {
         val issues = mutableListOf<AiValidationIssue>()
         if (model.modelId.isBlank()) {
@@ -96,31 +119,56 @@ class LocalAiValidationService(
         if (model.hashSha256.isNotBlank() && !model.hashSha256.matches(Regex("^[a-fA-F0-9]{64}$"))) {
             issues += AiValidationIssue("hash_invalid", "hash_sha256 must be a 64-char hex string")
         }
+        val requiredRuntime = normalizeRuntimeName(model.requiredRuntime)
+        if (requiredRuntime.isNotBlank() && requiredRuntime !in EXECUTABLE_RUNTIMES) {
+            issues += AiValidationIssue(
+                "runtime_incompatible",
+                "Model runtime '${model.requiredRuntime}' is not recognized as an executable runtime",
+            )
+        }
+        val unsupportedRuntimes = model.supportedRuntimes
+            .map { normalizeRuntimeName(it) }
+            .filterNot { it in EXECUTABLE_RUNTIMES }
+        if (unsupportedRuntimes.isNotEmpty()) {
+            issues += AiValidationIssue(
+                "runtime_incompatible",
+                "Model declares unsupported runtimes: ${unsupportedRuntimes.distinct().joinToString()}",
+            )
+        }
+        if (model.installed) {
+            val format = FileSupport.modelFormat(model)
+            if (format !in EXECUTABLE_FORMATS) {
+                issues += AiValidationIssue(
+                    "model_format_incompatible",
+                    "Model format '$format' is incompatible; only supported executable artifact formats are allowed",
+                )
+            }
+            if (requiredRuntime == AiRuntimeType.ONNX.raw && format != "onnx") {
+                issues += AiValidationIssue("model_format_runtime_mismatch", "ONNX runtime requires an .onnx artifact")
+            }
+            if (requiredRuntime == AiRuntimeType.TFLITE.raw && format !in setOf("tflite", "lite")) {
+                issues += AiValidationIssue("model_format_runtime_mismatch", "TensorFlow Lite runtime requires a .tflite artifact")
+            }
+            if (requiredRuntime == AiRuntimeType.LLAMA_CPP.raw && format != "gguf") {
+                issues += AiValidationIssue("model_format_runtime_mismatch", "LLAMA_CPP runtime requires a .gguf artifact")
+            }
+        }
         if (model.supportedTasks.isEmpty()) {
             issues += AiValidationIssue(
                 "supported_tasks_empty",
-                "Model should declare supported_tasks for compatibility checks",
-                severity = "warning",
+                "Model must declare supported_tasks for compatibility checks",
             )
         }
+        issues += ModelInferenceContract.validationIssues(model)
 
-        val normalizedRuntime = model.requiredRuntime.trim().lowercase()
-        if (normalizedRuntime.isNotBlank() && !backendManager.hasRuntime(normalizedRuntime)) {
+        val compatibleProviders = backendManager.snapshotProviders(availableOnly = true)
+            .filter { it.supportsModel(model) }
+        if (compatibleProviders.isEmpty()) {
             issues += AiValidationIssue(
-                "runtime_unavailable",
-                "Required runtime '${model.requiredRuntime}' is not registered",
+                "provider_unavailable",
+                "No available runtime provider supports this model's format, tasks, and device capabilities",
                 severity = "warning",
             )
-        }
-
-        model.supportedRuntimes.forEach { runtime ->
-            if (runtime.isNotBlank() && !backendManager.hasRuntime(runtime)) {
-                issues += AiValidationIssue(
-                    "supported_runtime_unavailable",
-                    "Supported runtime '$runtime' is not currently registered",
-                    severity = "warning",
-                )
-            }
         }
 
         val hardwareReport = resourceManager.validateHardwareRequirements(model.requiredHardware)
@@ -271,23 +319,6 @@ class LocalAiValidationService(
                 )
             }
 
-            if (model.requiredRuntime.isNotBlank() && !model.requiredRuntime.equals(runtimeId, ignoreCase = true)) {
-                issues += AiValidationIssue(
-                    "runtime_incompatible",
-                    "Model requires runtime ${model.requiredRuntime} but selected runtime is $runtimeId",
-                )
-            }
-
-            if (
-                model.supportedRuntimes.isNotEmpty() &&
-                model.supportedRuntimes.none { it.equals(runtimeId, ignoreCase = true) }
-            ) {
-                issues += AiValidationIssue(
-                    "runtime_not_supported_by_model",
-                    "Selected runtime $runtimeId is not listed in model supported_runtimes",
-                )
-            }
-
             val hardwareReport = resourceManager.validateHardwareRequirements(model.requiredHardware)
             issues += hardwareReport.issues
         }
@@ -354,6 +385,15 @@ class LocalAiValidationService(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private companion object {
+        val EXECUTABLE_RUNTIMES = setOf(
+            AiRuntimeType.ONNX.raw,
+            AiRuntimeType.TFLITE.raw,
+            AiRuntimeType.LLAMA_CPP.raw,
+        )
+        val EXECUTABLE_FORMATS = setOf("onnx", "tflite", "lite", "gguf")
     }
 }
 
@@ -568,8 +608,152 @@ class LocalAiExecutionQueue(
     }
 }
 
+class LocalAiModelRegistry(
+    private val repository: LocalAiRepository,
+) {
+    fun compatibleInstalledModels(
+        taskType: String,
+        requestedModelId: String = "",
+        requestedVersion: String = "",
+    ): List<AiModelDescriptor> {
+        val normalizedTaskType = AiTaskTypes.normalize(taskType)
+        val installed = repository.listModels(installedOnly = true)
+        if (requestedModelId.isNotBlank()) {
+            val requested = if (requestedVersion.isBlank()) {
+                repository.getModel(requestedModelId)
+            } else {
+                repository.getModel(requestedModelId, requestedVersion)
+            }
+            if (requested?.installed == true && supportsTask(requested, normalizedTaskType)) {
+                return listOf(requested)
+            }
+            return emptyList()
+        }
+        return installed
+            .filter { model -> supportsTask(model, normalizedTaskType) }
+            .sortedWith(compareBy<AiModelDescriptor> { it.modelId }.thenBy { it.version })
+    }
+
+    private fun supportsTask(model: AiModelDescriptor, taskType: String): Boolean {
+        return model.supportedTasks
+            .map(AiTaskTypes::normalize)
+            .contains(taskType)
+    }
+}
+
+class LocalAiExecutionPlanner(
+    private val modelRegistry: LocalAiModelRegistry,
+    private val hardwareProvider: () -> AiHardwareProfile,
+    private val memoryStateProvider: () -> Map<String, Any>,
+    private val concurrentTaskProvider: () -> Int,
+    private val availableBackendsProvider: () -> List<AiBackendRuntime>,
+) {
+    data class Plan(
+        val model: AiModelDescriptor?,
+        val runtimeCandidates: List<String>,
+        val hardwarePreference: List<String>,
+        val candidates: List<Map<String, Any>>,
+    ) {
+        fun toMap(): Map<String, Any> = mapOf(
+            "model_id" to (model?.modelId ?: ""),
+            "version" to (model?.version ?: ""),
+            "runtime_candidates" to runtimeCandidates,
+            "hardware_preference" to hardwarePreference,
+            "candidates" to candidates,
+        )
+    }
+
+    fun plan(taskType: String, requestedModelId: String = "", requestedVersion: String = ""): Plan {
+        val profile = hardwareProvider()
+        val hardwarePreference = buildList {
+            if (profile.npuAvailable && profile.thermalStatus < 4 && !profile.batterySaverEnabled) add("npu")
+            if (profile.gpuAvailable && profile.thermalStatus < 4) add("gpu")
+            add("cpu")
+        }
+        val memory = memoryStateProvider()
+        val concurrentTasks = concurrentTaskProvider()
+        val scored = modelRegistry.compatibleInstalledModels(taskType, requestedModelId, requestedVersion)
+            .filter(::hasExecutableBackend)
+            .map { model -> model to scoreModel(model, taskType, profile, memory, concurrentTasks) }
+            .sortedWith(compareByDescending<Pair<AiModelDescriptor, Int>> { it.second }.thenByDescending { it.first.updatedAtMs })
+        val model = scored.firstOrNull()?.first
+        val candidates = model?.let(::providersFor)
+            ?.sortedByDescending { providerCapabilityScore(it.queryCapabilities(), profile) }
+            ?.map { it.runtimeId }
+            ?: emptyList()
+        return Plan(
+            model = model,
+            runtimeCandidates = candidates,
+            hardwarePreference = hardwarePreference,
+            candidates = scored.map { (candidate, score) ->
+                mapOf(
+                    "model_id" to candidate.modelId,
+                    "version" to candidate.version,
+                    "score" to score,
+                    "estimated_memory_bytes" to candidate.metadata["memory_requirement_bytes"].toLongValue(candidate.sizeBytes),
+                )
+            },
+        )
+    }
+
+    private fun scoreModel(model: AiModelDescriptor, taskType: String, profile: AiHardwareProfile, memory: Map<String, Any>, concurrentTasks: Int): Int {
+        val capabilityScore = if (model.supportedTasks.map(AiTaskTypes::normalize).contains(AiTaskTypes.normalize(taskType))) 30 else 0
+        val quantizationScore = when (model.metadata["quantization"]?.toString()?.lowercase()) {
+            "q4", "q4_k_m", "int8" -> 10
+            "q5", "q6", "q8" -> 8
+            "fp16" -> 6
+            "fp32" -> 3
+            else -> 4
+        }
+        val estimatedMemory = model.metadata["memory_requirement_bytes"].toLongValue(model.sizeBytes.coerceAtLeast(16L * 1024L * 1024L))
+        val availableMemory = memory["available_bytes"].toLongValue(profile.availableRamBytes)
+        val memoryScore = when {
+            estimatedMemory <= availableMemory / 3L -> 18
+            estimatedMemory <= availableMemory -> 8
+            else -> -30
+        }
+        val benchmarkScore = ((model.metadata["benchmark_results"] as? Map<*, *>)?.get("score")).toIntValue(0).coerceIn(0, 20)
+        val contextScore = (model.metadata["context_length"].toIntValue(0) / 512).coerceIn(0, 10)
+        val backendScore = providersFor(model).maxOfOrNull { provider -> providerCapabilityScore(provider.queryCapabilities(), profile) } ?: 0
+        val deviceScore = when {
+            profile.thermalStatus >= 4 -> -20
+            profile.batterySaverEnabled -> -10
+            profile.charging -> 3
+            else -> 0
+        } - (concurrentTasks.coerceAtLeast(0) * 3).coerceAtMost(12)
+        val fallbackPenalty = if (model.metadata["builtin"] == true || model.requiredRuntime.equals(AiRuntimeType.CUSTOM.raw, ignoreCase = true)) -40 else 0
+        return capabilityScore + quantizationScore + memoryScore + benchmarkScore + contextScore + backendScore + deviceScore + fallbackPenalty
+    }
+
+    private fun hasExecutableBackend(model: AiModelDescriptor): Boolean = providersFor(model).isNotEmpty()
+
+    private fun providersFor(model: AiModelDescriptor): List<AiRuntimeProvider> = availableBackendsProvider()
+        .filterIsInstance<AiRuntimeProvider>()
+        .filter { it.providerState == AiRuntimeProviderState.AVAILABLE && it.supportsModel(model) }
+
+    private fun providerCapabilityScore(capability: AiRuntimeProviderCapabilities, profile: AiHardwareProfile): Int {
+        val accelerationScore = when {
+            profile.npuAvailable && "npu" in capability.supportedDevices && capability.supportedDelegates.any { it.contains("nnapi", ignoreCase = true) || it.contains("npu", ignoreCase = true) } -> 28
+            profile.gpuAvailable && "gpu" in capability.supportedDevices -> 16
+            "cpu" in capability.supportedDevices -> 8
+            else -> 0
+        }
+        return accelerationScore + capability.supportedTasks.size.coerceAtMost(20)
+    }
+
+    private fun Any?.toLongValue(defaultValue: Long): Long = when (this) {
+        is Number -> toLong()
+        else -> toString()?.toLongOrNull() ?: defaultValue
+    }
+
+    private fun Any?.toIntValue(defaultValue: Int): Int = when (this) {
+        is Number -> toInt()
+        else -> toString()?.toIntOrNull() ?: defaultValue
+    }
+}
+
 class LocalAiRuntimeSelector(
-    private val settingsProvider: () -> AiSettings,
+    private val hardwareProvider: () -> AiHardwareProfile,
 ) {
     fun select(
         task: AiTaskRecord,
@@ -577,44 +761,21 @@ class LocalAiRuntimeSelector(
         availableBackends: List<AiBackendRuntime>,
     ): List<String> {
         val candidates = linkedSetOf<String>()
-        val settings = settingsProvider()
+        val plannedCandidates = ((task.payload["execution_plan"] as? Map<*, *>)?.get("runtime_candidates") as? List<*>)
+            ?.mapNotNull { it?.toString()?.trim()?.lowercase()?.takeIf(String::isNotBlank) }
+            ?: emptyList()
+        plannedCandidates.forEach(candidates::add)
+        availableBackends.filterIsInstance<AiRuntimeProvider>()
+            .filter { provider -> provider.providerState == AiRuntimeProviderState.AVAILABLE && (model == null || provider.supportsModel(model)) }
+            .forEach { candidates += it.runtimeId }
 
-        if (task.runtimeHint.isNotBlank()) {
-            candidates += task.runtimeHint.trim().lowercase()
-        }
-        if (model != null) {
-            if (model.requiredRuntime.isNotBlank()) {
-                candidates += model.requiredRuntime.trim().lowercase()
-            }
-            model.supportedRuntimes
-                .map { it.trim().lowercase() }
-                .filter { it.isNotBlank() }
-                .forEach { candidates += it }
-        }
-        settings.preferredRuntimeOrder
-            .map { it.trim().lowercase() }
-            .filter { it.isNotBlank() }
-            .forEach { candidates += it }
-
-        availableBackends.forEach { backend ->
-            candidates += backend.runtimeId.trim().lowercase()
-            candidates += backend.runtimeType.raw.trim().lowercase()
-        }
-
-        if (model != null && model.supportedRuntimes.isNotEmpty()) {
-            val allowed = model.supportedRuntimes.map { it.trim().lowercase() }.toSet()
-            val filtered = candidates.filter {
-                it in allowed || availableBackends.any { backend ->
-                    backend.runtimeId.equals(it, ignoreCase = true) && backend.runtimeType.raw.lowercase() in allowed
-                }
-            }
-            if (filtered.isNotEmpty()) {
-                return filtered
-            }
+        if (model == null) {
+            availableBackends.filterNot { it is AiRuntimeProvider }.forEach { candidates += it.runtimeId }
         }
 
         return candidates.toList()
     }
+
 }
 
 class LocalAiBackendSelector(
@@ -626,13 +787,19 @@ class LocalAiBackendSelector(
         val runtimeId: String,
     )
 
-    fun select(runtimeCandidates: List<String>, taskType: String): Selection? {
+    fun select(runtimeCandidates: List<String>, taskType: String, model: AiModelDescriptor? = null): Selection? {
         val normalizedTaskType = AiTaskTypes.normalize(taskType)
         val allBackends = backendManager.snapshotBackends()
 
         runtimeCandidates.forEach { candidate ->
             val runtimeMatches = backendManager.resolveByRuntime(candidate)
             runtimeMatches.forEach { backend ->
+                if (backend is AiRuntimeProvider && backend.providerState != AiRuntimeProviderState.AVAILABLE) {
+                    return@forEach
+                }
+                if (backend is ModelAwareAiBackend && model != null && !backend.supportsModel(model)) {
+                    return@forEach
+                }
                 val capability = backend.detectCapabilities()
                 if (capability.supportedTasks.isEmpty() || normalizedTaskType in capability.supportedTasks.map { AiTaskTypes.normalize(it) }.toSet()) {
                     return Selection(
@@ -645,6 +812,12 @@ class LocalAiBackendSelector(
         }
 
         allBackends.forEach { backend ->
+            if (backend is AiRuntimeProvider && backend.providerState != AiRuntimeProviderState.AVAILABLE) {
+                return@forEach
+            }
+            if (backend is ModelAwareAiBackend && model != null && !backend.supportsModel(model)) {
+                return@forEach
+            }
             val capability = backend.detectCapabilities()
             if (capability.supportedTasks.isEmpty() || normalizedTaskType in capability.supportedTasks.map { AiTaskTypes.normalize(it) }.toSet()) {
                 return Selection(
@@ -1025,8 +1198,8 @@ class LocalAiResultValidator {
                 }
             }
 
-            "detection" -> {
-                if (!result.containsKey("detections")) {
+            "detection", "face_detection" -> {
+                if (!result.containsKey("detections") && !result.containsKey("faces")) {
                     issues += AiValidationIssue("missing_outputs", "Detection result is missing detection list")
                 }
             }
@@ -1376,6 +1549,23 @@ class LocalAiSessionCache(
         modelCache.removeEntry(cacheKey)
     }
 
+    fun markModelWarm(model: AiModelDescriptor, runtimeId: String, idleTimeoutMs: Long) {
+        val cacheKey = "loaded_model:${model.modelId}:${model.version}:${runtimeId.lowercase()}"
+        modelCache.upsertEntry(
+            modelId = model.modelId,
+            cacheKey = cacheKey,
+            artifactPath = model.installPath.ifBlank { "memory://model/${model.modelId}/${model.version}" },
+            sizeBytes = model.sizeBytes.coerceAtLeast(0L),
+            pinned = false,
+            metadata = mapOf(
+                "cache_type" to "loaded_models",
+                "runtime_id" to runtimeId,
+                "warm" to true,
+                "warm_until_ms" to (System.currentTimeMillis() + idleTimeoutMs),
+            ),
+        )
+    }
+
     fun markCompiledSession(sessionId: String, modelId: String, runtimeId: String, backendId: String) {
         val cacheKey = "compiled_session:$sessionId"
         modelCache.upsertEntry(
@@ -1400,9 +1590,12 @@ class LocalAiSessionCache(
 class LocalAiMemoryManager(
     private val hardwareProvider: () -> AiHardwareProfile,
     private val settingsProvider: () -> AiSettings,
+    private val cacheBytesProvider: () -> Long = { 0L },
 ) {
     private val reservationMutex = Mutex()
     private val reservations = linkedMapOf<String, Long>()
+    @Volatile private var reservedBytesSnapshot = 0L
+    @Volatile private var reservationCountSnapshot = 0
 
     suspend fun reserve(sessionId: String, requestedBytes: Long): Long? {
         return reservationMutex.withLock {
@@ -1414,6 +1607,8 @@ class LocalAiMemoryManager(
                 return@withLock null
             }
             reservations[sessionId] = normalizedRequested
+            reservedBytesSnapshot = reservations.values.sum()
+            reservationCountSnapshot = reservations.size
             normalizedRequested
         }
     }
@@ -1421,6 +1616,8 @@ class LocalAiMemoryManager(
     suspend fun release(sessionId: String) {
         reservationMutex.withLock {
             reservations.remove(sessionId)
+            reservedBytesSnapshot = reservations.values.sum()
+            reservationCountSnapshot = reservations.size
         }
     }
 
@@ -1433,8 +1630,24 @@ class LocalAiMemoryManager(
                 "used_bytes" to usedBytes,
                 "available_bytes" to (budgetBytes - usedBytes).coerceAtLeast(0L),
                 "active_reservations" to reservations.size,
+                "temporary_allocation_bytes" to usedBytes,
+                "native_heap_bytes" to Debug.getNativeHeapAllocatedSize(),
+                "cache_bytes" to cacheBytesProvider(),
             )
         }
+    }
+
+    fun currentState(): Map<String, Any> {
+        val budgetBytes = computeReservationBudgetBytes()
+        return mapOf(
+            "budget_bytes" to budgetBytes,
+            "used_bytes" to reservedBytesSnapshot,
+            "available_bytes" to (budgetBytes - reservedBytesSnapshot).coerceAtLeast(0L),
+            "active_reservations" to reservationCountSnapshot,
+            "temporary_allocation_bytes" to reservedBytesSnapshot,
+            "native_heap_bytes" to Debug.getNativeHeapAllocatedSize(),
+            "cache_bytes" to cacheBytesProvider(),
+        )
     }
 
     private fun computeReservationBudgetBytes(): Long {
@@ -1451,6 +1664,9 @@ class LocalAiMemoryManager(
 
 class LocalAiModelLifetimeManager(
     private val sessionCache: LocalAiSessionCache,
+    private val hardwareProvider: () -> AiHardwareProfile,
+    private val memoryStateProvider: () -> Map<String, Any>,
+    private val scope: CoroutineScope,
 ) {
     private val lifetimeMutex = Mutex()
     private val refCounts = linkedMapOf<String, Int>()
@@ -1478,7 +1694,17 @@ class LocalAiModelLifetimeManager(
             val next = (current - 1).coerceAtLeast(0)
             if (next <= 0) {
                 refCounts.remove(key)
-                sessionCache.clearModelLoaded(model, runtimeId)
+                if (shouldKeepWarm(model)) {
+                    sessionCache.markModelWarm(model, runtimeId, WARM_MODEL_IDLE_TIMEOUT_MS)
+                    scope.launch {
+                        delay(WARM_MODEL_IDLE_TIMEOUT_MS)
+                        lifetimeMutex.withLock {
+                            if ((refCounts[key] ?: 0) == 0) sessionCache.clearModelLoaded(model, runtimeId)
+                        }
+                    }
+                } else {
+                    sessionCache.clearModelLoaded(model, runtimeId)
+                }
             } else {
                 refCounts[key] = next
                 sessionCache.markModelLoaded(model, runtimeId, next)
@@ -1489,6 +1715,18 @@ class LocalAiModelLifetimeManager(
 
     private fun keyOf(model: AiModelDescriptor, runtimeId: String): String {
         return "${model.modelId}:${model.version}:${runtimeId.lowercase()}"
+    }
+
+    private fun shouldKeepWarm(model: AiModelDescriptor): Boolean {
+        val profile = hardwareProvider()
+        val availableBytes = memoryStateProvider()["available_bytes"]?.toString()?.toLongOrNull() ?: 0L
+        val modelBytes = model.metadata["memory_requirement_bytes"]?.toString()?.toLongOrNull()
+            ?: model.sizeBytes.coerceAtLeast(16L * 1024L * 1024L)
+        return profile.thermalStatus < 4 && availableBytes >= modelBytes * 2L
+    }
+
+    private companion object {
+        const val WARM_MODEL_IDLE_TIMEOUT_MS = 60_000L
     }
 }
 
@@ -1561,7 +1799,7 @@ class LocalAiTaskDispatcher(
         val model = resolveTaskModel(runningTask)
         val availableBackends = backendManager.snapshotBackends()
         val runtimeCandidates = runtimeSelector.select(runningTask, model, availableBackends)
-        val backendSelection = backendSelector.select(runtimeCandidates, runningTask.taskType)
+        val backendSelection = backendSelector.select(runtimeCandidates, runningTask.taskType, model)
 
         val sessionId = UUID.randomUUID().toString()
         queue.setTaskSession(runningTask.taskId, sessionId)
@@ -1756,11 +1994,27 @@ class LocalAiTaskDispatcher(
             }
 
             val progressReporter = progressManager.reporter(runningTask.taskId, sessionId)
-            val runtimeResult = runtimeGateway.execute(
-                request = executionRequest,
-                backend = backendSelection.backend,
-                reporter = progressReporter,
-            )
+            val runtimeResult = try {
+                runtimeGateway.execute(
+                    request = executionRequest,
+                    backend = backendSelection.backend,
+                    reporter = progressReporter,
+                )
+            } catch (e: Exception) {
+                // Non-fatal runtime exceptions during backend execution should mark the task failed
+                // and preserve diagnostic information rather than crash the scheduler.
+                val message = e.message ?: e.javaClass.simpleName
+                handleFailure(
+                    task = runningTask,
+                    sessionId = sessionId,
+                    status = "runtime_failure",
+                    message = "Runtime execution error: $message",
+                    details = mapOf("exception" to e.javaClass.name, "stack" to e.stackTraceToString()),
+                )
+                runtimeHealthMonitor.capture(backendSelection.backend, phase = "after_execute_error")
+                // release reservation and model lifetime in finally section
+                return
+            }
             runtimeHealthMonitor.capture(backendSelection.backend, phase = "after_execute")
 
             val resultValidation = resultValidator.validate(context, runtimeResult)
@@ -2111,1107 +2365,3 @@ class LocalAiExecutionScheduler(
     }
 }
 
-class LocalHeuristicAiBackend(
-    override val runtimeId: String = "local_heuristic",
-) : AiBackendRuntime {
-    override val runtimeType: AiRuntimeType = AiRuntimeType.CUSTOM
-    override val supportedTasks: Set<String> = AiTaskTypes.EXECUTION_TASKS
-
-    override fun detectCapabilities(): AiBackendCapability {
-        return AiBackendCapability(
-            runtimeId = runtimeId,
-            runtimeType = runtimeType,
-            supportedTasks = supportedTasks,
-            supportsCancellation = false,
-            supportsPauseResume = false,
-            maxConcurrentTasks = 1,
-            metadata = mapOf(
-                "provider" to "LocalHeuristicAiBackend",
-                "mode" to "deterministic",
-                "embedding_dim" to EMBEDDING_DIM,
-            ),
-        )
-    }
-
-    override suspend fun execute(request: AiExecutionRequest, reporter: AiProgressReporter): AiExecutionResult {
-        val normalizedTaskType = AiTaskTypes.normalize(request.taskType)
-        return when (normalizedTaskType) {
-            "embedding_generation" -> executeEmbeddingGeneration(request, reporter)
-            "similarity_search" -> executeSimilaritySearch(request, reporter)
-            "ocr" -> executeOcr(request, reporter)
-            "captioning" -> executeCaptioning(request, reporter)
-            "metadata_extraction" -> executeMetadataExtraction(request, reporter)
-            "character_recognition" -> executeRecognition(request, reporter, entityType = "character")
-            "series_recognition" -> executeRecognition(request, reporter, entityType = "series")
-            "artist_recognition" -> executeRecognition(request, reporter, entityType = "artist")
-            "tag_prediction" -> executeTagPrediction(request, reporter)
-            "prompt_generation" -> executePromptGeneration(request, reporter)
-            "duplicate_detection" -> executeDuplicateDetection(request, reporter)
-            "classification" -> executeClassification(request, reporter)
-            "detection" -> executeDetection(request, reporter)
-            "face_feature_extraction" -> executeFaceFeatureExtraction(request, reporter)
-            "knowledge_pack_execution" -> executeKnowledgePackExecution(request, reporter)
-            else -> executeGenericTask(request, reporter, normalizedTaskType)
-        }
-    }
-
-    private suspend fun executeEmbeddingGeneration(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.15, "Preparing embedding payload")
-        val text = buildDocumentText(request.payload)
-        val embedding = embeddingOf(text)
-        reporter.report(1.0, "Embedding generated")
-
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Embedding generated locally",
-            details = mapOf(
-                "task_type" to "embedding_generation",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "text_length" to text.length,
-                    "embedding_dim" to embedding.size,
-                    "text" to text,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeSimilaritySearch(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.1, "Preparing semantic candidates")
-
-        val queryText = request.payload.firstNonBlankString("query", "text", "prompt")
-        val queryEmbedding = request.payload.numberList("query_embedding").takeIf { it.isNotEmpty() }
-            ?: embeddingOf(queryText)
-        val queryTokens = tokenize(queryText).toSet()
-
-        val rawCandidates = (request.payload["candidates"] as? List<*>) ?: emptyList<Any>()
-        val scoredCandidates = rawCandidates.mapNotNull { rawCandidate ->
-            val candidateMap = rawCandidate.asStringAnyMap()
-            val imageId = candidateMap["image_id"].toIntOrNullValue() ?: return@mapNotNull null
-            val candidateText = candidateMap.firstNonBlankString("text", "caption", "filename", "path")
-            val candidateEmbedding = candidateMap.numberList("embedding").takeIf { it.isNotEmpty() }
-                ?: embeddingOf(candidateText)
-            val cosine = cosineSimilarity(queryEmbedding, candidateEmbedding)
-            val lexical = lexicalOverlap(queryTokens, tokenize(candidateText).toSet())
-            val ratingBoost = ((candidateMap["rating"].toDoubleOrNullValue() ?: 0.0) / 5.0).coerceIn(0.0, 1.0) * 0.03
-            val favoriteBoost = if (candidateMap["favorite"].toBooleanValue(defaultValue = false)) 0.02 else 0.0
-            val score = (0.8 * cosine + 0.2 * lexical + ratingBoost + favoriteBoost)
-                .coerceIn(-1.0, 1.0)
-
-            ScoredCandidate(
-                imageId = imageId,
-                score = score,
-                cosine = cosine,
-                lexical = lexical,
-            )
-        }
-
-        reporter.report(0.8, "Ranking semantic candidates")
-        val topK = request.payload["top_k"].toIntOrNullValue()
-            ?.coerceAtLeast(1)
-            ?: scoredCandidates.size.coerceAtLeast(1)
-        val ranked = scoredCandidates
-            .sortedByDescending { it.score }
-            .take(topK)
-            .mapIndexed { index, candidate ->
-                mapOf(
-                    "image_id" to candidate.imageId,
-                    "score" to candidate.score,
-                    "cosine" to candidate.cosine,
-                    "lexical" to candidate.lexical,
-                    "rank" to (index + 1),
-                )
-            }
-
-        reporter.report(1.0, "Semantic ranking complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Similarity search completed locally",
-            details = mapOf(
-                "task_type" to "similarity_search",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to queryEmbedding,
-                "matches" to ranked,
-                "result" to mapOf(
-                    "query" to queryText,
-                    "matches" to ranked,
-                    "query_embedding_dim" to queryEmbedding.size,
-                    "hybrid_weights" to mapOf(
-                        "cosine" to 0.8,
-                        "lexical" to 0.2,
-                    ),
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeOcr(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Extracting text candidates")
-        val source = buildDocumentText(request.payload)
-        val tokens = tokenize(source).filter { it.length > 1 }
-        val lines = tokens.chunked(8).take(8).map { chunk -> chunk.joinToString(" ") }
-        val extractedText = lines.joinToString("\n").ifBlank { source }
-        val confidence = (0.45 + minOf(0.45, tokens.size / 40.0)).coerceIn(0.1, 0.9)
-        val embedding = embeddingOf(extractedText)
-
-        reporter.report(1.0, "OCR extraction complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "OCR pipeline completed locally",
-            details = mapOf(
-                "task_type" to "ocr",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "text" to extractedText,
-                    "lines" to lines,
-                    "confidence" to confidence,
-                    "token_count" to tokens.size,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeCaptioning(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Building caption context")
-        val metadata = request.payload["metadata"].asStringAnyMap()
-        val tags = collectTags(request.payload)
-        val orientation = metadata["orientation"]?.toString().orEmpty()
-        val resolution = metadata["resolution"]?.toString().orEmpty().ifBlank {
-            val width = metadata["width"].toIntOrNullValue()
-            val height = metadata["height"].toIntOrNullValue()
-            if (width != null && height != null && width > 0 && height > 0) "${width}x${height}" else ""
-        }
-        val subject = chooseSubject(tags, request.payload)
-        val style = chooseStyle(tags)
-        val caption = buildList {
-            add(if (subject.isBlank()) "Illustration" else "Illustration of $subject")
-            if (style.isNotBlank()) add("in a $style style")
-            if (orientation.isNotBlank()) add("$orientation composition")
-            if (resolution.isNotBlank()) add("at $resolution")
-            if (tags.isNotEmpty()) add("keywords ${tags.take(5).joinToString(", ")}")
-        }.joinToString(", ") + "."
-        val embedding = embeddingOf(caption)
-
-        reporter.report(1.0, "Captioning complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Captioning pipeline completed locally",
-            details = mapOf(
-                "task_type" to "captioning",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "caption" to caption,
-                    "subject" to subject,
-                    "style" to style,
-                    "keywords" to tags.take(8),
-                    "confidence" to (0.5 + minOf(0.35, tags.size / 20.0)),
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeMetadataExtraction(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Extracting metadata fields")
-        val metadata = request.payload["metadata"].asStringAnyMap().toMutableMap()
-        metadata.putIfAbsent("image_id", request.payload["image_id"]?.toString().orEmpty())
-        metadata.putIfAbsent("filename", request.payload["filename"]?.toString().orEmpty())
-        metadata.putIfAbsent("path", request.payload["path"]?.toString().orEmpty())
-        metadata.putIfAbsent("folder_uri", request.payload["folder_uri"]?.toString().orEmpty())
-
-        if (!metadata.containsKey("extension") || metadata["extension"].toString().isBlank()) {
-            val extension = metadata["filename"]?.toString().orEmpty().substringAfterLast('.', "").lowercase()
-            if (extension.isNotBlank()) {
-                metadata["extension"] = extension
-            }
-        }
-        if (!metadata.containsKey("resolution") || metadata["resolution"].toString().isBlank()) {
-            val width = metadata["width"].toIntOrNullValue()
-            val height = metadata["height"].toIntOrNullValue()
-            if (width != null && height != null && width > 0 && height > 0) {
-                metadata["resolution"] = "${width}x${height}"
-            }
-        }
-
-        val tags = collectTags(request.payload)
-        if (tags.isNotEmpty()) {
-            metadata["tags"] = tags
-        }
-        metadata["extracted_at_ms"] = System.currentTimeMillis()
-
-        val metadataText = metadata.entries.joinToString(" ") { "${it.key}:${it.value}" }
-        val embedding = embeddingOf(metadataText)
-
-        reporter.report(1.0, "Metadata extraction complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Metadata extraction completed locally",
-            details = mapOf(
-                "task_type" to "metadata_extraction",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "metadata" to metadata,
-                    "field_count" to metadata.size,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeRecognition(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-        entityType: String,
-    ): AiExecutionResult {
-        reporter.report(0.25, "Running $entityType recognition")
-        val hints = collectEntityHints(entityType, request.payload)
-        val candidates = hints.take(6).mapIndexed { index, value ->
-            val confidence = (0.82 - (index * 0.09)).coerceAtLeast(0.3)
-            mapOf(
-                "name" to prettifyLabel(value),
-                "confidence" to confidence,
-                "source" to "heuristic",
-            )
-        }
-        val topMatch = candidates.firstOrNull()?.get("name")?.toString().orEmpty()
-        val embedding = embeddingOf(candidates.joinToString(" ") { it["name"].toString() })
-
-        reporter.report(1.0, "$entityType recognition complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "$entityType recognition completed locally",
-            details = mapOf(
-                "task_type" to "${entityType}_recognition",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "entity_type" to entityType,
-                    "top_match" to topMatch,
-                    "candidates" to candidates,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeTagPrediction(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Scoring predicted tags")
-        val frequency = linkedMapOf<String, Double>()
-        collectTags(request.payload).forEach { tag ->
-            val normalized = normalizeTag(tag)
-            if (normalized.isBlank()) {
-                return@forEach
-            }
-            frequency[normalized] = (frequency[normalized] ?: 0.0) + 2.0
-        }
-        tokenize(buildDocumentText(request.payload)).forEach { token ->
-            val normalized = normalizeTag(token)
-            if (normalized.length < 3 || normalized in STOP_WORDS) {
-                return@forEach
-            }
-            frequency[normalized] = (frequency[normalized] ?: 0.0) + 1.0
-        }
-
-        val ranked = frequency.entries
-            .sortedByDescending { it.value }
-            .take(12)
-        val maxScore = ranked.firstOrNull()?.value ?: 1.0
-        val tags = ranked.map { it.key }
-        val scoredTags = ranked.map { entry ->
-            mapOf(
-                "tag" to entry.key,
-                "score" to (entry.value / maxScore).coerceIn(0.0, 1.0),
-            )
-        }
-        val embedding = embeddingOf(tags.joinToString(" "))
-
-        reporter.report(1.0, "Tag prediction complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Tag prediction completed locally",
-            details = mapOf(
-                "task_type" to "tag_prediction",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "tags" to tags,
-                    "scored_tags" to scoredTags,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executePromptGeneration(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Composing prompt context")
-        val upstream = request.payload["upstream_results"].asStringAnyMap()
-        val caption = extractStageString(upstream, "captioning", "caption")
-            .ifBlank { request.payload.firstNonBlankString("caption", "text", "prompt") }
-        val tags = extractStageTags(upstream, "tag_prediction")
-            .ifEmpty { collectTags(request.payload) }
-        val character = extractStageString(upstream, "character_recognition", "top_match")
-        val series = extractStageString(upstream, "series_recognition", "top_match")
-        val artist = extractStageString(upstream, "artist_recognition", "top_match")
-
-        val subjectParts = listOf(character, series).filter { it.isNotBlank() }
-        val subject = if (subjectParts.isNotEmpty()) subjectParts.joinToString(" from ") else "illustration"
-        val prompt = buildList {
-            add(caption.ifBlank { "Detailed $subject" })
-            if (artist.isNotBlank()) add("inspired by $artist")
-            if (tags.isNotEmpty()) add("tags: ${tags.take(10).joinToString(", ")}")
-            add("high detail, clean composition")
-        }.joinToString(", ")
-
-        val negativePrompt = request.payload.firstNonBlankString("negative_prompt")
-            .ifBlank { "lowres, blurry, artifacts, watermark" }
-        val embedding = embeddingOf(prompt)
-
-        reporter.report(1.0, "Prompt generation complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Prompt generation completed locally",
-            details = mapOf(
-                "task_type" to "prompt_generation",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "prompt" to prompt,
-                    "negative_prompt" to negativePrompt,
-                    "context" to mapOf(
-                        "caption" to caption,
-                        "character" to character,
-                        "series" to series,
-                        "artist" to artist,
-                        "tags" to tags,
-                    ),
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeDuplicateDetection(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.15, "Preparing duplicate candidates")
-        val threshold = request.payload["similarity_threshold"].toDoubleOrNullValue()?.coerceIn(0.6, 0.999) ?: 0.92
-        val candidates = buildDuplicateCandidates(request.payload)
-
-        if (candidates.size < 2) {
-            return AiExecutionResult(
-                ok = true,
-                status = "succeeded",
-                message = "Duplicate detection completed with insufficient candidates",
-                details = mapOf(
-                    "task_type" to "duplicate_detection",
-                    "model_id" to request.modelId,
-                    "model_version" to request.version,
-                    "result" to mapOf(
-                        "groups" to emptyList<Map<String, Any>>(),
-                        "threshold" to threshold,
-                        "candidate_count" to candidates.size,
-                    ),
-                ),
-            )
-        }
-
-        val parent = IntArray(candidates.size) { it }
-        fun find(x: Int): Int {
-            var node = x
-            while (parent[node] != node) {
-                parent[node] = parent[parent[node]]
-                node = parent[node]
-            }
-            return node
-        }
-        fun union(a: Int, b: Int) {
-            val rootA = find(a)
-            val rootB = find(b)
-            if (rootA != rootB) {
-                parent[rootB] = rootA
-            }
-        }
-
-        var comparedPairs = 0
-        val strongPairs = mutableListOf<Map<String, Any>>()
-        for (left in candidates.indices) {
-            for (right in (left + 1) until candidates.size) {
-                comparedPairs += 1
-                val score = cosineSimilarity(candidates[left].embedding, candidates[right].embedding)
-                if (score >= threshold) {
-                    union(left, right)
-                    strongPairs += mapOf(
-                        "left_image_id" to candidates[left].imageId,
-                        "right_image_id" to candidates[right].imageId,
-                        "score" to score,
-                    )
-                }
-            }
-        }
-
-        reporter.report(0.85, "Grouping duplicate clusters")
-        val grouped = linkedMapOf<Int, MutableList<DuplicateCandidate>>()
-        candidates.forEachIndexed { index, candidate ->
-            val root = find(index)
-            grouped.getOrPut(root) { mutableListOf() }.add(candidate)
-        }
-        val groups = grouped.values
-            .filter { it.size > 1 }
-            .sortedByDescending { it.size }
-            .mapIndexed { index, members ->
-                val sortedMembers = members.sortedBy { it.imageId }
-                mapOf(
-                    "group_id" to "duplicate_${index + 1}",
-                    "canonical_image_id" to sortedMembers.first().imageId,
-                    "members" to sortedMembers.map { member ->
-                        mapOf(
-                            "image_id" to member.imageId,
-                            "text" to member.text,
-                        )
-                    },
-                    "size" to sortedMembers.size,
-                )
-            }
-
-        reporter.report(1.0, "Duplicate detection complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Duplicate detection completed locally",
-            details = mapOf(
-                "task_type" to "duplicate_detection",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "result" to mapOf(
-                    "groups" to groups,
-                    "threshold" to threshold,
-                    "candidate_count" to candidates.size,
-                    "compared_pairs" to comparedPairs,
-                    "duplicate_pairs" to strongPairs,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeClassification(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Computing classification scores")
-        val metadata = request.payload["metadata"].asStringAnyMap()
-        val tags = collectTags(request.payload)
-        val tokens = (tags + tokenize(buildDocumentText(request.payload))).map { it.lowercase() }
-
-        val scores = linkedMapOf(
-            "portrait" to 0.2,
-            "landscape" to 0.2,
-            "illustration" to 0.2,
-            "comic" to 0.15,
-            "character_sheet" to 0.1,
-            "concept_art" to 0.15,
-        )
-
-        val orientation = metadata["orientation"]?.toString()?.lowercase().orEmpty()
-        if (orientation == "portrait") {
-            scores["portrait"] = (scores["portrait"] ?: 0.0) + 0.4
-        }
-        if (orientation == "landscape") {
-            scores["landscape"] = (scores["landscape"] ?: 0.0) + 0.4
-        }
-
-        tokens.forEach { token ->
-            when {
-                token in setOf("portrait", "headshot", "bust") -> scores["portrait"] = (scores["portrait"] ?: 0.0) + 0.35
-                token in setOf("landscape", "scenery", "background") -> scores["landscape"] = (scores["landscape"] ?: 0.0) + 0.35
-                token in setOf("comic", "manga", "panel") -> scores["comic"] = (scores["comic"] ?: 0.0) + 0.35
-                token in setOf("sheet", "turnaround", "reference") -> scores["character_sheet"] = (scores["character_sheet"] ?: 0.0) + 0.35
-                token in setOf("concept", "design", "ideation") -> scores["concept_art"] = (scores["concept_art"] ?: 0.0) + 0.25
-                else -> scores["illustration"] = (scores["illustration"] ?: 0.0) + 0.03
-            }
-        }
-
-        val total = scores.values.sum().coerceAtLeast(1e-9)
-        val rankedLabels = scores.entries
-            .map { entry ->
-                mapOf(
-                    "label" to entry.key,
-                    "score" to (entry.value / total).coerceIn(0.0, 1.0),
-                )
-            }
-            .sortedByDescending { it["score"] as Double }
-        val topLabel = rankedLabels.firstOrNull()?.get("label")?.toString().orEmpty()
-        val embedding = embeddingOf(topLabel)
-
-        reporter.report(1.0, "Classification complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Classification completed locally",
-            details = mapOf(
-                "task_type" to "classification",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "label" to topLabel,
-                    "ranked_labels" to rankedLabels,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeDetection(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Deriving detection windows")
-        val metadata = request.payload["metadata"].asStringAnyMap()
-        val width = metadata["width"].toIntOrNullValue() ?: request.payload["width"].toIntOrNullValue() ?: 0
-        val height = metadata["height"].toIntOrNullValue() ?: request.payload["height"].toIntOrNullValue() ?: 0
-        val tokens = (collectTags(request.payload) + tokenize(buildDocumentText(request.payload))).map { it.lowercase() }
-
-        val detections = mutableListOf<Map<String, Any>>()
-        if (width > 0 && height > 0) {
-            if (tokens.any { it in setOf("face", "character", "person", "portrait") }) {
-                detections += mapOf(
-                    "label" to "character",
-                    "confidence" to 0.72,
-                    "bbox" to mapOf(
-                        "x" to (width * 0.28).toInt(),
-                        "y" to (height * 0.12).toInt(),
-                        "w" to (width * 0.44).toInt(),
-                        "h" to (height * 0.62).toInt(),
-                    ),
-                )
-            }
-            if (tokens.any { it in setOf("text", "speech", "caption", "logo") }) {
-                detections += mapOf(
-                    "label" to "text_region",
-                    "confidence" to 0.58,
-                    "bbox" to mapOf(
-                        "x" to (width * 0.08).toInt(),
-                        "y" to (height * 0.05).toInt(),
-                        "w" to (width * 0.84).toInt(),
-                        "h" to (height * 0.2).toInt(),
-                    ),
-                )
-            }
-            if (detections.isEmpty() && tokens.isNotEmpty()) {
-                detections += mapOf(
-                    "label" to "scene",
-                    "confidence" to 0.25,
-                    "bbox" to mapOf(
-                        "x" to 0,
-                        "y" to 0,
-                        "w" to width,
-                        "h" to height,
-                    ),
-                )
-            }
-        }
-        val embedding = embeddingOf(detections.joinToString(" ") { it["label"].toString() })
-
-        reporter.report(1.0, "Detection complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Detection pipeline completed locally",
-            details = mapOf(
-                "task_type" to "detection",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "detections" to detections,
-                    "image_size" to mapOf("width" to width, "height" to height),
-                    "detector" to "local_heuristic",
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeFaceFeatureExtraction(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Computing face feature embeddings")
-        val metadata = request.payload["metadata"].asStringAnyMap()
-        val width = metadata["width"].toIntOrNullValue() ?: request.payload["width"].toIntOrNullValue() ?: 0
-        val height = metadata["height"].toIntOrNullValue() ?: request.payload["height"].toIntOrNullValue() ?: 0
-        val detections = request.payload["detections"].asListOfMaps().toMutableList()
-        if (detections.isEmpty() && width > 0 && height > 0) {
-            detections += mapOf(
-                "label" to "face",
-                "confidence" to 0.5,
-                "bbox" to mapOf(
-                    "x" to (width * 0.3).toInt(),
-                    "y" to (height * 0.18).toInt(),
-                    "w" to (width * 0.4).toInt(),
-                    "h" to (height * 0.4).toInt(),
-                ),
-            )
-        }
-
-        val baseText = "face ${buildDocumentText(request.payload)} count:${detections.size}"
-        val featureVector = embeddingOf(baseText)
-
-        reporter.report(1.0, "Face feature extraction complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Face feature extraction completed locally",
-            details = mapOf(
-                "task_type" to "face_feature_extraction",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to featureVector,
-                "result" to mapOf(
-                    "face_count" to detections.size,
-                    "detections" to detections,
-                    "feature_vector" to featureVector,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeKnowledgePackExecution(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-    ): AiExecutionResult {
-        reporter.report(0.2, "Validating knowledge pack request")
-        val packId = request.payload.firstNonBlankString("knowledge_pack_id", "pack_id", "id").ifBlank { "default_pack" }
-        val version = request.payload.firstNonBlankString("knowledge_pack_version", "version").ifBlank { "1.0.0" }
-        val operations = request.payload["operations"].toStringList()
-            .ifEmpty { request.payload["stages"].toStringList() }
-            .ifEmpty { listOf("validate", "execute") }
-
-        val startedAt = System.currentTimeMillis()
-        val operationResults = operations.mapIndexed { index, operation ->
-            mapOf(
-                "operation" to operation,
-                "index" to (index + 1),
-                "status" to "succeeded",
-                "started_at_ms" to startedAt,
-                "completed_at_ms" to (startedAt + (index + 1) * 5L),
-            )
-        }
-        val embedding = embeddingOf("$packId ${operations.joinToString(" ")}")
-
-        reporter.report(1.0, "Knowledge pack execution complete")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Knowledge pack execution completed locally",
-            details = mapOf(
-                "task_type" to "knowledge_pack_execution",
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to mapOf(
-                    "knowledge_pack_id" to packId,
-                    "knowledge_pack_version" to version,
-                    "operations" to operationResults,
-                    "dependencies" to request.payload["dependencies"].toStringList(),
-                    "rollback_supported" to request.payload["rollback_supported"].toBooleanValue(defaultValue = true),
-                ),
-            ),
-        )
-    }
-
-    private suspend fun executeGenericTask(
-        request: AiExecutionRequest,
-        reporter: AiProgressReporter,
-        normalizedTaskType: String,
-    ): AiExecutionResult {
-        reporter.report(0.25, "Preparing local $normalizedTaskType result")
-        val summaryText = buildDocumentText(request.payload)
-        val summary = mapOf(
-            "acknowledged" to true,
-            "summary_text" to summaryText,
-            "token_count" to tokenize(summaryText).size,
-        )
-        val embedding = embeddingOf(summaryText)
-
-        reporter.report(1.0, "Completed local $normalizedTaskType")
-        return AiExecutionResult(
-            ok = true,
-            status = "succeeded",
-            message = "Task $normalizedTaskType completed locally",
-            details = mapOf(
-                "task_type" to normalizedTaskType,
-                "model_id" to request.modelId,
-                "model_version" to request.version,
-                "embedding" to embedding,
-                "result" to summary,
-            ),
-        )
-    }
-
-    private fun buildDocumentText(payload: Map<String, Any>): String {
-        val metadata = payload["metadata"].asStringAnyMap()
-        val parts = mutableListOf<String>()
-        parts += payload.firstNonBlankString("text", "query", "prompt", "caption", "ocr_text", "hint")
-        parts += payload["filename"]?.toString().orEmpty()
-        parts += payload["path"]?.toString().orEmpty()
-        parts += payload["folder_uri"]?.toString().orEmpty()
-        parts += metadata["metadata_text"]?.toString().orEmpty()
-        parts += metadata["taxonomy_text"]?.toString().orEmpty()
-        parts += metadata["folder_name"]?.toString().orEmpty()
-        parts += metadata["relative_path"]?.toString().orEmpty()
-        val tags = collectTags(payload)
-        if (tags.isNotEmpty()) {
-            parts += tags.joinToString(" ")
-        }
-        return parts
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .joinToString(" ")
-            .trim()
-    }
-
-    private fun collectTags(payload: Map<String, Any>): List<String> {
-        val metadata = payload["metadata"].asStringAnyMap()
-        val tags = linkedSetOf<String>()
-        payload["tags"].toStringList().forEach { tags += normalizeTag(it) }
-        metadata["tags"].toStringList().forEach { tags += normalizeTag(it) }
-        metadata["user_tags"].toStringList().forEach { tags += normalizeTag(it) }
-        return tags.filter { it.isNotBlank() }
-    }
-
-    private fun chooseSubject(tags: List<String>, payload: Map<String, Any>): String {
-        val prioritized = tags.firstOrNull { it !in STOP_WORDS }
-        if (!prioritized.isNullOrBlank()) {
-            return prettifyLabel(prioritized)
-        }
-        val filename = payload["filename"]?.toString().orEmpty()
-        val fallback = tokenize(filename).firstOrNull { it.length > 2 && it !in STOP_WORDS }
-        return fallback?.let { prettifyLabel(it) }.orEmpty()
-    }
-
-    private fun chooseStyle(tags: List<String>): String {
-        val styleKeywords = listOf("anime", "manga", "pixel", "watercolor", "sketch", "realistic", "comic")
-        return tags.firstOrNull { tag -> styleKeywords.any { tag.contains(it) } }?.let { prettifyLabel(it) }.orEmpty()
-    }
-
-    private fun collectEntityHints(entityType: String, payload: Map<String, Any>): List<String> {
-        val metadata = payload["metadata"].asStringAnyMap()
-        val taxonomy = parseTaxonomy(metadata["taxonomy_text"]?.toString().orEmpty())
-        val tags = collectTags(payload)
-
-        val keyAliases = when (entityType) {
-            "character" -> setOf("character", "char")
-            "series" -> setOf("series", "franchise", "title")
-            "artist" -> setOf("artist", "creator", "author")
-            else -> setOf(entityType)
-        }
-
-        val values = linkedSetOf<String>()
-        taxonomy.forEach { (key, entries) ->
-            if (key in keyAliases) {
-                entries.forEach { values += normalizeTag(it) }
-            }
-        }
-
-        tags.forEach { tag ->
-            val key = tag.substringBefore(':').substringBefore('=').trim().lowercase()
-            val value = tag.substringAfter(':', "").substringAfter('=', "").trim()
-            if (key in keyAliases && value.isNotBlank()) {
-                values += normalizeTag(value)
-            }
-        }
-
-        if (values.isEmpty()) {
-            tokenize(buildDocumentText(payload)).forEach { token ->
-                if (token.length >= 3 && token !in STOP_WORDS) {
-                    values += token
-                }
-            }
-        }
-
-        return values.filter { it.isNotBlank() }
-    }
-
-    private fun parseTaxonomy(text: String): Map<String, List<String>> {
-        if (text.isBlank()) {
-            return emptyMap()
-        }
-        val values = linkedMapOf<String, MutableList<String>>()
-        text.split('|', ';', '\n').forEach { rawEntry ->
-            val entry = rawEntry.trim()
-            if (entry.isBlank()) {
-                return@forEach
-            }
-            val idx = entry.indexOf('=')
-            if (idx <= 0 || idx >= entry.lastIndex) {
-                return@forEach
-            }
-            val key = entry.substring(0, idx).trim().lowercase()
-            val value = entry.substring(idx + 1).trim()
-            if (key.isBlank() || value.isBlank()) {
-                return@forEach
-            }
-            values.getOrPut(key) { mutableListOf() }.add(value)
-        }
-        return values.mapValues { (_, entries) -> entries.map { normalizeTag(it) }.filter { it.isNotBlank() }.distinct() }
-    }
-
-    private fun normalizeTag(tag: String): String {
-        return tag
-            .trim()
-            .lowercase()
-            .replace(Regex("[^a-z0-9:_=\\- ]"), " ")
-            .replace('-', ' ')
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun prettifyLabel(raw: String): String {
-        return raw
-            .replace('_', ' ')
-            .replace('-', ' ')
-            .split(' ')
-            .filter { it.isNotBlank() }
-            .joinToString(" ") { part -> part.replaceFirstChar { ch -> ch.uppercase() } }
-            .trim()
-    }
-
-    private fun extractStageString(upstreamResults: Map<String, Any>, stage: String, key: String): String {
-        val stageResult = upstreamResults[stage].asStringAnyMap()
-        val nested = stageResult["result"].asStringAnyMap()
-        return nested[key]?.toString().orEmpty().ifBlank { stageResult[key]?.toString().orEmpty() }
-    }
-
-    private fun extractStageTags(upstreamResults: Map<String, Any>, stage: String): List<String> {
-        val stageResult = upstreamResults[stage].asStringAnyMap()
-        val nested = stageResult["result"].asStringAnyMap()
-        return nested["tags"].toStringList().ifEmpty { stageResult["tags"].toStringList() }
-    }
-
-    private fun buildDuplicateCandidates(payload: Map<String, Any>): List<DuplicateCandidate> {
-        val rows = (payload["candidates"] as? List<*>)?.mapNotNull { it.asStringAnyMap() } ?: emptyList()
-        return rows.mapNotNull { row ->
-            val imageId = row["image_id"].toIntOrNullValue() ?: return@mapNotNull null
-            val text = row.firstNonBlankString("text", "caption", "filename", "path")
-            val embedding = row.numberList("embedding").takeIf { it.isNotEmpty() } ?: embeddingOf(text)
-            DuplicateCandidate(
-                imageId = imageId,
-                text = text,
-                embedding = embedding,
-            )
-        }
-    }
-
-    private fun embeddingOf(text: String): List<Double> {
-        val tokens = tokenize(text)
-        if (tokens.isEmpty()) {
-            return List(EMBEDDING_DIM) { 0.0 }
-        }
-
-        val vector = DoubleArray(EMBEDDING_DIM)
-        tokens.forEachIndexed { index, token ->
-            val hash = stableHash(token)
-            val primary = ((hash and Int.MAX_VALUE) % EMBEDDING_DIM)
-            val secondary = (((hash ushr 8) + (index * 31)) and Int.MAX_VALUE) % EMBEDDING_DIM
-            val tertiary = ((token.length * 13 + index) and Int.MAX_VALUE) % EMBEDDING_DIM
-
-            vector[primary] += 1.0
-            vector[secondary] += 0.5
-            vector[tertiary] += 0.25
-        }
-        return l2Normalize(vector)
-    }
-
-    private fun tokenize(text: String): List<String> {
-        return TOKEN_REGEX.findAll(text.lowercase())
-            .map { it.value }
-            .toList()
-    }
-
-    private fun stableHash(value: String): Int {
-        var hash = 0x811c9dc5.toInt()
-        value.forEach { ch ->
-            hash = hash xor ch.code
-            hash *= 16777619
-        }
-        return hash
-    }
-
-    private fun l2Normalize(vector: DoubleArray): List<Double> {
-        var sumSquares = 0.0
-        vector.forEach { value ->
-            sumSquares += value * value
-        }
-        if (sumSquares <= 0.0) {
-            return vector.toList()
-        }
-        val norm = sqrt(sumSquares)
-        return vector.map { it / norm }
-    }
-
-    private fun cosineSimilarity(left: List<Double>, right: List<Double>): Double {
-        if (left.isEmpty() || right.isEmpty()) {
-            return 0.0
-        }
-        val size = minOf(left.size, right.size)
-        var dot = 0.0
-        var leftNorm = 0.0
-        var rightNorm = 0.0
-        for (i in 0 until size) {
-            val l = left[i]
-            val r = right[i]
-            dot += l * r
-            leftNorm += l * l
-            rightNorm += r * r
-        }
-        if (leftNorm <= 0.0 || rightNorm <= 0.0) {
-            return 0.0
-        }
-        return dot / (sqrt(leftNorm) * sqrt(rightNorm))
-    }
-
-    private fun lexicalOverlap(queryTokens: Set<String>, candidateTokens: Set<String>): Double {
-        if (queryTokens.isEmpty() || candidateTokens.isEmpty()) {
-            return 0.0
-        }
-        val intersection = queryTokens.intersect(candidateTokens).size.toDouble()
-        val union = queryTokens.union(candidateTokens).size.toDouble().coerceAtLeast(1.0)
-        return (intersection / union).coerceIn(0.0, 1.0)
-    }
-
-    private fun Map<String, Any>.firstNonBlankString(vararg keys: String): String {
-        keys.forEach { key ->
-            val value = this[key]?.toString()?.trim().orEmpty()
-            if (value.isNotBlank()) {
-                return value
-            }
-        }
-        return ""
-    }
-
-    private fun Map<String, Any>.numberList(key: String): List<Double> {
-        val raw = this[key] as? List<*> ?: return emptyList()
-        return raw.mapNotNull { it.toDoubleOrNullValue() }
-    }
-
-    private fun Any?.asStringAnyMap(): Map<String, Any> {
-        val map = this as? Map<*, *> ?: return emptyMap()
-        val result = linkedMapOf<String, Any>()
-        map.forEach { (keyRaw, value) ->
-            val key = keyRaw?.toString()?.trim().orEmpty()
-            if (key.isBlank() || value == null) {
-                return@forEach
-            }
-            result[key] = value
-        }
-        return result
-    }
-
-    private fun Any?.asListOfMaps(): List<Map<String, Any>> {
-        val rawList = this as? List<*> ?: return emptyList()
-        return rawList.mapNotNull { it.asStringAnyMap() }
-    }
-
-    private fun Any?.toStringList(): List<String> {
-        return when (this) {
-            is List<*> -> this.mapNotNull { it?.toString()?.trim() }.filter { it.isNotBlank() }
-            is String -> this.split(',', '|', ';').map { it.trim() }.filter { it.isNotBlank() }
-            else -> emptyList()
-        }
-    }
-
-    private fun Any?.toIntOrNullValue(): Int? {
-        return when (this) {
-            is Number -> this.toInt()
-            else -> this?.toString()?.toIntOrNull()
-        }
-    }
-
-    private fun Any?.toDoubleOrNullValue(): Double? {
-        return when (this) {
-            is Number -> this.toDouble()
-            else -> this?.toString()?.toDoubleOrNull()
-        }
-    }
-
-    private fun Any?.toBooleanValue(defaultValue: Boolean): Boolean {
-        return when (this) {
-            is Boolean -> this
-            is Number -> this.toInt() != 0
-            else -> this?.toString()?.let { raw ->
-                when (raw.trim().lowercase()) {
-                    "true", "1", "yes", "on" -> true
-                    "false", "0", "no", "off" -> false
-                    else -> defaultValue
-                }
-            } ?: defaultValue
-        }
-    }
-
-    private data class ScoredCandidate(
-        val imageId: Int,
-        val score: Double,
-        val cosine: Double,
-        val lexical: Double,
-    )
-
-    private data class DuplicateCandidate(
-        val imageId: Int,
-        val text: String,
-        val embedding: List<Double>,
-    )
-
-    companion object {
-        private const val EMBEDDING_DIM = 64
-        private val TOKEN_REGEX = Regex("[a-z0-9_]+")
-        private val STOP_WORDS = setOf(
-            "the",
-            "and",
-            "for",
-            "with",
-            "from",
-            "this",
-            "that",
-            "image",
-            "illustration",
-            "untitled",
-            "file",
-        )
-    }
-}

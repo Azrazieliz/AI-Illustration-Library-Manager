@@ -76,6 +76,7 @@ class DatasetBuilder:
         quality_score = _quality_score(payload)
         completeness_score = _completeness_score(payload)
         provenance = _provenance(payload)
+        semantic_payload = semantic or {}
 
         return DatasetEntry(
             image_id=image.id,
@@ -85,6 +86,17 @@ class DatasetBuilder:
             quality_score=quality_score,
             completeness_score=completeness_score,
             provenance=provenance,
+            image_uuid=image.uuid,
+            caption=_optional_text(semantic_payload, "caption"),
+            tag_ids=[tag.uuid for tag in tags],
+            negative_tags=_optional_text_list(semantic_payload, "negative_tags"),
+            character_ids=[character.uuid for character in image.characters],
+            series_ids=[] if image.series is None else [image.series.uuid],
+            artist_ids=[],
+            embedding_uuid=embedding.uuid if embedding is not None else None,
+            content_hash=hash_record.sha256 if hash_record is not None else None,
+            dataset_split=_optional_text(semantic_payload, "dataset_split"),
+            format=_optional_text(semantic_payload, "format"),
         )
 
 
@@ -144,3 +156,22 @@ def _provenance(payload: dict) -> list[str]:
     if payload["semantic"]:
         out.append("semantic")
     return out
+
+
+def _optional_text(payload: dict, field_name: str) -> str | None:
+    if field_name not in payload or payload[field_name] is None:
+        return None
+    value = payload[field_name]
+    if not isinstance(value, str):
+        raise ValueError(f"Dataset {field_name} must be a string")
+    value = value.strip()
+    return value or None
+
+
+def _optional_text_list(payload: dict, field_name: str) -> list[str]:
+    if field_name not in payload or payload[field_name] is None:
+        return []
+    values = payload[field_name]
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise ValueError(f"Dataset {field_name} must be a list of strings")
+    return [value.strip() for value in values if value.strip()]

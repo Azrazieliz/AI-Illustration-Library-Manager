@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="asterion_matte_black">#080808</color>
+    <color name="asterion_deep_onyx">#141414</color>
+    <color name="asterion_charcoal">#1A1A1A</color>
+    <color name="asterion_gold">#C8A95A</color>
+    <color name="asterion_gold_highlight">#E0C16F</color>
+    <color name="asterion_gold_shadow">#A67C1A</color>
+    <color name="ic_launcher_background">#080808</color>
+    <color name="asterion_splash_bg">#080808</color>
+</resources>

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from enum import Enum
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 from typing import Any
 
+from sqlalchemy import delete, select, update
+
+from engine.database.models.knowledge_base_state import KnowledgeBaseStateRecord
+from engine.database.session import session_scope
 from engine.knowledge_base.knowledge_base_builder import KnowledgeBaseBuilder
 from engine.knowledge_base.knowledge_base_exceptions import (
     KnowledgeBaseDuplicateError,
@@ -33,9 +38,12 @@ from engine.review.review_models import ReviewItem, ReviewStatus
 class KnowledgeBaseRepository:
     """Canonical knowledge store for trusted training data."""
 
+    _state_key = "default"
+    _state_lock = RLock()
+
     def __init__(self, *, builder: KnowledgeBaseBuilder | None = None) -> None:
         self.builder = builder or KnowledgeBaseBuilder()
-        self._lock = Lock()
+        self._lock = self._state_lock
         self._datasets: dict[int, KnowledgeBaseDataset] = {}
         self._series: dict[int, KnowledgeBaseSeries] = {}
         self._characters: dict[int, KnowledgeBaseCharacter] = {}
@@ -47,6 +55,13 @@ class KnowledgeBaseRepository:
         self._next_reference_image_id = 1
         self._next_training_sample_id = 1
         self._search_cache: dict[str, list[KnowledgeBaseCandidate]] = {}
+        self._state_version: int | None = None
+        self._load_state()
+
+    @classmethod
+    def reset_state(cls) -> None:
+        with cls._state_lock, session_scope() as session:
+            session.execute(delete(KnowledgeBaseStateRecord))
 
     # ------------------------------------------------------------------
     # Dataset lifecycle
@@ -77,7 +92,9 @@ class KnowledgeBaseRepository:
                 notes=notes,
             )
             self._datasets[identifier] = dataset
-            return self._clone(dataset)
+            result = self._clone(dataset)
+            self._persist_state()
+            return result
 
     def list_datasets(self) -> list[KnowledgeBaseDataset]:
         return [self._clone(item) for item in sorted(self._datasets.values(), key=lambda item: item.dataset_id)]
@@ -96,7 +113,9 @@ class KnowledgeBaseRepository:
                     setattr(dataset, key, value)
             dataset.updated_at = datetime.now(timezone.utc)
             self._recalculate_dataset_counts(dataset_id)
-            return self._clone(dataset)
+            result = self._clone(dataset)
+            self._persist_state()
+            return result
 
     def delete_dataset(self, dataset_id: int) -> None:
         with self._lock:
@@ -116,6 +135,7 @@ class KnowledgeBaseRepository:
                 self._training_samples.pop(identifier, None)
             del self._datasets[dataset_id]
             self._search_cache.clear()
+            self._persist_state()
 
     # ------------------------------------------------------------------
     # Series and characters
@@ -157,7 +177,9 @@ class KnowledgeBaseRepository:
             self._series[identifier] = record
             self._recalculate_dataset_counts(dataset_id)
             self._search_cache.clear()
-            return self._clone(record)
+            result = self._clone(record)
+            self._persist_state()
+            return result
 
     def create_character(
         self,
@@ -208,7 +230,9 @@ class KnowledgeBaseRepository:
                 self._series[series_id].character_ids = self._dedupe_ints(self._series[series_id].character_ids + [identifier])
             self._recalculate_dataset_counts(dataset_id)
             self._search_cache.clear()
-            return self._clone(record)
+            result = self._clone(record)
+            self._persist_state()
+            return result
 
     def add_relationship(
         self,
@@ -234,7 +258,9 @@ class KnowledgeBaseRepository:
             character.relationships.append(relationship)
             character.updated_at = datetime.now(timezone.utc)
             self._recalculate_dataset_counts(character.dataset_id)
-            return self._clone(relationship)
+            result = self._clone(relationship)
+            self._persist_state()
+            return result
 
     def add_reference_image(
         self,
@@ -281,7 +307,9 @@ class KnowledgeBaseRepository:
             character.reference_images.append(record)
             character.updated_at = datetime.now(timezone.utc)
             self._recalculate_dataset_counts(character.dataset_id)
-            return self._clone(record)
+            result = self._clone(record)
+            self._persist_state()
+            return result
 
     def add_training_sample(
         self,
@@ -324,7 +352,9 @@ class KnowledgeBaseRepository:
             character.confidence_score = self._adjust_confidence(character.confidence_score, record)
             character.updated_at = datetime.now(timezone.utc)
             self._recalculate_dataset_counts(character.dataset_id)
-            return self._clone(record)
+            result = self._clone(record)
+            self._persist_state()
+            return result
 
     def add_approved_review_sample(
         self,
@@ -361,7 +391,9 @@ class KnowledgeBaseRepository:
             sample.approved = True
             sample.weight = max(sample.weight, 1.5)
             sample.reviewed_at = sample.reviewed_at or datetime.now(timezone.utc)
-            return self._clone(sample)
+            result = self._clone(sample)
+            self._persist_state()
+            return result
 
     def reject_training_sample(self, sample_id: int) -> KnowledgeBaseTrainingSample:
         with self._lock:
@@ -371,7 +403,9 @@ class KnowledgeBaseRepository:
             sample.approved = False
             sample.weight = min(sample.weight, 0.25)
             sample.reviewed_at = sample.reviewed_at or datetime.now(timezone.utc)
-            return self._clone(sample)
+            result = self._clone(sample)
+            self._persist_state()
+            return result
 
     # ------------------------------------------------------------------
     # Finders and search
@@ -470,6 +504,16 @@ class KnowledgeBaseRepository:
         bundle = self.builder.deserialize_bundle(data, format=format)
         return self.import_bundle(bundle, merge=merge)
 
+    def import_datasets(
+        self,
+        data: str | dict[str, Any] | list[dict[str, Any]],
+        *,
+        format: KnowledgeBaseImportFormat | str = KnowledgeBaseImportFormat.JSON,
+        merge: bool = False,
+    ) -> list[KnowledgeBaseDataset]:
+        bundles = self.builder.deserialize_bundles(data, format=format)
+        return [self.import_bundle(bundle, merge=merge) for bundle in bundles]
+
     def import_bundle(self, bundle: dict[str, Any], *, merge: bool = False) -> KnowledgeBaseDataset:
         with self._lock:
             dataset_payload = dict(bundle.get("dataset", {}))
@@ -513,7 +557,9 @@ class KnowledgeBaseRepository:
 
             self._recalculate_dataset_counts(dataset_id)
             self._search_cache.clear()
-            return self._clone(self._datasets[dataset_id])
+            result = self._clone(self._datasets[dataset_id])
+            self._persist_state()
+            return result
 
     # ------------------------------------------------------------------
     # Validation and statistics
@@ -623,15 +669,13 @@ class KnowledgeBaseRepository:
                 series.dataset_id = target_dataset_id
             for character in [item for item in self._characters.values() if item.dataset_id == source_dataset_id]:
                 character.dataset_id = target_dataset_id
-            for reference in [item for item in self._reference_images.values() if item.dataset_id == source_dataset_id]:
-                reference.dataset_id = target_dataset_id
-            for sample in [item for item in self._training_samples.values() if item.dataset_id == source_dataset_id]:
-                sample.dataset_id = target_dataset_id
             del self._datasets[source_dataset_id]
             target.updated_at = datetime.now(timezone.utc)
             self._recalculate_dataset_counts(target_dataset_id)
             self._search_cache.clear()
-            return self._clone(target)
+            result = self._clone(target)
+            self._persist_state()
+            return result
 
     # ------------------------------------------------------------------
     # Internal import helpers
@@ -1095,3 +1139,250 @@ class KnowledgeBaseRepository:
 
     def _clone(self, value: Any) -> Any:
         return deepcopy(value)
+
+    def _load_state(self) -> None:
+        with self._lock, session_scope() as session:
+            row = session.scalar(select(KnowledgeBaseStateRecord).where(KnowledgeBaseStateRecord.state_key == self._state_key))
+            if row is None:
+                return
+            self._state_version = row.version
+            self._restore_state(dict(row.state_payload or {}))
+
+    def _persist_state(self) -> None:
+        payload = self._state_payload()
+        with session_scope() as session:
+            row = session.scalar(select(KnowledgeBaseStateRecord).where(KnowledgeBaseStateRecord.state_key == self._state_key))
+            if row is None:
+                if self._state_version is not None:
+                    raise RuntimeError("Knowledge-base state was removed while this repository was active")
+                row = KnowledgeBaseStateRecord(state_key=self._state_key, state_payload=payload)
+                session.add(row)
+                session.flush()
+                self._state_version = row.version
+                return
+            if self._state_version is None or row.version != self._state_version:
+                raise RuntimeError("Knowledge-base state changed in another repository instance; reload before writing")
+            result = session.execute(
+                update(KnowledgeBaseStateRecord)
+                .where(
+                    KnowledgeBaseStateRecord.id == row.id,
+                    KnowledgeBaseStateRecord.version == self._state_version,
+                )
+                .values(
+                    state_payload=payload,
+                    version=KnowledgeBaseStateRecord.version + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            if int(result.rowcount or 0) != 1:
+                raise RuntimeError("Knowledge-base state changed concurrently; retry the operation")
+            self._state_version += 1
+
+    def _state_payload(self) -> dict[str, Any]:
+        characters: list[dict[str, Any]] = []
+        for character in sorted(self._characters.values(), key=lambda item: item.canonical_id):
+            payload = asdict(character)
+            payload.pop("reference_images", None)
+            payload.pop("approved_examples", None)
+            characters.append(self._normalize_state_value(payload))
+        return {
+            "datasets": [
+                self._normalize_state_value(asdict(item))
+                for item in sorted(self._datasets.values(), key=lambda item: item.dataset_id)
+            ],
+            "series": [
+                self._normalize_state_value(asdict(item))
+                for item in sorted(self._series.values(), key=lambda item: item.canonical_id)
+            ],
+            "characters": characters,
+            "reference_images": [
+                self._normalize_state_value(asdict(item))
+                for item in sorted(self._reference_images.values(), key=lambda item: item.image_id)
+            ],
+            "training_samples": [
+                self._normalize_state_value(asdict(item))
+                for item in sorted(self._training_samples.values(), key=lambda item: item.sample_id)
+            ],
+            "next_ids": {
+                "dataset": self._next_dataset_id,
+                "series": self._next_series_id,
+                "character": self._next_character_id,
+                "reference_image": self._next_reference_image_id,
+                "training_sample": self._next_training_sample_id,
+            },
+        }
+
+    def _restore_state(self, payload: dict[str, Any]) -> None:
+        self._datasets = {}
+        self._series = {}
+        self._characters = {}
+        self._reference_images = {}
+        self._training_samples = {}
+
+        for item in payload.get("datasets", []):
+            if not isinstance(item, dict):
+                continue
+            identifier = int(item["dataset_id"])
+            self._datasets[identifier] = KnowledgeBaseDataset(
+                dataset_id=identifier,
+                name=str(item.get("name", "")),
+                description=str(item.get("description", "")),
+                version=str(item.get("version", "1.0")),
+                status=KnowledgeBaseDatasetStatus(str(item.get("status", KnowledgeBaseDatasetStatus.ACTIVE.value))),
+                created_at=self._state_datetime(item.get("created_at")),
+                updated_at=self._state_datetime(item.get("updated_at")),
+                character_count=int(item.get("character_count", 0)),
+                series_count=int(item.get("series_count", 0)),
+                image_count=int(item.get("image_count", 0)),
+                alias_count=int(item.get("alias_count", 0)),
+                training_sample_count=int(item.get("training_sample_count", 0)),
+                reference_image_count=int(item.get("reference_image_count", 0)),
+                notes=str(item.get("notes", "")),
+                tags=[str(value) for value in item.get("tags", [])],
+            )
+
+        for item in payload.get("series", []):
+            if not isinstance(item, dict):
+                continue
+            identifier = int(item["canonical_id"])
+            self._series[identifier] = KnowledgeBaseSeries(
+                canonical_id=identifier,
+                dataset_id=int(item["dataset_id"]),
+                title=str(item.get("title", "")),
+                aliases=[str(value) for value in item.get("aliases", [])],
+                localized_titles=[str(value) for value in item.get("localized_titles", [])],
+                description=str(item.get("description", "")),
+                parent_series_id=item.get("parent_series_id"),
+                related_series_ids=[int(value) for value in item.get("related_series_ids", [])],
+                character_ids=[int(value) for value in item.get("character_ids", [])],
+                tags=[str(value) for value in item.get("tags", [])],
+                notes=str(item.get("notes", "")),
+                created_at=self._state_datetime(item.get("created_at")),
+                updated_at=self._state_datetime(item.get("updated_at")),
+            )
+
+        for item in payload.get("characters", []):
+            if not isinstance(item, dict):
+                continue
+            identifier = int(item["canonical_id"])
+            relationships = [
+                KnowledgeBaseRelationship(
+                    relation=str(value.get("relation", "")),
+                    target_kind=KnowledgeBaseRecordKind(str(value.get("target_kind", KnowledgeBaseRecordKind.CHARACTER.value))),
+                    target_id=int(value.get("target_id", 0)),
+                    confidence=float(value.get("confidence", 0.0)),
+                    notes=str(value.get("notes", "")),
+                )
+                for value in item.get("relationships", [])
+                if isinstance(value, dict)
+            ]
+            self._characters[identifier] = KnowledgeBaseCharacter(
+                canonical_id=identifier,
+                dataset_id=int(item["dataset_id"]),
+                series_id=item.get("series_id"),
+                canonical_name=str(item.get("canonical_name", "")),
+                aliases=[str(value) for value in item.get("aliases", [])],
+                localized_names=[str(value) for value in item.get("localized_names", [])],
+                romaji=item.get("romaji"),
+                japanese=item.get("japanese"),
+                english=item.get("english"),
+                gender=item.get("gender"),
+                description=str(item.get("description", "")),
+                relationships=relationships,
+                tags=[str(value) for value in item.get("tags", [])],
+                notes=str(item.get("notes", "")),
+                confidence_score=float(item.get("confidence_score", 0.0)),
+                training_priority=float(item.get("training_priority", 1.0)),
+                created_at=self._state_datetime(item.get("created_at")),
+                updated_at=self._state_datetime(item.get("updated_at")),
+            )
+
+        for item in payload.get("reference_images", []):
+            if not isinstance(item, dict):
+                continue
+            identifier = int(item["image_id"])
+            self._reference_images[identifier] = KnowledgeBaseReferenceImage(
+                image_id=identifier,
+                character_id=int(item["character_id"]),
+                path=str(item.get("path", "")),
+                quality_score=float(item.get("quality_score", 0.0)),
+                pose_type=item.get("pose_type"),
+                expression=item.get("expression"),
+                outfit=item.get("outfit"),
+                source=item.get("source"),
+                approved=bool(item.get("approved", True)),
+                embedding_id=item.get("embedding_id"),
+                hash_id=item.get("hash_id"),
+                metadata=dict(item.get("metadata", {})),
+                created_at=self._state_datetime(item.get("created_at")),
+            )
+
+        for item in payload.get("training_samples", []):
+            if not isinstance(item, dict):
+                continue
+            identifier = int(item["sample_id"])
+            self._training_samples[identifier] = KnowledgeBaseTrainingSample(
+                sample_id=identifier,
+                character_id=int(item["character_id"]),
+                image_id=int(item.get("image_id", 0)),
+                approved=bool(item.get("approved", False)),
+                reviewed_by=item.get("reviewed_by"),
+                reviewed_at=self._state_datetime_or_none(item.get("reviewed_at")),
+                confidence=float(item.get("confidence", 0.0)),
+                source=item.get("source"),
+                weight=float(item.get("weight", 1.0)),
+                metadata=dict(item.get("metadata", {})),
+                lora_metadata=dict(item.get("lora_metadata", {})),
+            )
+
+        for reference in self._reference_images.values():
+            character = self._characters.get(reference.character_id)
+            if character is not None:
+                character.reference_images.append(reference)
+        for sample in self._training_samples.values():
+            character = self._characters.get(sample.character_id)
+            if character is not None:
+                character.approved_examples.append(sample)
+
+        next_ids = payload.get("next_ids", {})
+        self._next_dataset_id = self._next_identifier(next_ids.get("dataset"), self._datasets)
+        self._next_series_id = self._next_identifier(next_ids.get("series"), self._series)
+        self._next_character_id = self._next_identifier(next_ids.get("character"), self._characters)
+        self._next_reference_image_id = self._next_identifier(next_ids.get("reference_image"), self._reference_images)
+        self._next_training_sample_id = self._next_identifier(next_ids.get("training_sample"), self._training_samples)
+        self._search_cache.clear()
+
+    def _state_datetime(self, value: Any) -> datetime:
+        parsed = self._parse_datetime(value)
+        if parsed is None:
+            return datetime.now(timezone.utc)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+    def _state_datetime_or_none(self, value: Any) -> datetime | None:
+        if value is None or value == "":
+            return None
+        return self._state_datetime(value)
+
+    @staticmethod
+    def _next_identifier(value: Any, records: dict[int, Any]) -> int:
+        minimum = max(records.keys(), default=0) + 1
+        try:
+            return max(minimum, int(value))
+        except (TypeError, ValueError):
+            return minimum
+
+    @classmethod
+    def _normalize_state_value(cls, value: Any) -> Any:
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): cls._normalize_state_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._normalize_state_value(item) for item in value]
+        if isinstance(value, set):
+            return [cls._normalize_state_value(item) for item in sorted(value, key=str)]
+        return value

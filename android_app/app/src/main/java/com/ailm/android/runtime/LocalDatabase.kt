@@ -40,6 +40,9 @@ class LocalDatabase(
         if (oldVersion < 8) {
             migrateToV8(db)
         }
+        if (oldVersion < 9) {
+            migrateToV9(db)
+        }
     }
 
     override fun onOpen(db: SQLiteDatabase) {
@@ -298,6 +301,23 @@ class LocalDatabase(
         FusionDatabaseSchema.recordSchemaHistory(db, schemaVersion = 8, notes = "Added Local AI execution layer schema")
     }
 
+    private fun migrateToV9(db: SQLiteDatabase) {
+        db.execSQL("DROP TRIGGER IF EXISTS images_ai")
+        db.execSQL("DROP TRIGGER IF EXISTS images_ad")
+        db.execSQL("DROP TRIGGER IF EXISTS images_au")
+
+        val ftsSql = db.rawQuery(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'image_fts'",
+            emptyArray(),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else "" }
+        if (ftsSql.contains("fts5", ignoreCase = true)) {
+            createFts5ImageTriggers(db, ifNotExists = false)
+        } else if (ftsSql.contains("fts4", ignoreCase = true)) {
+            createFts4ImageTriggers(db, ifNotExists = false)
+        }
+        FusionDatabaseSchema.recordSchemaHistory(db, schemaVersion = 9, notes = "Repaired image FTS mutation triggers")
+    }
+
     private fun columnMissing(db: SQLiteDatabase, table: String, column: String): Boolean {
         db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
             while (cursor.moveToNext()) {
@@ -346,64 +366,72 @@ class LocalDatabase(
         }
 
         if (ftsMode == "fts5") {
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_ai AFTER INSERT ON images BEGIN
-                    INSERT INTO image_fts(rowid, filename, uri, tags_text, metadata_text)
-                    VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
-                END
-                """.trimIndent(),
-            )
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_ad AFTER DELETE ON images BEGIN
-                    INSERT INTO image_fts(image_fts, rowid, filename, uri, tags_text, metadata_text)
-                    VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
-                END
-                """.trimIndent(),
-            )
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_au AFTER UPDATE ON images BEGIN
-                    INSERT INTO image_fts(image_fts, rowid, filename, uri, tags_text, metadata_text)
-                    VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
-                    INSERT INTO image_fts(rowid, filename, uri, tags_text, metadata_text)
-                    VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
-                END
-                """.trimIndent(),
-            )
+            createFts5ImageTriggers(db, ifNotExists)
         } else {
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_ai AFTER INSERT ON images BEGIN
-                    INSERT INTO image_fts(docid, filename, uri, tags_text, metadata_text)
-                    VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
-                END
-                """.trimIndent(),
-            )
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_ad AFTER DELETE ON images BEGIN
-                    INSERT INTO image_fts(image_fts, docid, filename, uri, tags_text, metadata_text)
-                    VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
-                END
-                """.trimIndent(),
-            )
-            db.execSQL(
-                """
-                CREATE TRIGGER ${ifNotExistsSql}images_au AFTER UPDATE ON images BEGIN
-                    INSERT INTO image_fts(image_fts, docid, filename, uri, tags_text, metadata_text)
-                    VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
-                    INSERT INTO image_fts(docid, filename, uri, tags_text, metadata_text)
-                    VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
-                END
-                """.trimIndent(),
-            )
+            createFts4ImageTriggers(db, ifNotExists)
         }
 
         if (rebuild) {
             db.execSQL("INSERT INTO image_fts(image_fts) VALUES ('rebuild')")
         }
+    }
+
+    private fun createFts5ImageTriggers(db: SQLiteDatabase, ifNotExists: Boolean) {
+        val ifNotExistsSql = if (ifNotExists) "IF NOT EXISTS " else ""
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_ai AFTER INSERT ON images BEGIN
+                INSERT INTO image_fts(rowid, filename, uri, tags_text, metadata_text)
+                VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_ad AFTER DELETE ON images BEGIN
+                INSERT INTO image_fts(image_fts, rowid, filename, uri, tags_text, metadata_text)
+                VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_au AFTER UPDATE ON images BEGIN
+                INSERT INTO image_fts(image_fts, rowid, filename, uri, tags_text, metadata_text)
+                VALUES ('delete', old.image_id, old.filename, old.uri, old.tags_text, old.metadata_text);
+                INSERT INTO image_fts(rowid, filename, uri, tags_text, metadata_text)
+                VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
+            END
+            """.trimIndent(),
+        )
+    }
+
+    private fun createFts4ImageTriggers(db: SQLiteDatabase, ifNotExists: Boolean) {
+        val ifNotExistsSql = if (ifNotExists) "IF NOT EXISTS " else ""
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_ai AFTER INSERT ON images BEGIN
+                INSERT INTO image_fts(docid, filename, uri, tags_text, metadata_text)
+                VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_ad AFTER DELETE ON images BEGIN
+                DELETE FROM image_fts WHERE docid = old.image_id;
+            END
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TRIGGER ${ifNotExistsSql}images_au AFTER UPDATE ON images BEGIN
+                DELETE FROM image_fts WHERE docid = old.image_id;
+                INSERT INTO image_fts(docid, filename, uri, tags_text, metadata_text)
+                VALUES (new.image_id, new.filename, new.uri, new.tags_text, new.metadata_text);
+            END
+            """.trimIndent(),
+        )
     }
 
     private fun isUnsupportedFts5(error: SQLiteException): Boolean {
@@ -414,6 +442,6 @@ class LocalDatabase(
     companion object {
         private const val DB_TAG = "AilmLocalDatabase"
         private const val DB_NAME = "ailm_android.sqlite"
-        private const val DB_VERSION = 8
+        private const val DB_VERSION = 9
     }
 }

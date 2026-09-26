@@ -48,6 +48,7 @@ def advanced_search_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
     database_manager.__init__()
 
     ReviewRepository.reset_state()
+    AdvancedSearchRepository.reset_state()
 
     return _seed_dataset(tmp_path)
 
@@ -339,6 +340,29 @@ def test_saved_searches_and_history(advanced_search_env: dict[str, int]) -> None
     assert replay.results
     assert len(engine.list_saved_searches()) == 1
     assert len(engine.history()) >= 1
+
+
+def test_saved_search_and_history_survive_engine_restart(advanced_search_env: dict[str, int]) -> None:
+    first = _engine()
+    query = AdvancedSearchQuery(
+        query_text="tag:heroine",
+        filters=first.builder.query_from_payload({"filters": {"file_types": ["png"]}}).filters,
+        use_cache=False,
+    )
+    saved = first.save_search(name="persistent heroine lookup", query=query)
+    initial = first.run_saved_search(saved.search_id)
+
+    restarted = _engine()
+    restored = restarted.list_saved_searches()
+    replay = restarted.run_saved_search(saved.search_id)
+    history = restarted.history()
+
+    assert initial is not None
+    assert [(item.search_id, item.name) for item in restored] == [(saved.search_id, "persistent heroine lookup")]
+    assert restored[0].query.filters.file_types == {"png"}
+    assert replay is not None
+    assert replay.total == initial.total
+    assert len(history) >= 2
 
 
 def test_query_cache_and_invalidation(advanced_search_env: dict[str, int]) -> None:

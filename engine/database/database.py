@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from engine.config import settings
@@ -54,6 +54,33 @@ class DatabaseManager:
     def create_tables(self) -> None:
         """Create all database tables."""
         BaseModel.metadata.create_all(bind=self.engine)
+        self._upgrade_embedding_schema()
+
+    def _upgrade_embedding_schema(self) -> None:
+        """Additive upgrade for canonical metadata on pre-existing embedding tables."""
+        inspector = inspect(self.engine)
+        if "embedding" not in inspector.get_table_names():
+            return
+
+        existing_columns = {column["name"] for column in inspector.get_columns("embedding")}
+        additions = {
+            "image_uuid": "VARCHAR(36)",
+            "dimension": "INTEGER",
+            "dtype": "VARCHAR(64)",
+            "storage_path": "VARCHAR(2048)",
+            "checksum": "VARCHAR(64)",
+            "version": "INTEGER NOT NULL DEFAULT 1",
+        }
+        indexes = {
+            "ix_embedding_image_uuid": "image_uuid",
+            "ix_embedding_checksum": "checksum",
+        }
+        with self.engine.begin() as connection:
+            for name, definition in additions.items():
+                if name not in existing_columns:
+                    connection.execute(text(f"ALTER TABLE embedding ADD COLUMN {name} {definition}"))
+            for name, column in indexes.items():
+                connection.execute(text(f"CREATE INDEX IF NOT EXISTS {name} ON embedding ({column})"))
 
     def drop_tables(self) -> None:
         """Drop all database tables."""

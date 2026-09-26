@@ -19,16 +19,26 @@ from engine.pipeline.job_queue import (
     TransactionQueue,
 )
 from engine.pipeline.pipeline_models import PipelineJob, PipelineJobStatus, QueueType
+from engine.repositories.pipeline_job_repository import PipelineJobRepository
 
 
 class QueueManager:
     """Central registry for the local queue-driven processing pipeline."""
 
-    def __init__(self, callback: Callable[[object], None] | None = None) -> None:
+    def __init__(
+        self,
+        callback: Callable[[object], None] | None = None,
+        *,
+        repository: PipelineJobRepository | None = None,
+        recover_unfinished: bool = False,
+    ) -> None:
         self.callback = callback
         self.logger = get_logger(self.__class__.__name__)
+        self.repository = repository or PipelineJobRepository()
         self._queues: dict[QueueType, object] = {}
         self._register_default_queues()
+        if recover_unfinished:
+            self._restore_unfinished_jobs()
 
     def _register_default_queues(self) -> None:
         self.register(DiscoveryQueue(callback=self.callback))
@@ -45,6 +55,7 @@ class QueueManager:
 
     def register(self, queue: object) -> None:
         queue_type = getattr(queue, "queue_type")
+        setattr(queue, "repository", self.repository)
         self._queues[queue_type] = queue
 
     def enqueue(self, queue_type: QueueType, job: PipelineJob) -> PipelineJob:
@@ -64,9 +75,14 @@ class QueueManager:
         queue.cancel(job)
 
     def retry(self, queue_type: QueueType, job: PipelineJob) -> PipelineJob:
+        if job.max_retries is not None and job.retry_count >= job.max_retries:
+            raise RuntimeError(f"Pipeline job {job.id} exhausted its configured retry limit")
         job.retry_count += 1
         job.status = PipelineJobStatus.PENDING
         return self.enqueue(queue_type, job)
+
+    def mark_started(self, queue_type: QueueType, job: PipelineJob) -> None:
+        self._queues[queue_type].mark_started(job)
 
     def mark_completed(self, queue_type: QueueType, job: PipelineJob) -> None:
         self._queues[queue_type].mark_completed(job)
@@ -98,3 +114,10 @@ class QueueManager:
 
     def queues(self) -> tuple[QueueType, ...]:
         return tuple(self._queues.keys())
+
+    def _restore_unfinished_jobs(self) -> None:
+        for job in self.repository.recover_unfinished():
+            queue = self._queues.get(job.queue_type)
+            if queue is None:
+                raise ValueError(f"Persisted pipeline job {job.id} references unavailable queue {job.queue_type.value}")
+            queue.enqueue(job)

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
+import numpy as np
 import pytest
 
 from engine.collections.collection_models import CollectionKind
 from engine.config import settings
 from engine.database.database import database_manager
+from engine.database.models.dataset import DatasetRecord
+from engine.database.models.collection import CollectionRecordRow
 from engine.database.models.embedding import Embedding
 from engine.database.models.job import Job
 from engine.database.models.metadata import MetadataRecord
@@ -51,8 +55,7 @@ def integrity_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     CollectionRepository.reset_state()
     ReviewRepository.reset_state()
     DatasetRepository._dataset_provenance = {}
-    ExportRepository._manifest_store = {}
-    ExportRepository._provenance_store = {}
+    ExportRepository.reset_state()
 
 
 def _register_image(path: Path) -> int:
@@ -73,7 +76,7 @@ def _add_complete_assets(image_id: int, image_path: Path) -> None:
 
     embedding_repo = EmbeddingRepository()
     vector_path = image_path.parent / f"{image_path.stem}.npy"
-    vector_path.write_bytes(b"vec")
+    np.save(vector_path, np.asarray([1.0, 0.0, 0.0], dtype=np.float32), allow_pickle=False)
     embedding_repo.create_embedding_record(image_id=image_id, vector_path=str(vector_path), model_name="mock", model_version="1")
     embedding_repo.commit()
 
@@ -203,7 +206,10 @@ def test_collection_pipeline_statistics_dataset_export_checks(integrity_env: Non
     collection_repo = CollectionRepository()
     root = collection_repo.create_collection(name="Root", kind=CollectionKind.STATIC)
     child = collection_repo.create_collection(name="Child", kind=CollectionKind.STATIC, parent_id=root.collection_id)
-    child.parent_id = 999999
+    child_row = collection_repo.session.get(CollectionRecordRow, child.collection_id)
+    assert child_row is not None
+    child_row.parent_id = 999999
+    collection_repo.commit()
 
     _ = collection_repo.add_image(root.collection_id, 999999)
 
@@ -224,11 +230,29 @@ def test_collection_pipeline_statistics_dataset_export_checks(integrity_env: Non
     image_repo.commit()
 
     dataset_repo = DatasetRepository()
-    dataset_repo.save_dataset_provenance(999999, [str(tmp_path / "missing-source.png")])
+    dataset_repo.session.add(
+        DatasetRecord(
+            image_uuid=str(uuid4()),
+            tag_ids=[],
+            negative_tags=[],
+            character_ids=[],
+            series_ids=[],
+            artist_ids=[],
+            confidence_score=0.0,
+            quality_score=0.0,
+            completeness_score=0.0,
+            provenance=[str(tmp_path / "missing-source.png")],
+        )
+    )
+    dataset_repo.session.commit()
 
     export_repo = ExportRepository()
-    export_repo._manifest_store[("generic", image_id)] = {}
-    export_repo._manifest_store[("unknown-format", image_id)] = {"file_path": str(tmp_path / "missing-export.txt")}
+    export_repo.save_export_manifest(format_type="generic", image_id=image_id, manifest={})
+    export_repo.save_export_manifest(
+        format_type="unknown-format",
+        image_id=image_id,
+        manifest={"file_path": str(tmp_path / "missing-export.txt")},
+    )
 
     report = LibraryIntegrityEngine().run_full_scan()
 

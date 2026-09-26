@@ -14,8 +14,8 @@ from engine.plugin_system.plugin_models import (
 )
 
 
-class PluginRepository:
-    """Thread-safe runtime/plugin state store for the plugin subsystem."""
+class InMemoryPluginRepository:
+    """Explicit in-memory adapter retained for isolated tests and injected experiments."""
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -161,6 +161,15 @@ class PluginRepository:
         with self._lock:
             self._task_registry.setdefault(plugin_id, {})[task_id] = reference + timedelta(seconds=max(1, interval_seconds))
 
+    def ensure_scheduled_task(self, plugin_id: str, task_id: str, interval_seconds: int, now: datetime | None = None) -> None:
+        reference = now or datetime.now(timezone.utc)
+        with self._lock:
+            tasks = self._task_registry.setdefault(plugin_id, {})
+            tasks.setdefault(task_id, reference + timedelta(seconds=max(1, interval_seconds)))
+
     def clear_scheduled_tasks(self, plugin_id: str) -> None:
         with self._lock:
             self._task_registry[plugin_id] = {}
+
+
+from engine.repositories.plugin_repository_durable import DurablePluginRepository as PluginRepository

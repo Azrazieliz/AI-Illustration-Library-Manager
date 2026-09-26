@@ -1,6 +1,8 @@
 package com.ailm.android.startup
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
@@ -16,11 +18,55 @@ object AppBootstrap {
 
     fun initializeApplication(context: Context) {
         val appContext = context.applicationContext
-        initializeRuntime(appContext)
-        registerStartupWorkers(appContext)
+        // Initialize runtime and register workers asynchronously so application
+        // startup and the splash screen are not blocked by heavy init work.
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        executor.execute {
+            try {
+                initializeRuntime(appContext)
+                registerStartupWorkers(appContext)
+            } finally {
+                // notify listeners even if startup initialization fails
+                notifyInitializationListeners()
+                // shut down executor after tasks complete
+                try { executor.shutdown() } catch (_: Throwable) {}
+            }
+        }
     }
 
-    fun initializeRuntime(context: Context) {
+    private val initListeners = mutableListOf<() -> Unit>()
+
+    fun isRuntimeInitialized(): Boolean {
+        return runtimeInitialized
+    }
+
+    fun addInitializationListener(listener: () -> Unit) {
+        val shouldPostImmediately = synchronized(initListeners) {
+            if (runtimeInitialized) {
+                true
+            } else {
+                initListeners.add(listener)
+                false
+            }
+        }
+        if (shouldPostImmediately) {
+            Handler(Looper.getMainLooper()).post { listener() }
+        }
+    }
+
+    private fun notifyInitializationListeners() {
+        val toNotify = synchronized(initListeners) {
+            val copy = initListeners.toList()
+            initListeners.clear()
+            copy
+        }
+        val handler = Handler(Looper.getMainLooper())
+        toNotify.forEach { listener ->
+            handler.post { listener() }
+        }
+    }
+
+    private fun initializeRuntime(context: Context) {
         if (runtimeInitialized) {
             return
         }
@@ -33,7 +79,7 @@ object AppBootstrap {
         }
     }
 
-    fun registerStartupWorkers(context: Context) {
+    private fun registerStartupWorkers(context: Context) {
         if (workersRegistered) {
             return
         }

@@ -285,3 +285,30 @@ def test_duplicate_review_prevention(review_env: None, tmp_path: Path) -> None:
 
     assert first.review_id == second.review_id
     assert len(engine.repository.list_review_items()) == 1
+
+
+def test_review_batch_and_decisions_survive_restart(review_env: None, tmp_path: Path) -> None:
+    engine = _make_engine()
+    item = engine.create_review_item(
+        image_id=11,
+        source_path=tmp_path / "restart.png",
+        operation_type="recognition",
+        confidence=0.91,
+        proposed_value={"series": "Fate"},
+        current_value={"series": None},
+        series="Fate",
+        character="Saber",
+    )
+    engine.bulk_approve([item.review_id], reviewer="alice", reason="verified")
+
+    restarted = _make_engine()
+    restored = restarted.repository.get_review_item(item.review_id)
+    history = restarted.repository.get_decision_history(item.review_id)
+    rollback = restarted.rollback_last_batch()
+
+    assert restored is not None
+    assert restored.status is ReviewStatus.APPROVED
+    assert len(history) == 1
+    assert history[0].reviewer == "alice"
+    assert rollback is not None and rollback.rolled_back is True
+    assert restarted.repository.get_review_item(item.review_id).status is ReviewStatus.PENDING

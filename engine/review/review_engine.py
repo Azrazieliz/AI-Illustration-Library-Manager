@@ -179,10 +179,11 @@ class ReviewEngine:
         return batch
 
     def rollback_last_batch(self) -> ReviewResult | None:
-        if self._last_batch is None:
+        batch = self._last_batch or self.repository.latest_active_batch()
+        if batch is None:
             return None
         try:
-            result = self.repository.rollback_review_batch(self._last_batch.batch_id)
+            result = self.repository.rollback_review_batch(batch.batch_id)
         except ValueError as exc:
             self.statistics.increment_failed()
             raise ReviewRollbackError(str(exc)) from exc

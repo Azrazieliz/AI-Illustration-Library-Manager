@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from time import monotonic, sleep
 
 import pytest
@@ -20,6 +21,28 @@ from engine.knowledge_packs import (
     KnowledgePackWorker,
 )
 from engine.knowledge_packs.knowledge_pack_models import KnowledgePackTaskStatus
+from engine.config import settings
+from engine.database.database import database_manager
+from engine.repositories.knowledge_pack_repository import KnowledgePackRepository
+
+
+@pytest.fixture(autouse=True)
+def knowledge_pack_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    original_engine = database_manager._engine
+    original_session_factory = database_manager._session_factory
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    database_manager._engine = None
+    database_manager._session_factory = None
+    KnowledgePackRepository.reset_state()
+    try:
+        yield
+    finally:
+        test_engine = database_manager._engine
+        if test_engine is not None and test_engine is not original_engine:
+            test_engine.dispose()
+        database_manager._engine = original_engine
+        database_manager._session_factory = original_session_factory
 
 
 def _entry(canonical_id: str, name: str, *, alias: str | None = None, localized_ja: str | None = None) -> KnowledgeEntry:
@@ -86,6 +109,17 @@ def test_install_and_verify_pack() -> None:
 
     assert result.success is True
     assert engine.verify_pack("anime.core").success is True
+
+
+def test_install_keeps_pack_available_when_rebuild_fails() -> None:
+    engine = KnowledgePackEngine()
+    manifest = _manifest(pack_id="anime.persist", version="1.0.0")
+
+    result = engine.install_pack(manifest)
+
+    assert result.success is True
+    assert engine.verify_pack("anime.persist").success is True
+    assert engine.list_installed()[0].pack_id == "anime.persist"
 
 
 def test_uninstall_pack() -> None:
@@ -227,6 +261,28 @@ def test_lookup_across_alias_and_localized_names() -> None:
     assert alias_hit.canonical_id == "char:alpha"
     assert locale_hit is not None
     assert locale_hit.pack_id == "lookup.core"
+
+
+def test_installed_state_and_history_survive_engine_restart() -> None:
+    first = KnowledgePackEngine()
+    base = _manifest(pack_id="persistent.core", version="1.0.0", entries=[_entry("char:persistent", "Persistent", alias="Persist")])
+    updated = _manifest(
+        pack_id="persistent.core",
+        version="1.1.0",
+        entries=[_entry("char:persistent", "Persistent", alias="Persist")],
+        incremental_from="1.0.0",
+    )
+    assert first.install_pack(base).success is True
+    assert first.update_pack(updated).success is True
+    assert first.disable_pack("persistent.core").success is True
+
+    second = KnowledgePackEngine()
+    installed = second.list_installed()
+    assert [(item.pack_id, item.version, item.enabled) for item in installed] == [("persistent.core", "1.1.0", False)]
+    assert second.enable_pack("persistent.core").success is True
+    assert second.lookup("Persist") is not None
+    assert second.rollback_pack("persistent.core").success is True
+    assert second.list_installed()[0].version == "1.0.0"
 
 
 def test_semver_duplicate_validation_and_checksum_helpers() -> None:

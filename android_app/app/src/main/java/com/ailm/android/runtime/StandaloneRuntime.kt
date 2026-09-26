@@ -2,6 +2,7 @@ package com.ailm.android.runtime
 
 import android.content.Context
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.util.Log
 import com.ailm.android.runtime.ai.LocalAiManager
 import kotlinx.coroutines.CoroutineScope
@@ -12,7 +13,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 
 object StandaloneRuntime {
@@ -20,6 +24,16 @@ object StandaloneRuntime {
 
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
+    )
+    private val autonomousImageStages = listOf(
+        "character_recognition",
+        "series_recognition",
+        "ocr",
+        "captioning",
+        "tag_prediction",
+        "embedding_generation",
+        "normalization",
+        "nsfw_classification",
     )
 
     private val stateMutex = Mutex()
@@ -30,6 +44,10 @@ object StandaloneRuntime {
     private lateinit var storageProvider: StorageProvider
     private lateinit var repository: LocalRepository
     private lateinit var localAiManager: LocalAiManager
+    private val knowledgeRepository: KnowledgeRepository by lazy { KnowledgeRepository() }
+    private var lastKnowledgeRebuildSignature: String? = null
+    private var lastKnowledgeRebuildAtMs: Long = 0L
+    private lateinit var aiWorkflowCoordinator: AiWorkflowCoordinator
     private lateinit var appContext: Context
 
     private var scanStatus: String = "idle"
@@ -94,6 +112,7 @@ object StandaloneRuntime {
                     storageProvider = SafStorageProvider(context.applicationContext)
                     val localDatabase = LocalDatabase(context.applicationContext)
                     repository = LocalRepository(localDatabase)
+                    aiWorkflowCoordinator = AiWorkflowCoordinator(localDatabase, repository)
                     localAiManager = LocalAiManager(
                         context = context.applicationContext,
                         database = localDatabase,
@@ -127,8 +146,6 @@ object StandaloneRuntime {
         return mapOf(
             "total_images" to (stats["total_images"] ?: 0),
             "total_size_bytes" to (stats["total_size_bytes"] ?: 0L),
-            "total_favorites" to (stats["total_favorites"] ?: 0),
-            "avg_rating" to (stats["avg_rating"] ?: 0.0),
             "total_folders" to folders.size,
             "scan_status" to status,
             "recent_scans" to scanRuns,
@@ -174,6 +191,7 @@ object StandaloneRuntime {
                 var importIndex = 0L
                 var discoveredLocal = 0
                 var skippedLocal = 0
+                val seenUris = mutableSetOf<String>()
                 for (node in storageProvider.walkTree(rootUri)) {
                     val shouldContinue = awaitRunningState()
                     if (!shouldContinue) {
@@ -199,15 +217,20 @@ object StandaloneRuntime {
 
                     importIndex += 1
                     val metadata = extractMetadata(node)
-                    repository.upsertImage(
+                    val upsert = repository.upsertImage(
                         node = node,
                         folderUri = rootUri,
                         scannedAtMs = scannedAt,
                         importOrder = scannedAt * 1_000_000L + importIndex,
                         metadata = metadata,
                         metadataText = buildMetadataText(node, metadata),
+                        seenUris = seenUris,
                     )
+                    seenUris += node.uri
                     discoveredLocal += 1
+                    if (upsert.needsAiProcessing) {
+                        scheduleAutonomousImageWorkflow(upsert.imageId)
+                    }
 
                     stateMutex.withLock {
                         scanDiscovered += 1
@@ -446,8 +469,215 @@ object StandaloneRuntime {
 
     fun listKnowledgePacks(): List<Map<String, Any>> {
         ensureInitialized()
-        val dir = File(appContext.filesDir, "knowledge_packs")
-        return listLocalArtifacts(dir, kind = "knowledge_pack")
+        val directory = knowledgePackDirectory()
+        return directory.listFiles()
+            ?.filter { it.isFile && !it.name.startsWith(".") }
+            ?.sortedBy { it.name.lowercase() }
+            ?.map(::describeKnowledgePack)
+            ?: emptyList()
+    }
+
+    fun importKnowledgePackDocuments(uris: List<Uri>): List<Map<String, Any>> {
+        ensureInitialized()
+        val directory = knowledgePackDirectory()
+        val temporaryPacks = uris.distinct().map { uri ->
+            copyKnowledgePackToTemporaryFile(uri, directory)?.let { temporary ->
+                uri to temporary
+            } ?: return listOf(
+                mapOf(
+                    "ok" to false,
+                    "message" to "Unable to read selected Knowledge Pack.",
+                    "filename" to safeKnowledgePackFileName(uri),
+                ),
+            )
+        }
+
+        try {
+            val incoming = temporaryPacks.map { (uri, temporary) ->
+                validateKnowledgePack(temporary, safeKnowledgePackFileName(uri))
+            }
+            val installed = directory.listFiles()
+                ?.filter { it.isFile && !it.name.startsWith(".") }
+                ?.mapNotNull { file -> describeKnowledgePackOrNull(file) }
+                ?: emptyList()
+
+            val placed = mutableListOf<KnowledgePackDescriptor>()
+            val copied = mutableListOf<File>()
+            val results = mutableListOf<Map<String, Any>>()
+
+            incoming.forEachIndexed { index, pack ->
+                if (!pack.ok) {
+                    results += mapOf(
+                        "ok" to false,
+                        "message" to (pack.error ?: "Knowledge Pack validation failed."),
+                        "filename" to pack.filename,
+                    )
+                    return@forEachIndexed
+                }
+
+                duplicateKnowledgePack(pack, installed + placed)?.let { reason ->
+                    results += mapOf(
+                        "ok" to false,
+                        "message" to reason,
+                        "filename" to pack.filename,
+                    )
+                    return@forEachIndexed
+                }
+
+                val destination = availableKnowledgePackFile(directory, pack.filename)
+                try {
+                    temporaryPacks[index].second.copyTo(destination, overwrite = false)
+                } catch (error: Throwable) {
+                    results += mapOf(
+                        "ok" to false,
+                        "message" to "Unable to install Knowledge Pack.",
+                        "filename" to pack.filename,
+                    )
+                    return@forEachIndexed
+                }
+
+                val verified = validateKnowledgePack(destination, destination.name)
+                if (!verified.ok || verified.contentHash != pack.contentHash) {
+                    destination.delete()
+                    results += mapOf(
+                        "ok" to false,
+                        "message" to (verified.error ?: "Unable to verify copied Knowledge Pack."),
+                        "filename" to destination.name,
+                    )
+                    return@forEachIndexed
+                }
+
+                copied += destination
+                placed += verified
+                results += mapOf("ok" to true, "pack" to describeKnowledgePack(destination))
+            }
+
+            if (copied.isNotEmpty()) {
+                val rebuildResult = runCatching { rebuildFusionFromInstalledKnowledgePacks() }
+                if (rebuildResult.isFailure) {
+                    val warning = rebuildResult.exceptionOrNull()?.message ?: "Fusion rebuild failed after install."
+                    results.replaceAll { result -> result + mapOf("warning" to warning) }
+                }
+            }
+
+            return results
+        } finally {
+            temporaryPacks.forEach { (_, temporary) -> temporary.delete() }
+        }
+    }
+
+    fun previewKnowledgePack(filename: String): Map<String, Any> {
+        ensureInitialized()
+        val pack = findKnowledgePack(filename) ?: return mapOf(
+            "ok" to false,
+            "message" to "Knowledge Pack not found.",
+        )
+        return mapOf("ok" to true, "pack" to describeKnowledgePack(pack))
+    }
+
+    fun previewKnowledgePackDocument(raw: String, filename: String): Map<String, Any> {
+        ensureInitialized()
+        return runCatching {
+            val parsed = knowledgeRepository.parseAndValidate(raw)
+            mapOf(
+                "ok" to true,
+                "message" to "Knowledge pack preview succeeded.",
+                "filename" to filename,
+                "pack_id" to parsed.packId,
+                "pack_name" to parsed.packName.ifBlank { parsed.packId },
+                "version" to parsed.version,
+                "knowledge_type" to parsed.knowledgeType,
+                "author" to parsed.author,
+                "creation_date" to parsed.creationDate,
+                "description" to parsed.description,
+                "dependencies" to parsed.dependencies,
+                "supported_categories" to parsed.supportedCategories,
+                "entries" to parsed.entries.size,
+            )
+        }.getOrElse { error ->
+            mapOf(
+                "ok" to false,
+                "message" to (error.message ?: "Knowledge Pack validation failed."),
+                "filename" to filename,
+            )
+        }
+    }
+
+    fun validateKnowledgePackDocument(raw: String, filename: String): Map<String, Any> {
+        ensureInitialized()
+        return runCatching {
+            val parsed = knowledgeRepository.parseAndValidate(raw)
+            mapOf(
+                "ok" to true,
+                "message" to "Knowledge pack validation succeeded.",
+                "filename" to filename,
+                "pack_id" to parsed.packId,
+                "pack_name" to parsed.packName.ifBlank { parsed.packId },
+                "version" to parsed.version,
+                "knowledge_type" to parsed.knowledgeType,
+                "entries" to parsed.entries.size,
+                "supported_categories" to parsed.supportedCategories,
+                "dependencies" to parsed.dependencies,
+            )
+        }.getOrElse { error ->
+            mapOf(
+                "ok" to false,
+                "message" to (error.message ?: "Knowledge Pack validation failed."),
+                "filename" to filename,
+            )
+        }
+    }
+
+    fun replaceKnowledgePackDocument(filename: String, uri: Uri): Map<String, Any> {
+        ensureInitialized()
+        val target = findKnowledgePack(filename) ?: return mapOf(
+            "ok" to false,
+            "message" to "Knowledge Pack not found.",
+        )
+        val directory = knowledgePackDirectory()
+        val temporary = copyKnowledgePackToTemporaryFile(uri, directory)
+            ?: return mapOf("ok" to false, "message" to "Unable to read selected Knowledge Pack.")
+        try {
+            val incoming = validateKnowledgePack(temporary, safeKnowledgePackFileName(uri))
+            if (!incoming.ok) {
+                return mapOf("ok" to false, "message" to (incoming.error ?: "Knowledge Pack validation failed."))
+            }
+            val installed = directory.listFiles()
+                ?.filter { it.isFile && it != target && !it.name.startsWith(".") }
+                ?.mapNotNull(::describeKnowledgePackOrNull)
+                ?: emptyList()
+            duplicateKnowledgePack(incoming, installed)?.let { reason ->
+                return mapOf("ok" to false, "message" to reason)
+            }
+
+            val destination = availableKnowledgePackFile(directory, incoming.filename)
+            val copied = runCatching {
+                temporary.copyTo(destination, overwrite = false)
+            }.isSuccess
+            if (!copied) {
+                return mapOf("ok" to false, "message" to "Unable to copy replacement Knowledge Pack.")
+            }
+            val verified = validateKnowledgePack(destination, destination.name)
+            if (!verified.ok || verified.contentHash != incoming.contentHash) {
+                destination.delete()
+                return mapOf("ok" to false, "message" to (verified.error ?: "Unable to verify copied Knowledge Pack."))
+            }
+            refreshKnowledgePackReferences()
+            if (!target.delete()) {
+                destination.delete()
+                return mapOf("ok" to false, "message" to "Unable to remove replaced Knowledge Pack.")
+            }
+            return mapOf("ok" to true, "pack" to describeKnowledgePack(destination))
+        } finally {
+            if (temporary.exists()) {
+                temporary.delete()
+            }
+        }
+    }
+
+    fun removeKnowledgePack(filename: String): Boolean {
+        ensureInitialized()
+        return findKnowledgePack(filename)?.delete() == true
     }
 
     fun listDownloads(): List<Map<String, Any>> {
@@ -510,6 +740,11 @@ object StandaloneRuntime {
     fun registerAiModelDownload(payload: Map<String, Any>): Map<String, Any> {
         ensureInitialized()
         return localAiManager.registerModelDownload(payload)
+    }
+
+    fun downloadAiModel(installId: String): Map<String, Any> {
+        ensureInitialized()
+        return localAiManager.downloadRegisteredModel(installId)
     }
 
     fun verifyInstalledAiModel(payload: Map<String, Any>): Map<String, Any> {
@@ -681,6 +916,18 @@ object StandaloneRuntime {
         return response
     }
 
+    fun runAutonomousImageWorkflow(payload: Map<String, Any>): Map<String, Any> {
+        ensureInitialized()
+        val imageId = payload["image_id"].toIntOrNullValue()
+            ?: return mapOf("ok" to false, "status" to "invalid", "message" to "image_id is required")
+        val prepared = prepareAiPipelinePayload(payload + mapOf(
+            "task_type" to "autonomous_image_workflow",
+            "stages" to autonomousImageStages,
+        ))
+        val response = localAiManager.runMultiStagePipeline(prepared)
+        return response + mapOf("workflow" to aiWorkflowCoordinator.applyImageWorkflow(imageId, response))
+    }
+
     fun runKnowledgePackExecution(payload: Map<String, Any>): Map<String, Any> {
         ensureInitialized()
         val prepared = prepareAiPipelinePayload(payload + mapOf("task_type" to "knowledge_pack_execution"))
@@ -768,7 +1015,7 @@ object StandaloneRuntime {
 
     fun rescanFolder(folderUri: String): Map<String, Any> {
         ensureInitialized()
-        return startScan(folderUri)
+        return synchronizeFolderIncremental(folderUri)
     }
 
     fun rescanEnabledFolders(): List<Map<String, Any>> {
@@ -780,27 +1027,92 @@ object StandaloneRuntime {
             if (uri.isBlank()) {
                 continue
             }
-            responses += startScan(uri)
+            responses += synchronizeFolderIncremental(uri)
         }
         return responses
     }
 
-    fun setImageFavorite(imageId: Int, favorite: Boolean): Boolean {
-        ensureInitialized()
-        Log.d(RUNTIME_TRACE_TAG, "Runtime receives favorite: imageId=$imageId nextFavorite=$favorite")
-        val ok = repository.setFavorite(imageId, favorite)
-        Log.d(RUNTIME_TRACE_TAG, "Runtime entry after repository call (favorite): imageId=$imageId ok=$ok")
-        Log.d(RUNTIME_TRACE_TAG, "Runtime favorite update result: imageId=$imageId ok=$ok")
-        return ok
-    }
+    private fun synchronizeFolderIncremental(folderUri: String): Map<String, Any> {
+        val normalizedUri = folderUri.trim()
+        if (normalizedUri.isBlank()) {
+            return mapOf("ok" to false, "status" to "invalid", "message" to "folder_uri is required")
+        }
+        if (!storageProvider.exists(normalizedUri)) {
+            return mapOf("ok" to false, "status" to "missing", "message" to "Selected SAF root is no longer available: $normalizedUri")
+        }
 
-    fun setImageRating(imageId: Int, rating: Int): Boolean {
-        ensureInitialized()
-        Log.d(RUNTIME_TRACE_TAG, "Runtime receives rating: imageId=$imageId nextRating=$rating")
-        val ok = repository.setRating(imageId, rating)
-        Log.d(RUNTIME_TRACE_TAG, "Runtime entry after repository call (rating): imageId=$imageId ok=$ok")
-        Log.d(RUNTIME_TRACE_TAG, "Runtime rating update result: imageId=$imageId ok=$ok")
-        return ok
+        val startedAt = System.currentTimeMillis()
+        val scanId = repository.beginScanRun(normalizedUri, startedAt)
+        var importIndex = 0L
+        var synced = 0
+        var skipped = 0
+        val seenUris = mutableSetOf<String>()
+
+        return try {
+            for (node in storageProvider.walkTree(normalizedUri)) {
+                if (node.isDirectory || !node.name.isImageName()) {
+                    skipped += 1
+                    continue
+                }
+
+                importIndex += 1
+                val metadata = extractMetadata(node)
+                val upsert = repository.upsertImage(
+                    node = node,
+                    folderUri = normalizedUri,
+                    scannedAtMs = startedAt,
+                    importOrder = startedAt * 1_000_000L + importIndex,
+                    metadata = metadata,
+                    metadataText = buildMetadataText(node, metadata),
+                    seenUris = seenUris,
+                )
+                seenUris += node.uri
+                synced += 1
+                if (upsert.needsAiProcessing) {
+                    scheduleAutonomousImageWorkflow(upsert.imageId)
+                }
+            }
+
+            repository.markMissingFolderImagesInactive(normalizedUri, seenUris, startedAt)
+            repository.rebuildSearchIndex()
+            repository.optimizeDatabase()
+            repository.finishScanRun(
+                scanId = scanId,
+                folderUri = normalizedUri,
+                completedAtMs = System.currentTimeMillis(),
+                status = "completed",
+                discoveredCount = synced,
+                skippedCount = skipped,
+                errorMessage = null,
+            )
+            mapOf(
+                "ok" to true,
+                "status" to "completed",
+                "folder_uri" to normalizedUri,
+                "discovered_count" to synced,
+                "skipped_count" to skipped,
+                "synchronization_mode" to "incremental",
+            )
+        } catch (t: Throwable) {
+            repository.finishScanRun(
+                scanId = scanId,
+                folderUri = normalizedUri,
+                completedAtMs = System.currentTimeMillis(),
+                status = "failed",
+                discoveredCount = synced,
+                skippedCount = skipped,
+                errorMessage = t.message ?: t.javaClass.simpleName,
+            )
+            mapOf(
+                "ok" to false,
+                "status" to "failed",
+                "folder_uri" to normalizedUri,
+                "message" to (t.message ?: t.javaClass.simpleName),
+                "discovered_count" to synced,
+                "skipped_count" to skipped,
+                "synchronization_mode" to "incremental",
+            )
+        }
     }
 
     fun setImageTags(imageId: Int, tags: List<String>): Boolean {
@@ -854,6 +1166,73 @@ object StandaloneRuntime {
         ensureInitialized()
         val parsedFormat = parseFusionImportFormat(format)
         return repository.exportFusionDatabase(parsedFormat, pretty = pretty)
+    }
+
+    fun importKnowledgePackIntoFusion(payload: String, replaceExisting: Boolean = false): Map<String, Any> {
+        ensureInitialized()
+        val model = knowledgeRepository.buildCanonicalModel(payload)
+        val canonicalPayload = knowledgeRepository.toJson(model)
+        val rows = knowledgeRepository.buildFusionRows(model)
+        val persisted = repository.persistFusionRows(rows, replaceExisting)
+        val result: MutableMap<String, Any> = linkedMapOf()
+        result.putAll(persisted)
+        result["canonical_payload"] = canonicalPayload.toString()
+        result["canonical_signature"] = model.canonicalSignature
+        result["row_count"] = rows.size
+        return result.toMap()
+    }
+
+    fun rebuildFusionFromInstalledKnowledgePacks(): Map<String, Any> {
+        ensureInitialized()
+        val directory = knowledgePackDirectory()
+        val discovery = knowledgeRepository.discoverInstalledPacks(directory)
+        val validArtifacts = discovery.artifacts.filter { it.validation?.ok == true }
+        if (validArtifacts.isEmpty()) {
+            return mapOf("ok" to false, "message" to "No valid knowledge packs were found for Fusion rebuild.")
+        }
+        val model = knowledgeRepository.buildCanonicalModelFromArtifacts(validArtifacts)
+        val plan = knowledgeRepository.buildRebuildPlan(validArtifacts)
+        val persisted = importKnowledgePackIntoFusion(knowledgeRepository.toJson(model).toString(), replaceExisting = true)
+        lastKnowledgeRebuildSignature = plan.rebuildSignature
+        lastKnowledgeRebuildAtMs = System.currentTimeMillis()
+        return mapOf(
+            "ok" to true,
+            "message" to "Fusion rebuilt from installed knowledge packs.",
+            "pack_count" to validArtifacts.size,
+            "row_count" to (persisted["row_count"] as? Int ?: 0),
+            "rebuild_signature" to (lastKnowledgeRebuildSignature ?: ""),
+            "rebuild_plan" to mapOf(
+                "artifact_count" to plan.artifactCount,
+                "pack_ids" to plan.packIds,
+            ),
+            "persisted" to persisted,
+        )
+    }
+
+    fun fusionManagementStatus(): Map<String, Any> {
+        ensureInitialized()
+        return repository.fusionManagementStatus()
+    }
+
+    fun rebuildFusionOptimizations(): Map<String, Any> {
+        ensureInitialized()
+        return repository.rebuildFusionOptimizations()
+    }
+
+    fun exportFusionDatabaseFile(): Map<String, Any> {
+        ensureInitialized()
+        val now = System.currentTimeMillis()
+        val directory = File(appContext.filesDir, "exports/fusion")
+        require(directory.exists() || directory.mkdirs()) { "Unable to prepare Fusion export storage." }
+        val output = File(directory, "fusion-$now.json")
+        output.writeText(repository.exportFusionDatabase(FusionImportFormat.JSON, pretty = true))
+        return mapOf(
+            "ok" to true,
+            "action" to "export_fusion_database",
+            "path" to output.absolutePath,
+            "size_bytes" to output.length(),
+            "exported_at_ms" to now,
+        )
     }
 
     fun importFusionDatabase(
@@ -951,11 +1330,23 @@ object StandaloneRuntime {
 
         lastUndoOperations = undo
 
+        val failed = results.count { it["ok"] != true }
+        val succeeded = results.size - failed
+        val overallOk = failed == 0
+        val firstError = results.firstOrNull { it["ok"] != true }?.get("message")?.toString().orEmpty()
+
         return mapOf(
-            "ok" to true,
+            "ok" to overallOk,
+            "message" to if (overallOk) {
+                "Executed $succeeded operation(s)."
+            } else {
+                firstError.ifBlank { "One or more file operations failed." }
+            },
             "results" to results,
             "executed" to executed,
             "total" to plans.size,
+            "succeeded" to succeeded,
+            "failed" to failed,
             "undo_available" to undo.isNotEmpty(),
             "touched_folders" to touchedFolders.filter { it.isNotBlank() },
         )
@@ -975,10 +1366,23 @@ object StandaloneRuntime {
             results += executePlan(plan, recordsById)
         }
         lastUndoOperations = emptyList()
+
+        val failed = results.count { it["ok"] != true }
+        val succeeded = results.size - failed
+        val overallOk = failed == 0
+        val firstError = results.firstOrNull { it["ok"] != true }?.get("message")?.toString().orEmpty()
+
         return mapOf(
-            "ok" to true,
+            "ok" to overallOk,
+            "message" to if (overallOk) {
+                "Undo executed ($succeeded operation(s))."
+            } else {
+                firstError.ifBlank { "Undo failed for one or more operations." }
+            },
             "results" to results,
             "executed" to results.size,
+            "succeeded" to succeeded,
+            "failed" to failed,
         )
     }
 
@@ -997,6 +1401,7 @@ object StandaloneRuntime {
         val imageIds = parseImageIds(payload["image_ids"])
         val records = repository.getImageRecordsByIds(imageIds)
         val recordsById = records.associateBy { it.imageId }
+        val missingImageIds = imageIds.filterNot { recordsById.containsKey(it) }
         val targetFolderUri = payload["target_folder_uri"]?.toString()?.trim().orEmpty()
         val sourceFolderUri = payload["source_folder_uri"]?.toString()?.trim().orEmpty()
         val singleName = payload["name"]?.toString()?.trim().orEmpty()
@@ -1029,6 +1434,9 @@ object StandaloneRuntime {
                 }
                 if (pattern.isBlank()) {
                     return PlanBuildResult(ok = false, message = "pattern is required")
+                }
+                if (missingImageIds.isNotEmpty()) {
+                    return PlanBuildResult(ok = false, message = "image not found: ${missingImageIds.joinToString(",")}")
                 }
                 imageIds.forEachIndexed { index, id ->
                     val record = recordsById[id] ?: return@forEachIndexed
@@ -1083,6 +1491,9 @@ object StandaloneRuntime {
                 if (imageIds.isEmpty()) {
                     return PlanBuildResult(ok = false, message = "image_ids are required")
                 }
+                if (missingImageIds.isNotEmpty()) {
+                    return PlanBuildResult(ok = false, message = "image not found: ${missingImageIds.joinToString(",")}")
+                }
                 imageIds.forEach { id ->
                     val record = recordsById[id] ?: return@forEach
                     plans += FileOperationPlan(
@@ -1098,6 +1509,9 @@ object StandaloneRuntime {
             "move_images", "batch_move" -> {
                 if (imageIds.isEmpty() || targetFolderUri.isBlank()) {
                     return PlanBuildResult(ok = false, message = "image_ids and target_folder_uri are required")
+                }
+                if (missingImageIds.isNotEmpty()) {
+                    return PlanBuildResult(ok = false, message = "image not found: ${missingImageIds.joinToString(",")}")
                 }
                 imageIds.forEach { id ->
                     val record = recordsById[id] ?: return@forEach
@@ -1117,6 +1531,9 @@ object StandaloneRuntime {
                 if (imageIds.isEmpty() || targetFolderUri.isBlank()) {
                     return PlanBuildResult(ok = false, message = "image_ids and target_folder_uri are required")
                 }
+                if (missingImageIds.isNotEmpty()) {
+                    return PlanBuildResult(ok = false, message = "image not found: ${missingImageIds.joinToString(",")}")
+                }
                 imageIds.forEach { id ->
                     val record = recordsById[id] ?: return@forEach
                     plans += FileOperationPlan(
@@ -1132,6 +1549,10 @@ object StandaloneRuntime {
                 }
             }
             else -> return PlanBuildResult(ok = false, message = "unsupported action: $action")
+        }
+
+        if (plans.isEmpty()) {
+            return PlanBuildResult(ok = false, message = "No executable file operation plan was generated.")
         }
 
         return PlanBuildResult(ok = true, plans = plans)
@@ -1205,7 +1626,14 @@ object StandaloneRuntime {
         val record = recordsById[imageId] ?: repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
             ?: return mapOf("ok" to false, "action" to plan.action, "message" to "image not found")
         val requestedName = plan.targetName.trim().ifBlank { return mapOf("ok" to false, "action" to plan.action, "image_id" to imageId, "message" to "name is required") }
-        val renameOutcome = renameImageWithConflictHandling(record.uri, record.folderUri, requestedName, plan.conflictMode)
+        val targetName = preserveImageExtension(requestedName, record.filename)
+        val renameOutcome = renameImageWithConflictHandling(
+            sourceUri = record.uri,
+            sourceFolderUri = record.folderUri,
+            sourceParentUri = record.parentUri.ifBlank { record.folderUri },
+            requestedName = targetName,
+            mode = plan.conflictMode,
+        )
         val finalName = renameOutcome.finalName
         val renamed = renameOutcome.result
         if (!renamed.ok || renamed.uri.isNullOrBlank()) {
@@ -1233,9 +1661,15 @@ object StandaloneRuntime {
         val finalName: String,
     )
 
-    private fun renameImageWithConflictHandling(sourceUri: String, sourceFolderUri: String, requestedName: String, mode: String): RenameAttemptOutcome {
+    private fun renameImageWithConflictHandling(
+        sourceUri: String,
+        sourceFolderUri: String,
+        sourceParentUri: String,
+        requestedName: String,
+        mode: String,
+    ): RenameAttemptOutcome {
         val normalizedMode = mode.trim().lowercase().ifBlank { "rename" }
-        val firstAttempt = storageProvider.rename(sourceUri, requestedName)
+        val firstAttempt = storageProvider.rename(sourceUri, requestedName, sourceParentUri)
         if (normalizedMode != "rename") {
             return RenameAttemptOutcome(firstAttempt, requestedName)
         }
@@ -1262,7 +1696,7 @@ object StandaloneRuntime {
             candidate = withNumericSuffix(requestedName, suffix)
         }
 
-        val secondAttempt = storageProvider.rename(sourceUri, candidate)
+        val secondAttempt = storageProvider.rename(sourceUri, candidate, sourceParentUri)
         return RenameAttemptOutcome(secondAttempt, candidate)
     }
 
@@ -1270,6 +1704,20 @@ object StandaloneRuntime {
         val ext = name.substringAfterLast('.', "")
         val base = if (ext.isBlank()) name else name.removeSuffix(".$ext")
         return if (ext.isBlank()) "$base ($index)" else "$base ($index).$ext"
+    }
+
+    private fun preserveImageExtension(requestedName: String, sourceName: String): String {
+        val sourceExtension = sourceName.substringAfterLast('.', "").lowercase()
+        if (sourceExtension !in imageExtensions) {
+            return requestedName
+        }
+        val requestedExtension = requestedName.substringAfterLast('.', "").lowercase()
+        val baseName = if (requestedExtension in imageExtensions) {
+            requestedName.dropLast(requestedExtension.length + 1).trimEnd('.')
+        } else {
+            requestedName.trimEnd('.')
+        }
+        return "$baseName.$sourceExtension"
     }
 
     private fun executeRenameFolder(plan: FileOperationPlan): Map<String, Any> {
@@ -1307,14 +1755,21 @@ object StandaloneRuntime {
         val record = recordsById[imageId] ?: repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
             ?: return mapOf("ok" to false, "action" to plan.action, "message" to "image not found")
         val deleted = storageProvider.delete(record.uri)
-        if (!deleted.ok) {
+        val missingOnDisk = !deleted.ok && deleted.message.contains("not found", ignoreCase = true)
+        if (!deleted.ok && !missingOnDisk) {
             return mapOf("ok" to false, "action" to plan.action, "image_id" to imageId, "message" to deleted.message)
         }
         val dbOk = repository.deleteImageAndThumbnail(imageId, record.uri)
         if (!dbOk) {
             return mapOf("ok" to false, "action" to plan.action, "image_id" to imageId, "message" to "database update failed")
         }
-        return mapOf("ok" to true, "action" to plan.action, "image_id" to imageId)
+        return mapOf(
+            "ok" to true,
+            "action" to plan.action,
+            "image_id" to imageId,
+            "storage_changed" to deleted.ok,
+            "storage_status" to if (missingOnDisk) "already_missing" else "deleted",
+        )
     }
 
     private fun executeMoveImage(
@@ -1502,6 +1957,218 @@ object StandaloneRuntime {
         }
     }
 
+    private fun importKnowledgePackDocument(uri: Uri): Map<String, Any> {
+        val directory = knowledgePackDirectory()
+        val filename = safeKnowledgePackFileName(uri)
+        val destination = File(directory, filename)
+        if (destination.exists()) {
+            return mapOf("ok" to false, "message" to "Knowledge Pack already installed.", "filename" to filename)
+        }
+        val temporary = copyKnowledgePackToTemporaryFile(uri, directory)
+            ?: return mapOf("ok" to false, "message" to "Unable to read selected Knowledge Pack.", "filename" to filename)
+        try {
+            val incomingHash = sha256Hex(temporary)
+            val duplicate = directory.listFiles()
+                ?.filter { it.isFile && !it.name.startsWith(".") }
+                ?.firstOrNull { sha256Hex(it) == incomingHash }
+            if (duplicate != null) {
+                return mapOf("ok" to false, "message" to "Knowledge Pack already installed.", "filename" to filename)
+            }
+            if (!temporary.renameTo(destination)) {
+                return mapOf("ok" to false, "message" to "Unable to install Knowledge Pack.", "filename" to filename)
+            }
+            return mapOf("ok" to true, "pack" to describeKnowledgePack(destination))
+        } finally {
+            if (temporary.exists()) {
+                temporary.delete()
+            }
+        }
+    }
+
+    private fun knowledgePackDirectory(): File {
+        return File(appContext.filesDir, "knowledge_packs").also { directory ->
+            require(directory.exists() || directory.mkdirs()) { "Unable to prepare Knowledge Pack storage." }
+        }
+    }
+
+    private fun findKnowledgePack(filename: String): File? {
+        val cleanName = filename.trim()
+        if (cleanName.isBlank() || cleanName != File(cleanName).name) {
+            return null
+        }
+        return File(knowledgePackDirectory(), cleanName).takeIf { it.isFile }
+    }
+
+    private fun copyKnowledgePackToTemporaryFile(uri: Uri, directory: File): File? {
+        val temporary = File.createTempFile(".pack-", ".tmp", directory)
+        return runCatching {
+            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                temporary.outputStream().use(input::copyTo)
+            } ?: return null
+            temporary
+        }.getOrElse {
+            temporary.delete()
+            null
+        }
+    }
+
+    private fun safeKnowledgePackFileName(uri: Uri): String {
+        val candidate = uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+        return candidate.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "knowledge-pack.json" }
+    }
+
+    private fun describeKnowledgePack(file: File): Map<String, Any> {
+        val pack = describeKnowledgePackOrNull(file)
+            ?: return mapOf(
+                "type" to "knowledge_pack",
+                "name" to file.name,
+                "filename" to file.name,
+                "status" to "Invalid",
+                "size_bytes" to file.length(),
+                "metadata" to mapOf("sha256" to sha256Hex(file)),
+            )
+        return mapOf(
+            "type" to "knowledge_pack",
+            "name" to file.name,
+            "filename" to file.name,
+            "pack_name" to pack.packName,
+            "pack_id" to pack.packId,
+            "version" to pack.version,
+            "status" to "Installed",
+            "path" to file.absolutePath,
+            "exists" to file.exists(),
+            "size_bytes" to file.length(),
+            "last_modified_ms" to file.lastModified(),
+            "metadata" to mapOf(
+                "author" to pack.author,
+                "creation_date" to pack.creationDate,
+                "knowledge_type" to pack.knowledgeType,
+                "entries" to pack.entries,
+                "supported_categories" to pack.supportedCategories,
+                "dependencies" to pack.dependencies,
+                "description" to pack.description,
+                "sha256" to pack.contentHash,
+            ),
+        )
+    }
+
+    private data class KnowledgePackDescriptor(
+        val filename: String,
+        val packId: String,
+        val packName: String,
+        val version: String,
+        val author: String,
+        val creationDate: String,
+        val knowledgeType: String,
+        val entries: Int,
+        val supportedCategories: List<String>,
+        val dependencies: List<String>,
+        val description: String,
+        val contentHash: String,
+        val ok: Boolean = true,
+        val error: String? = null,
+    )
+
+    private fun validateKnowledgePack(file: File, filename: String): KnowledgePackDescriptor {
+        return runCatching {
+            val parsed = knowledgeRepository.parseAndValidate(file.readText())
+            KnowledgePackDescriptor(
+                filename = filename,
+                packId = parsed.packId,
+                packName = parsed.packName.ifBlank { parsed.packId },
+                version = parsed.version,
+                author = parsed.author.ifBlank { "Unknown" },
+                creationDate = parsed.creationDate.ifBlank { "Unknown" },
+                knowledgeType = parsed.knowledgeType.ifBlank { "Unknown" },
+                entries = parsed.entries.size,
+                supportedCategories = parsed.supportedCategories.ifEmpty { parsed.entries.flatMap { it.categories }.distinct().sorted() },
+                dependencies = parsed.dependencies,
+                description = parsed.description,
+                contentHash = sha256Hex(file),
+            )
+        }.getOrElse { error ->
+            KnowledgePackDescriptor(
+                filename = filename,
+                packId = "",
+                packName = "",
+                version = "",
+                author = "",
+                creationDate = "",
+                knowledgeType = "",
+                entries = 0,
+                supportedCategories = emptyList(),
+                dependencies = emptyList(),
+                description = "",
+                contentHash = "",
+                ok = false,
+                error = error.message ?: "Knowledge Pack validation failed.",
+            )
+        }
+    }
+
+    private fun duplicateKnowledgePack(
+        incoming: KnowledgePackDescriptor,
+        installed: List<KnowledgePackDescriptor>,
+    ): String? {
+        installed.firstOrNull { it.ok && it.packId == incoming.packId }?.let { existing ->
+            return if (existing.version == incoming.version) {
+                "Knowledge Pack ID and version already installed."
+            } else {
+                "Knowledge Pack ID already installed."
+            }
+        }
+        installed.firstOrNull { it.ok && it.contentHash == incoming.contentHash }?.let {
+            return "Knowledge Pack content already installed."
+        }
+        return null
+    }
+
+    private fun availableKnowledgePackFile(directory: File, requestedName: String): File {
+        val normalized = requestedName.ifBlank { "knowledge-pack.json" }
+        val stem = normalized.substringBeforeLast('.', normalized)
+        val extension = normalized.substringAfterLast('.', "json")
+        var candidate = File(directory, normalized)
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(directory, "$stem-$suffix.$extension")
+            suffix += 1
+        }
+        return candidate
+    }
+
+    private fun refreshKnowledgePackReferences() {
+        listKnowledgePacks()
+    }
+
+    private fun describeKnowledgePackOrNull(file: File): KnowledgePackDescriptor? {
+        return validateKnowledgePack(file, file.name).takeIf { it.ok }
+    }
+
+    private fun JSONArray.toStringList(): List<String> = buildList {
+        for (index in 0 until length()) {
+            optString(index).trim().takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+
+    private fun JSONArray.categories(): List<String> = buildSet {
+        for (index in 0 until length()) {
+            optJSONObject(index)?.optJSONArray("categories")?.toStringList()?.let(::addAll)
+        }
+    }.sorted()
+
+    private fun sha256Hex(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+    }
+
     private fun extractMetadata(node: StorageNode): ScanMetadata {
         val size = node.sizeBytes
         val modified = node.lastModifiedMs
@@ -1604,13 +2271,6 @@ object StandaloneRuntime {
             page = (this["page"] as? Number)?.toInt() ?: this["page"]?.toString()?.toIntOrNull() ?: 1,
             pageSize = (this["page_size"] as? Number)?.toInt() ?: this["page_size"]?.toString()?.toIntOrNull() ?: 0,
             collection = this["collection"]?.toString(),
-            favoritesOnly = when (val raw = this["favorites_only"]) {
-                is Boolean -> raw
-                is Number -> raw.toInt() != 0
-                else -> raw?.toString()?.equals("true", ignoreCase = true) == true
-            },
-            minRating = (this["min_rating"] as? Number)?.toInt() ?: this["min_rating"]?.toString()?.toIntOrNull(),
-            maxRating = (this["max_rating"] as? Number)?.toInt() ?: this["max_rating"]?.toString()?.toIntOrNull(),
             tags = tags,
             minWidth = (this["min_width"] as? Number)?.toInt() ?: this["min_width"]?.toString()?.toIntOrNull(),
             minHeight = (this["min_height"] as? Number)?.toInt() ?: this["min_height"]?.toString()?.toIntOrNull(),
@@ -1722,12 +2382,14 @@ object StandaloneRuntime {
             defaultValue = false,
         )
         val csvTableName = this["csv_table_name"]?.toString() ?: this["csvTableName"]?.toString()
+        val sourceUri = this["source_uri"]?.toString()?.trim().orEmpty()
         val aliasHints = parseAliasHints(this["alias_hints"] ?: this["aliasHints"])
 
         return ExternalImportRequest(
             importId = importId,
             sourceType = parseExternalImportSourceType(rawSourceType),
             source = source,
+            sourceUri = sourceUri,
             conflictStrategy = parseExternalConflictStrategy(conflictRaw),
             replaceExisting = replaceExisting,
             csvTableName = csvTableName,
@@ -1745,7 +2407,7 @@ object StandaloneRuntime {
             is String -> nested
             else -> ""
         }
-        return "id=${image["image_id"]} favorite=${image["favorite"]} rating=${image["rating"]} tags=$tags"
+        return "id=${image["image_id"]} tags=$tags"
     }
 
     private fun Map<String, Any>.toSemanticCandidatePayloadOrNull(): Map<String, Any>? {
@@ -1783,8 +2445,6 @@ object StandaloneRuntime {
             "path" to this["path"]?.toString().orEmpty(),
             "metadata" to (metadata?.toStringAnyMap() ?: emptyMap<String, Any>()),
             "tags" to (if (tags is List<*>) tags else emptyList<String>()),
-            "favorite" to parseBooleanFlag(this["favorite"], defaultValue = false),
-            "rating" to (this["rating"].toIntOrNullValue() ?: 0),
         )
     }
 
@@ -1800,8 +2460,6 @@ object StandaloneRuntime {
                 prepared.putIfAbsent("filename", image["filename"]?.toString().orEmpty())
                 prepared.putIfAbsent("path", image["path"]?.toString().orEmpty())
                 prepared.putIfAbsent("uri", image["uri"]?.toString().orEmpty())
-                prepared.putIfAbsent("favorite", parseBooleanFlag(image["favorite"], defaultValue = false))
-                prepared.putIfAbsent("rating", image["rating"]?.toString()?.toIntOrNull() ?: 0)
 
                 val metadata = (image["metadata"] as? Map<*, *>)?.toStringAnyMap() ?: emptyMap()
                 if (metadata.isNotEmpty() && (prepared["metadata"] as? Map<*, *>) == null) {
@@ -1863,6 +2521,12 @@ object StandaloneRuntime {
             return
         }
         repository.setTags(imageId, tags)
+    }
+
+    private fun scheduleAutonomousImageWorkflow(imageId: Int) {
+        runtimeScope.launch {
+            runCatching { runAutonomousImageWorkflow(mapOf("image_id" to imageId)) }
+        }
     }
 
     private fun extractPredictedTags(response: Map<String, Any>): List<String> {

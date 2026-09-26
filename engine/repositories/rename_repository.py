@@ -2,22 +2,27 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from engine.database.models.image import Image
-from engine.rename.rename_models import RenameContext
+from engine.database.models.rename_batch_state import RenameBatchStateRecord
+from engine.rename.rename_models import RenameBatch, RenameBatchEntry, RenameContext
 from engine.repositories.base_repository import BaseRepository
-from engine.repositories.dataset_repository import DatasetRepository
 
 
 class RenameRepository(BaseRepository[Image]):
     """Repository for collecting rename context and persisting renamed paths."""
 
+    _last_batch_state_key = "last_applied"
+
     def __init__(self, session: Session | None = None) -> None:
         super().__init__(Image, session=session)
+        from engine.repositories.dataset_repository import DatasetRepository
+
         self._dataset_repository = DatasetRepository()
 
     def get_image_by_path(self, path: str | Path) -> Image | None:
@@ -73,6 +78,93 @@ class RenameRepository(BaseRepository[Image]):
         image.extension = new_path.suffix
         if commit:
             self.commit()
+
+    def save_last_batch(self, batch: RenameBatch) -> None:
+        record = (
+            self.session.query(RenameBatchStateRecord)
+            .filter(RenameBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        payload = self._batch_to_payload(batch)
+        if record is None:
+            self.add(
+                RenameBatchStateRecord(
+                    state_key=self._last_batch_state_key,
+                    batch_payload=payload,
+                )
+            )
+        else:
+            record.batch_payload = payload
+        self.commit()
+
+    def get_last_batch(self) -> RenameBatch | None:
+        record = (
+            self.session.query(RenameBatchStateRecord)
+            .filter(RenameBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        if record is None:
+            return None
+        return self._batch_from_payload(dict(record.batch_payload or {}))
+
+    def clear_last_batch(self) -> None:
+        record = (
+            self.session.query(RenameBatchStateRecord)
+            .filter(RenameBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        if record is None:
+            return
+        self.delete(record)
+        self.commit()
+
+    @staticmethod
+    def _batch_to_payload(batch: RenameBatch) -> dict[str, object]:
+        return {
+            "batch_id": batch.batch_id,
+            "applied_at": batch.applied_at.astimezone(timezone.utc).isoformat(),
+            "entries": [
+                {
+                    "image_id": entry.image_id,
+                    "source_path": str(entry.source_path),
+                    "target_path": str(entry.target_path),
+                }
+                for entry in batch.entries
+            ],
+        }
+
+    @staticmethod
+    def _batch_from_payload(payload: dict[str, object]) -> RenameBatch:
+        batch_id = str(payload.get("batch_id", ""))
+        entries_payload = payload.get("entries")
+        if not batch_id or not isinstance(entries_payload, list):
+            raise RuntimeError("Persisted rename batch state is invalid")
+
+        entries: list[RenameBatchEntry] = []
+        for item in entries_payload:
+            if not isinstance(item, dict):
+                raise RuntimeError("Persisted rename batch entry is invalid")
+            entries.append(
+                RenameBatchEntry(
+                    image_id=int(item["image_id"]),
+                    source_path=Path(str(item["source_path"])),
+                    target_path=Path(str(item["target_path"])),
+                )
+            )
+
+        return RenameBatch(
+            batch_id=batch_id,
+            entries=entries,
+            applied_at=RenameRepository._as_utc(payload.get("applied_at")),
+        )
+
+    @staticmethod
+    def _as_utc(value: object) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            raise RuntimeError("Persisted rename batch timestamp is invalid") from None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _parse_exif(image: Image) -> dict[str, object]:

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Iterable
+from uuid import uuid4
+
+import numpy as np
 
 from engine.embeddings.embedding_cache import EmbeddingCache
 from engine.embeddings.embedding_events import (
@@ -12,10 +16,15 @@ from engine.embeddings.embedding_events import (
     EmbeddingStarted,
 )
 from engine.embeddings.embedding_exceptions import ProviderError
-from engine.embeddings.embedding_models import EmbeddingCheckpoint, EmbeddingResult
+from engine.embeddings.embedding_models import (
+    EmbeddingCheckpoint,
+    EmbeddingResult,
+    ExtractedEmbedding,
+)
 from engine.embeddings.embedding_provider import EmbeddingProvider
 from engine.embeddings.embedding_statistics import EmbeddingStatistics
 from engine.logging import get_logger
+from engine.repositories.ai_execution_repository import AiExecutionRepository
 from engine.repositories.embedding_repository import EmbeddingRepository
 from engine.repositories.image_repository import ImageRepository
 
@@ -105,29 +114,36 @@ class EmbeddingWorker:
             # Check if embedding already exists in database
             existing_embedding = embedding_repository.get_by_image_id(image.id)
             if existing_embedding is not None:
-                # Check if we should update or skip
-                # For now, skip if model name matches
-                if existing_embedding.model_name == self.provider.model_name:
+                if (
+                    existing_embedding.model_name == self.provider.model_name
+                    and Path(existing_embedding.vector_path).is_file()
+                ):
                     self.statistics.skipped += 1
                     self._emit(EmbeddingSkipped(path=path, reason="Embedding already exists"))
                     return None
 
-            # Check cache
-            cached_vector = self.cache.get(image.id, self.provider.model_name)
-            if cached_vector is not None:
-                self.statistics.skipped += 1
-                self._emit(EmbeddingSkipped(path=path, reason="Found in cache"))
-                return None
-
             # Generate embedding
             self._emit(EmbeddingStarted(path=path, model_name=self.provider.model_name))
 
-            try:
-                embedding = self.provider.extract_embedding(image.id, path)
-            except ProviderError as e:
-                self.statistics.failed += 1
-                self._emit(EmbeddingFailed(path=path, error=str(e)))
-                return None
+            cached_vector = self.cache.get(image.id, self.provider.model_name)
+            if cached_vector is not None:
+                embedding = ExtractedEmbedding(
+                    image_id=image.id,
+                    embedding_vector=cached_vector,
+                    model_name=self.provider.model_name,
+                    model_version=self.provider.model_version,
+                    dimensions=len(cached_vector),
+                    provider_name=self.provider.get_provider_name(),
+                )
+            else:
+                try:
+                    execution_started = perf_counter()
+                    embedding = self.provider.extract_embedding(image.id, path)
+                    execution_duration = perf_counter() - execution_started
+                except ProviderError as e:
+                    self.statistics.failed += 1
+                    self._emit(EmbeddingFailed(path=path, error=str(e)))
+                    return None
 
             # Persist to database
             vector_path = self._save_embedding_vector(embedding)
@@ -146,6 +162,17 @@ class EmbeddingWorker:
                     vector_path=str(vector_path),
                     model_name=embedding.model_name,
                     model_version=embedding.model_version,
+                )
+            if cached_vector is None:
+                AiExecutionRepository(session=embedding_repository.session).append(
+                    task="embedding_generation",
+                    model=embedding.model_name,
+                    model_version=embedding.model_version,
+                    runtime=embedding.provider_name,
+                    input_hash=AiExecutionRepository.hash_file(path),
+                    output_hash=embedding_record.checksum,
+                    duration=execution_duration,
+                    status="completed",
                 )
             embedding_repository.commit()
 
@@ -183,12 +210,7 @@ class EmbeddingWorker:
             return None
 
     def _save_embedding_vector(self, embedding) -> Path:
-        """Save embedding vector to disk.
-
-        For now, we store the image_id in the database's vector_path.
-        In production, this could save to a binary file or vector database.
-        """
-        # Placeholder: return a path that references the embedding
+        """Persist one validated embedding vector as a NumPy artifact."""
         from engine.config import settings
 
         embeddings_dir = settings.embedding_directory
@@ -199,12 +221,21 @@ class EmbeddingWorker:
         vector_file = (
             embeddings_dir_path
             / safe_model_name
-            / f"image_{embedding.image_id}.bin"
+            / f"image_{embedding.image_id}.npy"
         )
         vector_file.parent.mkdir(parents=True, exist_ok=True)
+        vector = np.asarray(embedding.embedding_vector, dtype=np.float32)
+        if vector.ndim != 1 or vector.size == 0:
+            raise ProviderError("Embedding provider returned an empty or non-vector result")
+        if not np.isfinite(vector).all():
+            raise ProviderError("Embedding provider returned non-finite vector values")
 
-        # Save as numpy binary or other format
-        # For now, just return the path
+        temporary_file = vector_file.with_name(f"{vector_file.stem}.{uuid4().hex}.tmp.npy")
+        try:
+            np.save(temporary_file, vector, allow_pickle=False)
+            temporary_file.replace(vector_file)
+        finally:
+            temporary_file.unlink(missing_ok=True)
         return vector_file
 
     def _emit(self, event: object) -> None:

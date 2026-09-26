@@ -123,17 +123,24 @@ class MockRecognitionProvider(RecognitionProvider):
 
 
 def get_provider(
-    provider_type: str = "mock",
+    provider_type: str | None = None,
     model_name: str | None = None,
     device: str = "cpu",
     **kwargs: Any,
 ) -> RecognitionProvider:
-    """Factory for recognition providers."""
+    """Factory for explicitly selected recognition providers.
+
+    This source tree contains only a test double. Production callers must
+    inject a concrete provider backed by a verified model.
+    """
     if provider_type == "mock":
         return MockRecognitionProvider(
             model_name=model_name or "mock-recognition",
             device=device,
             model_version=kwargs.get("model_version", "1.0.0"),
         )
-
+    if provider_type is None:
+        raise UnsupportedRecognitionProviderError(
+            "No concrete recognition provider is bundled; inject a provider backed by a verified model"
+        )
     raise UnsupportedRecognitionProviderError(f"Unknown recognition provider: {provider_type}")

@@ -7,8 +7,8 @@ from threading import Lock
 from engine.bulk.bulk_models import BulkBatch, BulkFailure, BulkItem, BulkRollbackRecord, BulkRequest
 
 
-class BulkRepository:
-    """In-memory store for bulk batch state and rollback metadata."""
+class InMemoryBulkRepository:
+    """Explicit in-memory adapter retained for isolated tests and injected experiments."""
 
     _batches: dict[str, BulkBatch] = {}
     _rollback_records: dict[str, list[BulkRollbackRecord]] = {}
@@ -24,7 +24,7 @@ class BulkRepository:
         with self._lock:
             batch.updated_at = datetime.now(timezone.utc)
             self._batches[batch.batch_id] = batch
-            self._rollback_records.setdefault(batch.batch_id, batch.rollback_records)
+            self._rollback_records[batch.batch_id] = batch.rollback_records
             return batch
 
     def get_batch(self, batch_id: str) -> BulkBatch | None:
@@ -50,9 +50,10 @@ class BulkRepository:
     def append_rollback_record(self, batch_id: str, record: BulkRollbackRecord) -> None:
         with self._lock:
             batch = self._batches[batch_id]
-            batch.rollback_records.append(record)
+            if record not in batch.rollback_records:
+                batch.rollback_records.append(record)
             batch.updated_at = datetime.now(timezone.utc)
-            self._rollback_records.setdefault(batch_id, []).append(record)
+            self._rollback_records[batch_id] = batch.rollback_records
             self._batches[batch_id] = batch
 
     def list_rollback_records(self, batch_id: str | None = None) -> list[BulkRollbackRecord]:
@@ -76,9 +77,13 @@ class BulkRepository:
         with self._lock:
             batch.updated_at = datetime.now(timezone.utc)
             self._batches[batch.batch_id] = batch
+            self._rollback_records[batch.batch_id] = batch.rollback_records
             return batch
 
     def clone_batch(self, batch_id: str) -> BulkBatch | None:
         with self._lock:
             batch = self._batches.get(batch_id)
             return copy.deepcopy(batch) if batch is not None else None
+
+
+from engine.repositories.bulk_repository_durable import DurableBulkRepository as BulkRepository

@@ -4,8 +4,9 @@ from pathlib import Path
 
 from engine.pipeline import PipelineJob, QueueManager, QueueType
 from engine.recognition.recognition_engine import RecognitionEngine
+from engine.recognition.recognition_exceptions import RecognitionProviderError
 from engine.recognition.recognition_models import RecognitionCheckpoint, RecognitionResult
-from engine.recognition.recognition_provider import RecognitionProvider, get_provider
+from engine.recognition.recognition_provider import RecognitionProvider
 
 
 class RecognitionService:
@@ -20,14 +21,12 @@ class RecognitionService:
     ) -> None:
         self.queue_manager = queue_manager or QueueManager()
 
-        if engine is None:
-            if provider is None:
-                provider = get_provider(provider_type="mock")
-            provider.initialize()
+        if engine is None and provider is not None:
             engine = RecognitionEngine(provider=provider, callback=self._handle_event)
 
         self.engine = engine
-        self.provider = provider or engine.provider
+        self.provider = provider or (engine.provider if engine is not None else None)
+        self._initialized = False
 
     def process_recognition_job(
         self,
@@ -39,6 +38,12 @@ class RecognitionService:
         if not job.source_path:
             return None
 
+        if self.engine is None or self.provider is None:
+            raise RecognitionProviderError(
+                "No concrete recognition provider is configured. "
+                "The bundled mock provider is test-only; inject a provider backed by a verified model."
+            )
+        self._ensure_provider_initialized()
         result = self.engine.process_path(Path(job.source_path), checkpoint=checkpoint)
         if result is None:
             return None
@@ -79,6 +84,11 @@ class RecognitionService:
 
     def _handle_event(self, event: object) -> None:
         return None
+
+    def _ensure_provider_initialized(self) -> None:
+        if not self._initialized:
+            self.provider.initialize()
+            self._initialized = True
 
     def _result_metadata(self, result: RecognitionResult) -> dict[str, object]:
         output = result.output

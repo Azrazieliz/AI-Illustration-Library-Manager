@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -14,7 +15,29 @@ from engine.automation import (
     AutomationWorker,
 )
 from engine.automation.automation_exceptions import AutomationValidationError
+from engine.config import settings
+from engine.database.database import database_manager
+from engine.database.session import remove_scoped_session
 from engine.pipeline import PipelineJob, QueueType
+
+
+@pytest.fixture(autouse=True)
+def automation_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    _reset_database_manager()
+    yield
+    remove_scoped_session()
+    _reset_database_manager()
+
+
+def _reset_database_manager() -> None:
+    if database_manager._engine is not None:
+        database_manager._engine.dispose()
+    database_manager._engine = None
+    database_manager._session_factory = None
+    database_manager._initialized = False
+    database_manager.__init__()
 
 
 def _new_engine() -> AutomationEngine:
@@ -330,3 +353,30 @@ def test_manual_trigger_unknown_job_raises() -> None:
     engine = _new_engine()
     with pytest.raises(AutomationValidationError):
         engine.trigger_manual("missing-job")
+
+
+def test_scheduler_state_survives_repository_recreation() -> None:
+    engine = _new_engine()
+    now = datetime(2024, 1, 1, 8, 0, tzinfo=timezone.utc)
+
+    engine.schedule_job(
+        job_id="durable-schedule",
+        name="Durable Schedule",
+        action="index",
+        queue_type=QueueType.INDEX,
+        priority=7,
+        schedule_type=AutomationScheduleType.ONE_SHOT,
+        trigger_type=AutomationTriggerType.SCHEDULED,
+        run_at=now - timedelta(seconds=1),
+        payload={"source_path": "durable.jpg"},
+    )
+    runs = engine.run_due(now=now)
+
+    restarted = _new_engine()
+    restored = restarted.repository.get_job("durable-schedule")
+
+    assert len(runs) == 1
+    assert restored is not None
+    assert restored.state.value == "completed"
+    assert restored.successes == 1
+    assert [record.job_id for record in restarted.repository.list_history()] == ["durable-schedule"]

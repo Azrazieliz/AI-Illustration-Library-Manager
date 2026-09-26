@@ -60,7 +60,10 @@ class PluginEngine:
         self.statistics = PluginStatistics()
 
         self._loaded_modules: dict[str, ModuleType] = {}
-        self._load_order: list[str] = []
+        recover_loaded_runtimes = getattr(self.repository, "recover_loaded_runtimes", None)
+        if callable(recover_loaded_runtimes):
+            recover_loaded_runtimes()
+        self._load_order = [item.manifest.plugin_id for item in self.repository.list_runtimes()]
 
     # ------------------------------------------------------------------
     # Discovery and registration
@@ -96,7 +99,7 @@ class PluginEngine:
         for manifest in order:
             runtime = self.repository.register_manifest(manifest)
             runtimes.append(runtime)
-        self._load_order = [item.manifest.plugin_id for item in runtimes]
+        self._load_order = [item.manifest.plugin_id for item in self.repository.list_runtimes()]
         self.statistics.increment("registered", len(runtimes))
         self.statistics.increment("enabled", len([item for item in runtimes if item.enabled]))
         return runtimes
@@ -131,7 +134,7 @@ class PluginEngine:
             return PluginOperationResult(action="load", success=False, message=f"Plugin disabled: {plugin_id}")
 
         try:
-            module = self._import_plugin_module(runtime.manifest)
+            module = self._import_plugin_module(runtime.manifest, runtime.config)
             self._loaded_modules[plugin_id] = module
             self.repository.set_loaded(plugin_id)
             self._register_plugin_settings(runtime)
@@ -369,7 +372,7 @@ class PluginEngine:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _import_plugin_module(self, manifest: PluginManifest) -> ModuleType:
+    def _import_plugin_module(self, manifest: PluginManifest, config: dict[str, Any]) -> ModuleType:
         if manifest.plugin_directory is None:
             raise PluginLoadError(f"Missing plugin_directory for {manifest.plugin_id}")
 
@@ -394,7 +397,7 @@ class PluginEngine:
 
         startup = getattr(module, "startup", None)
         if callable(startup):
-            self._safe_call(startup, payload={}, config=manifest.default_config)
+            self._safe_call(startup, payload={}, config=config)
 
         return module
 
@@ -408,7 +411,7 @@ class PluginEngine:
         if "tasks:scheduled" not in runtime.manifest.permissions:
             return
         for task in runtime.manifest.scheduled_tasks:
-            self.repository.schedule_task(runtime.manifest.plugin_id, task.task_id, task.interval_seconds)
+            self.repository.ensure_scheduled_task(runtime.manifest.plugin_id, task.task_id, task.interval_seconds)
 
     def _safe_call(self, func: Callable[..., Any], *, payload: dict[str, Any], config: dict[str, Any], event_name: str | None = None) -> Any:
         sandbox_payload = deepcopy(payload)

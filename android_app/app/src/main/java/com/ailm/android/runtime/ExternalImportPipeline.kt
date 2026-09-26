@@ -34,6 +34,7 @@ data class ExternalImportRequest(
     val importId: String = UUID.randomUUID().toString(),
     val sourceType: ExternalImportSourceType,
     val source: String,
+    val sourceUri: String = "",
     val conflictStrategy: ExternalImportConflictStrategy = ExternalImportConflictStrategy.MERGE_METADATA,
     val replaceExisting: Boolean = false,
     val csvTableName: String? = null,
@@ -237,6 +238,7 @@ class ExternalImportPipeline(
         .associateBy { it.lowercase(Locale.US) }
 
     private val supportedTables: Set<String> = FusionDatabaseSchema.DOMAIN_TABLE_ORDER.toSet()
+    private val normalizationEngine: NormalizationEngine by lazy { NormalizationEngine(database) }
 
     private val importLock = Any()
     private val cancelFlags = ConcurrentHashMap<String, Boolean>()
@@ -330,10 +332,51 @@ class ExternalImportPipeline(
         }
     }
 
+    private fun parseJsonRoot(text: String): Any {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) {
+            throw IllegalArgumentException("JSON import payload is empty")
+        }
+
+        return runCatching { JSONObject(text) }
+            .recoverCatching { JSONArray(text) }
+            .getOrElse { error ->
+                throw IllegalArgumentException("Invalid JSON import payload: ${error.message}", error)
+            }
+    }
+
+    private fun mergeTableRows(target: MutableMap<String, JSONArray>, source: Map<String, JSONArray>) {
+        source.forEach { (tableName, rows) ->
+            val existing = target.getOrPut(tableName) { JSONArray() }
+            appendArray(existing, rows)
+        }
+    }
+
+    private fun appendArray(target: JSONArray, source: JSONArray) {
+        for (index in 0 until source.length()) {
+            target.put(source.opt(index))
+        }
+    }
+
     private inner class JsonReader : ImportReader {
         override fun read(request: ExternalImportRequest): RawImportPayload {
             val text = readSourceContent(request.source)
-            val parsed = JSONObject(text)
+            val parsedRoot = parseJsonRoot(text)
+            return when (parsedRoot) {
+                is JSONObject -> parseJsonObject(parsedRoot, request)
+                is JSONArray -> parseJsonArrayRoot(parsedRoot, request)
+                else -> throw IllegalArgumentException("Unsupported JSON import root type: ${parsedRoot?.javaClass?.simpleName}")
+            }
+        }
+
+        /**
+         * Supports both root-level JSON objects ({}) and root-level JSON arrays ([]).
+         * If the payload begins with an object, that object is parsed as a standard
+         * Fusion JSON import bundle or an object mapping table names to arrays.
+         * If the payload begins with an array, this converts rows or bundle objects
+         * into the same canonical internal payload representation.
+         */
+        private fun parseJsonObject(parsed: JSONObject, request: ExternalImportRequest): RawImportPayload {
             val tableRows = mutableMapOf<String, JSONArray>()
             val tables = parsed.optJSONObject("tables")
 
@@ -358,18 +401,176 @@ class ExternalImportPipeline(
 
             val imageSnapshot = parsed.optJSONArray("images_snapshot") ?: JSONArray()
             return RawImportPayload(
-                sourceType = request.sourceType,
+                sourceType = ExternalImportSourceType.JSON,
                 sourceLabel = sourceLabel(request.source),
                 tableRows = tableRows,
                 imageSnapshot = imageSnapshot,
             )
+        }
+
+        private fun parseJsonArrayRoot(parsed: JSONArray, request: ExternalImportRequest): RawImportPayload {
+            if (parsed.length() == 0) {
+                return RawImportPayload(
+                    sourceType = ExternalImportSourceType.JSON,
+                    sourceLabel = sourceLabel(request.source),
+                    tableRows = emptyMap(),
+                    imageSnapshot = JSONArray(),
+                )
+            }
+
+            val objects = buildList {
+                for (index in 0 until parsed.length()) {
+                    val element = parsed.opt(index)
+                    if (element !is JSONObject) {
+                        throw IllegalArgumentException(
+                            "Array-root JSON import must contain only objects; root[$index] is ${element?.javaClass?.simpleName ?: "null"}"
+                        )
+                    }
+                    add(element)
+                }
+            }
+
+            if (objects.any { isBundleLikeObject(it) }) {
+                val mergedTableRows = mutableMapOf<String, JSONArray>()
+                val mergedImageSnapshot = JSONArray()
+                objects.forEachIndexed { index, item ->
+                    if (!isBundleLikeObject(item)) {
+                        throw IllegalArgumentException(
+                            "Array-root JSON import must contain only bundle objects when one or more array items represent a database bundle; root[$index] is not a bundle object"
+                        )
+                    }
+                    val payload = parseJsonObject(item, request)
+                    mergeTableRows(mergedTableRows, payload.tableRows)
+                    appendArray(mergedImageSnapshot, payload.imageSnapshot)
+                }
+                return RawImportPayload(
+                    sourceType = ExternalImportSourceType.JSON,
+                    sourceLabel = "inline",
+                    tableRows = mergedTableRows,
+                    imageSnapshot = mergedImageSnapshot,
+                )
+            }
+
+            val sourceTable = inferTableNameFromSource(request.source, request.sourceUri)
+            val tableNames: List<String> = objects.mapIndexed { index, item ->
+                val inferred = inferTableNameFromRowObject(item) ?: sourceTable
+                if (inferred == null) {
+                    throw IllegalArgumentException(
+                        "Unable to infer table for array-root JSON import item root[$index]. " +
+                            "Provide a top-level table wrapper, include a supported `table`, `table_name`, or `record_type` field, " +
+                            "or name the source file after a supported table."
+                    )
+                }
+                inferred
+            }
+
+            val tableRows = mutableMapOf<String, JSONArray>()
+            if (tableNames.toSet().size == 1) {
+                val table = tableNames.first()
+                val array = JSONArray()
+                objects.forEach { array.put(it) }
+                tableRows[table] = array
+            } else {
+                objects.forEachIndexed { index, item ->
+                    val table = tableNames[index]
+                    tableRows.getOrPut(table) { JSONArray() }.put(item)
+                }
+            }
+
+            return RawImportPayload(
+                sourceType = ExternalImportSourceType.JSON,
+                sourceLabel = "inline",
+                tableRows = tableRows,
+                imageSnapshot = JSONArray(),
+            )
+        }
+
+        private fun isBundleLikeObject(obj: JSONObject): Boolean {
+            if (obj.has("tables") || obj.has("images_snapshot")) {
+                return true
+            }
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                if (resolveTableName(key) != null) {
+                    return true
+                }
+            }
+            return false
+        }
+
+
+        private fun inferTableNameFromRowObject(row: JSONObject): String? {
+            val explicitTable = row.optString("table").ifBlank {
+                row.optString("table_name").ifBlank {
+                    row.optString("record_type").ifBlank {
+                        row.optString("type")
+                    }
+                }
+            }
+            if (explicitTable.isNotBlank()) {
+                return resolveTableName(explicitTable) ?: resolveWorkbookSheet(explicitTable)
+            }
+
+            val keys = row.keys().asSequence().map { it.lowercase(Locale.US) }.toSet()
+            return when {
+                keys.contains("character_id") && keys.intersect(setOf("canonical_name", "primary_series_code", "series_id")).isNotEmpty() -> FusionDatabaseSchema.TABLE_CHARACTERS
+                keys.contains("series_code") && keys.intersect(setOf("canonical_title", "localized_title", "franchise_id")).isNotEmpty() -> FusionDatabaseSchema.TABLE_SERIES
+                keys.contains("tag_id") && keys.contains("canonical_name") -> FusionDatabaseSchema.TABLE_TAGS
+                keys.contains("franchise_id") && keys.contains("display_name") -> FusionDatabaseSchema.TABLE_FRANCHISES
+                keys.contains("collection_id") && keys.contains("collection_name") -> FusionDatabaseSchema.TABLE_COLLECTIONS
+                keys.contains("outfit_id") && keys.contains("canonical_name") -> FusionDatabaseSchema.TABLE_OUTFITS
+                keys.contains("weapon_id") && keys.contains("canonical_name") -> FusionDatabaseSchema.TABLE_WEAPONS
+                keys.contains("artist_id") && keys.contains("display_name") -> FusionDatabaseSchema.TABLE_ARTISTS
+                else -> null
+            }
+        }
+
+        private fun inferTableNameFromSource(source: String, sourceUri: String = ""): String? {
+            val uriName = sourceUri.trim().takeIf { it.isNotBlank() }
+                ?.let { File(it).nameWithoutExtension.ifBlank { null } }
+                ?.let(::inferTableNameFromFileBaseName)
+            if (uriName != null) {
+                return uriName
+            }
+
+            val trimmed = source.trim()
+            if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+                return null
+            }
+            val name = File(trimmed).nameWithoutExtension.ifBlank { return null }
+            return inferTableNameFromFileBaseName(name)
+        }
+
+        private fun inferTableNameFromFileBaseName(name: String?): String? {
+            if (name.isNullOrBlank()) {
+                return null
+            }
+            val baseName = name.trim()
+            val canonical = resolveTableName(baseName) ?: resolveWorkbookSheet(baseName)
+            if (canonical != null) {
+                return canonical
+            }
+
+            val prefix = baseName.substringBefore('_').takeIf { it.isNotBlank() }
+            return prefix?.let {
+                resolveTableName(it) ?: resolveWorkbookSheet(it)
+            }
         }
     }
 
     private inner class WorkbookJsonReader : ImportReader {
         override fun read(request: ExternalImportRequest): RawImportPayload {
             val text = readSourceContent(request.source)
-            val parsed = JSONObject(text)
+            val parsedRoot = parseJsonRoot(text)
+            return when (parsedRoot) {
+                is JSONObject -> parseWorkbookJsonObject(parsedRoot, request)
+                is JSONArray -> parseWorkbookJsonArray(parsedRoot, request)
+                else -> throw IllegalArgumentException("Unsupported JSON import root type: ${parsedRoot?.javaClass?.simpleName}")
+            }
+        }
+
+        private fun parseWorkbookJsonObject(parsed: JSONObject, request: ExternalImportRequest): RawImportPayload {
             val sheets = parsed.optJSONObject("sheets") ?: JSONObject()
             val tableRows = mutableMapOf<String, JSONArray>()
 
@@ -387,6 +588,50 @@ class ExternalImportPipeline(
                 sourceLabel = sourceLabel(request.source),
                 tableRows = tableRows,
                 imageSnapshot = imageSnapshot,
+            )
+        }
+
+        private fun parseWorkbookJsonArray(parsed: JSONArray, request: ExternalImportRequest): RawImportPayload {
+            if (parsed.length() == 0) {
+                return RawImportPayload(
+                    sourceType = request.sourceType,
+                    sourceLabel = sourceLabel(request.source),
+                    tableRows = emptyMap(),
+                    imageSnapshot = JSONArray(),
+                )
+            }
+
+            val objects = buildList {
+                for (index in 0 until parsed.length()) {
+                    val element = parsed.opt(index)
+                    if (element !is JSONObject) {
+                        throw IllegalArgumentException(
+                            "Array-root workbook JSON import must contain only objects; root[$index] is ${element?.javaClass?.simpleName ?: "null"}"
+                        )
+                    }
+                    add(element)
+                }
+            }
+
+            val mergedTableRows = mutableMapOf<String, JSONArray>()
+            val mergedImageSnapshot = JSONArray()
+
+            objects.forEachIndexed { index, item ->
+                if (!item.has("sheets") && !item.has("images_snapshot")) {
+                    throw IllegalArgumentException(
+                        "Array-root workbook JSON import items must be workbook objects; root[$index] is missing a `sheets` or `images_snapshot` field"
+                    )
+                }
+                val payload = parseWorkbookJsonObject(item, request)
+                mergeTableRows(mergedTableRows, payload.tableRows)
+                appendArray(mergedImageSnapshot, payload.imageSnapshot)
+            }
+
+            return RawImportPayload(
+                sourceType = request.sourceType,
+                sourceLabel = sourceLabel(request.source),
+                tableRows = mergedTableRows,
+                imageSnapshot = mergedImageSnapshot,
             )
         }
     }
@@ -857,6 +1102,7 @@ class ExternalImportPipeline(
 
         emitProgress(callback, request.importId, "normalizer", 0.30, "Normalizing values")
         checkCancellation(request.importId)
+        warnings += normalizationEngine.normalize(model.rowsByTable, model.sourceLabel)
         normalizeModel(model, warnings)
 
         emitProgress(callback, request.importId, "alias_resolver", 0.42, "Resolving aliases")
@@ -1892,6 +2138,9 @@ class ExternalImportPipeline(
     }
 
     private fun mergeRows(existing: Map<String, Any?>, incoming: Map<String, Any?>): MutableMap<String, Any?> {
+        if (hasManualOverride(existing)) {
+            return existing.toMutableMap()
+        }
         val merged = existing.toMutableMap()
         incoming.forEach { (key, value) ->
             if (value == null) {
@@ -1910,6 +2159,16 @@ class ExternalImportPipeline(
             }
         }
         return merged
+    }
+
+    private fun hasManualOverride(row: Map<String, Any?>): Boolean {
+        return listOf("metadata_json", "recognition_profile_json").any { column ->
+            runCatching { JSONObject(row[column]?.toString().orEmpty()) }
+                .getOrNull()
+                ?.let { json ->
+                    json.optBoolean("manual_override", false) || json.optJSONObject("normalization")?.optBoolean("manual_override", false) == true
+                } == true
+        }
     }
 
     private fun mergeJsonStrings(existingJson: String, incomingJson: String): String {
@@ -2268,7 +2527,14 @@ class ExternalImportPipeline(
             return null
         }
         val normalized = name.trim().lowercase(Locale.US)
-        return tableNamesByLower[normalized]
+        return tableNamesByLower[normalized] ?: when (normalized) {
+            "characters", "character", "character_database" -> FusionDatabaseSchema.TABLE_CHARACTERS
+            "series", "series_database" -> FusionDatabaseSchema.TABLE_SERIES
+            "tags", "taxonomy" -> FusionDatabaseSchema.TABLE_TAGS
+            "outfits" -> FusionDatabaseSchema.TABLE_OUTFITS
+            "weapons" -> FusionDatabaseSchema.TABLE_WEAPONS
+            else -> null
+        }
     }
 
     private fun resolveWorkbookSheet(name: String?): String? {

@@ -26,6 +26,10 @@ faiss-cpu = "^1.12"
 
 onnxruntime = "^1.22"
 
+torch = "^2.8"
+
+transformers = "^4.56"
+
 pyyaml = "^6.0"
 
 structlog = "^25.4"

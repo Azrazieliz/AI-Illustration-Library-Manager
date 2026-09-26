@@ -37,14 +37,17 @@ class LocalRepository(
         val folderName: String,
         val relativePath: String,
         val importedOrder: Long,
-        val favorite: Int,
-        val rating: Int,
         val tagsText: String,
         val taxonomyText: String,
         val metadataText: String,
         val active: Int,
         val lastModifiedMs: Long?,
         val scannedAtMs: Long,
+    )
+
+    data class ImageUpsertResult(
+        val imageId: Int,
+        val needsAiProcessing: Boolean,
     )
 
     fun registerFolder(folderUri: String, enabled: Boolean = true) {
@@ -180,12 +183,20 @@ class LocalRepository(
         tagsText: String = "",
         taxonomyText: String = "",
         metadataText: String = "",
-    ) {
+        seenUris: Set<String> = emptySet(),
+    ): ImageUpsertResult {
         if (node.isDirectory) {
-            return
+            return ImageUpsertResult(imageId = 0, needsAiProcessing = false)
         }
 
         val existing = readImagePreferences(node.uri)
+            ?: findUniqueRenameCandidate(
+                folderUri = folderUri,
+                newUri = node.uri,
+                sizeBytes = metadata.sizeBytes ?: node.sizeBytes,
+                modifiedAtMs = metadata.modifiedAtMs ?: node.lastModifiedMs,
+                seenUris = seenUris,
+            )
         val resolvedFolderName = FolderUriUtils.displayName(folderUri)
         val resolvedRelativePath = if (node.uri.startsWith(folderUri)) {
             node.uri.removePrefix(folderUri).trimStart('/')
@@ -210,8 +221,6 @@ class LocalRepository(
             put("folder_name", if (resolvedFolderName.isBlank()) metadata.folderName else resolvedFolderName)
             put("relative_path", resolvedRelativePath)
             put("imported_order", existing?.importedOrder ?: importOrder)
-            put("favorite", existing?.favorite ?: 0)
-            put("rating", existing?.rating ?: 0)
             put("tags_text", if (tagsText.isBlank()) existing?.tagsText ?: "" else tagsText)
             put("taxonomy_text", if (taxonomyText.isBlank()) existing?.taxonomyText ?: "" else taxonomyText)
             put("metadata_text", if (metadataText.isBlank()) node.name else metadataText)
@@ -219,12 +228,22 @@ class LocalRepository(
             put("last_modified_ms", metadata.modifiedAtMs ?: node.lastModifiedMs)
             put("scanned_at_ms", scannedAtMs)
         }
-        database.writableDatabase.insertWithOnConflict(
-            "images",
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_REPLACE,
-        )
+        val imageId = if (existing == null) {
+            database.writableDatabase.insert("images", null, values).toInt()
+        } else {
+            val db = database.writableDatabase
+            db.update(
+                "images",
+                values,
+                "image_id = ?",
+                arrayOf(existing.imageId.toString()),
+            )
+            if (existing.uri != node.uri) {
+                db.delete("thumbnail_cache", "image_uri = ?", arrayOf(existing.uri))
+                db.delete("thumbnail_cache", "image_uri = ?", arrayOf(node.uri))
+            }
+            existing.imageId
+        }
         val reviewValues = ContentValues().apply {
             put("image_uri", node.uri)
             put("status", "pending")
@@ -237,6 +256,10 @@ class LocalRepository(
             reviewValues,
             SQLiteDatabase.CONFLICT_IGNORE,
         )
+        return ImageUpsertResult(
+            imageId = imageId,
+            needsAiProcessing = existing == null,
+        )
     }
 
     fun markFolderImagesInactiveBefore(folderUri: String, scannedAtMs: Long) {
@@ -248,6 +271,33 @@ class LocalRepository(
             values,
             "folder_uri = ? AND scanned_at_ms < ?",
             arrayOf(folderUri, scannedAtMs.toString()),
+        )
+    }
+
+    fun markMissingFolderImagesInactive(folderUri: String, seenUris: Set<String>, scannedAtMs: Long) {
+        val values = ContentValues().apply {
+            put("active", 0)
+            put("scanned_at_ms", scannedAtMs)
+        }
+        if (seenUris.isEmpty()) {
+            database.writableDatabase.update(
+                "images",
+                values,
+                "folder_uri = ?",
+                arrayOf(folderUri),
+            )
+            return
+        }
+
+        val placeholders = seenUris.joinToString(",") { "?" }
+        val args = mutableListOf<String>()
+        args += folderUri
+        args += seenUris
+        database.writableDatabase.update(
+            "images",
+            values,
+            "folder_uri = ? AND uri NOT IN ($placeholders)",
+            args.toTypedArray(),
         )
     }
 
@@ -273,17 +323,6 @@ class LocalRepository(
         options.folderQuery?.takeIf { it.isNotBlank() }?.let {
             whereClauses += "LOWER(i.folder_uri) LIKE ?"
             args += "%${it.trim().lowercase()}%"
-        }
-        if (options.favoritesOnly) {
-            whereClauses += "i.favorite = 1"
-        }
-        options.minRating?.let {
-            whereClauses += "i.rating >= ?"
-            args += it.toString()
-        }
-        options.maxRating?.let {
-            whereClauses += "i.rating <= ?"
-            args += it.toString()
         }
         if (!options.query.isNullOrBlank()) {
             whereClauses += "(LOWER(i.filename) LIKE ? OR LOWER(i.uri) LIKE ? OR LOWER(i.metadata_text) LIKE ?)"
@@ -347,8 +386,6 @@ class LocalRepository(
             "date_modified" -> "COALESCE(i.modified_at_ms, i.last_modified_ms, i.created_at_ms, 0) ${direction(options.sortDirection)}"
             "size" -> "COALESCE(i.size_bytes, 0) ${direction(options.sortDirection)}"
             "resolution" -> "(COALESCE(i.width, 0) * COALESCE(i.height, 0)) ${direction(options.sortDirection)}"
-            "rating" -> "COALESCE(i.rating, 0) ${direction(options.sortDirection)}, i.imported_order DESC"
-            "favorites" -> "COALESCE(i.favorite, 0) DESC, i.imported_order DESC"
             "import_order" -> "i.imported_order ${direction(options.sortDirection)}"
             "random" -> "RANDOM()"
             else -> "i.imported_order DESC"
@@ -362,7 +399,7 @@ class LocalRepository(
 
         val sql = """
             SELECT i.image_id, i.uri, i.filename, i.parent_uri, i.folder_uri, i.size_bytes, i.modified_at_ms,
-                     i.created_at_ms, i.width, i.height, i.favorite, i.rating, i.tags_text, i.taxonomy_text,
+                     i.created_at_ms, i.width, i.height, i.tags_text, i.taxonomy_text,
                      i.metadata_text, i.imported_order, i.active, i.scanned_at_ms, i.last_modified_ms,
                      i.extension, i.mime_type, i.resolution_text, i.aspect_ratio, i.orientation, i.folder_name, i.relative_path
             $from
@@ -404,7 +441,7 @@ class LocalRepository(
             SELECT image_id, uri, filename, folder_uri, parent_uri, size_bytes, width, height,
                    created_at_ms, modified_at_ms, extension, mime_type, resolution_text,
                    aspect_ratio, orientation, folder_name, relative_path, imported_order,
-                   favorite, rating, tags_text, taxonomy_text, metadata_text, active,
+                   tags_text, taxonomy_text, metadata_text, active,
                    last_modified_ms, scanned_at_ms
             FROM images
             WHERE image_id IN ($placeholders)
@@ -431,14 +468,12 @@ class LocalRepository(
                     folderName = cursor.getString(15) ?: "",
                     relativePath = cursor.getString(16) ?: "",
                     importedOrder = if (cursor.isNull(17)) 0L else cursor.getLong(17),
-                    favorite = cursor.getInt(18),
-                    rating = cursor.getInt(19),
-                    tagsText = cursor.getString(20) ?: "",
-                    taxonomyText = cursor.getString(21) ?: "",
-                    metadataText = cursor.getString(22) ?: "",
-                    active = cursor.getInt(23),
-                    lastModifiedMs = if (cursor.isNull(24)) null else cursor.getLong(24),
-                    scannedAtMs = if (cursor.isNull(25)) System.currentTimeMillis() else cursor.getLong(25),
+                    tagsText = cursor.getString(18) ?: "",
+                    taxonomyText = cursor.getString(19) ?: "",
+                    metadataText = cursor.getString(20) ?: "",
+                    active = cursor.getInt(21),
+                    lastModifiedMs = if (cursor.isNull(22)) null else cursor.getLong(22),
+                    scannedAtMs = if (cursor.isNull(23)) System.currentTimeMillis() else cursor.getLong(23),
                 )
             }
         }
@@ -485,6 +520,12 @@ class LocalRepository(
         val db = database.writableDatabase
         db.beginTransaction()
         try {
+            logImageRows("before path update", imageId, oldUri, newUri)
+            db.delete(
+                "images",
+                "uri IN (?, ?) AND image_id != ?",
+                arrayOf(oldUri, newUri, imageId.toString()),
+            )
             val updated = updateImageRecordPath(
                 imageId = imageId,
                 newUri = newUri,
@@ -500,6 +541,7 @@ class LocalRepository(
             }
             db.delete("thumbnail_cache", "image_uri = ?", arrayOf(oldUri))
             db.delete("thumbnail_cache", "image_uri = ?", arrayOf(newUri))
+            logImageRows("after path update", imageId, oldUri, newUri)
             db.setTransactionSuccessful()
             return true
         } finally {
@@ -536,8 +578,6 @@ class LocalRepository(
             put("folder_name", newFolderName)
             put("relative_path", newRelativePath)
             put("imported_order", importOrder)
-            put("favorite", source.favorite)
-            put("rating", source.rating)
             put("tags_text", source.tagsText)
             put("taxonomy_text", source.taxonomyText)
             put("metadata_text", source.metadataText)
@@ -558,11 +598,17 @@ class LocalRepository(
         val db = database.writableDatabase
         db.beginTransaction()
         try {
-            val deleted = db.delete("images", "image_id = ?", arrayOf(imageId.toString())) > 0
+            logImageRows("before delete", imageId, imageUri, imageUri)
+            val deleted = db.delete(
+                "images",
+                "image_id = ? OR uri = ?",
+                arrayOf(imageId.toString(), imageUri),
+            ) > 0
             if (!deleted) {
                 return false
             }
             db.delete("thumbnail_cache", "image_uri = ?", arrayOf(imageUri))
+            logImageRows("after delete", imageId, imageUri, imageUri)
             db.setTransactionSuccessful()
             return true
         } finally {
@@ -646,9 +692,7 @@ class LocalRepository(
         val sql = """
             SELECT
                 SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END) AS total_images,
-                COALESCE(SUM(CASE WHEN active = 1 THEN size_bytes ELSE 0 END), 0) AS total_size_bytes,
-                SUM(CASE WHEN favorite = 1 AND active = 1 THEN 1 ELSE 0 END) AS total_favorites,
-                COALESCE(AVG(CASE WHEN active = 1 THEN rating END), 0.0) AS avg_rating
+                COALESCE(SUM(CASE WHEN active = 1 THEN size_bytes ELSE 0 END), 0) AS total_size_bytes
             FROM images
         """.trimIndent()
         database.readableDatabase.rawQuery(sql, emptyArray()).use { cursor ->
@@ -656,15 +700,11 @@ class LocalRepository(
                 return mapOf(
                     "total_images" to 0,
                     "total_size_bytes" to 0L,
-                    "total_favorites" to 0,
-                    "avg_rating" to 0.0,
                 )
             }
             return mapOf(
                 "total_images" to cursor.getInt(0),
                 "total_size_bytes" to cursor.getLong(1),
-                "total_favorites" to cursor.getInt(2),
-                "avg_rating" to cursor.getDouble(3),
             )
         }
     }
@@ -774,58 +814,19 @@ class LocalRepository(
         return count > 0
     }
 
-    fun setFavorite(imageId: Int, favorite: Boolean): Boolean {
-        val values = ContentValues().apply { put("favorite", if (favorite) 1 else 0) }
-        val whereClause = "image_id = ?"
-        val whereArgs = arrayOf(imageId.toString())
-        Log.d(REPO_TRACE_TAG, "SQLite UPDATE SQL: UPDATE images SET favorite = ? WHERE $whereClause args=[${if (favorite) 1 else 0}, ${whereArgs.joinToString()}]")
-        val count = database.writableDatabase.update("images", values, whereClause, whereArgs)
-        Log.d(REPO_TRACE_TAG, "AFTER UPDATE reached (favorite): imageId=$imageId")
-        try {
-            Log.d(REPO_TRACE_TAG, "SQLite rows affected (favorite): imageId=$imageId rows=$count")
-            if (count == 0) {
-                Log.d(REPO_TRACE_TAG, "SQLite UPDATE affected 0 rows (favorite): where=$whereClause whereArgs=${whereArgs.joinToString()}")
-            }
-            logSqlChangeCounters("favorite", imageId)
-            logImmediatePreferenceSelect(imageId, "favorite")
-            Log.d(REPO_TRACE_TAG, "Repository returning (favorite): imageId=$imageId result=${count > 0}")
-            return count > 0
-        } catch (t: Throwable) {
-            Log.e(REPO_TRACE_TAG, "Post-update logging failed (favorite): imageId=$imageId", t)
-            throw t
-        }
-    }
-
-    fun setRating(imageId: Int, rating: Int): Boolean {
-        val bounded = rating.coerceIn(0, 5)
-        val values = ContentValues().apply { put("rating", bounded) }
-        val whereClause = "image_id = ?"
-        val whereArgs = arrayOf(imageId.toString())
-        Log.d(REPO_TRACE_TAG, "SQLite UPDATE SQL: UPDATE images SET rating = ? WHERE $whereClause args=[$bounded, ${whereArgs.joinToString()}]")
-        val count = database.writableDatabase.update("images", values, whereClause, whereArgs)
-        Log.d(REPO_TRACE_TAG, "AFTER UPDATE reached (rating): imageId=$imageId")
-        try {
-            Log.d(REPO_TRACE_TAG, "SQLite rows affected (rating): imageId=$imageId rows=$count")
-            if (count == 0) {
-                Log.d(REPO_TRACE_TAG, "SQLite UPDATE affected 0 rows (rating): where=$whereClause whereArgs=${whereArgs.joinToString()}")
-            }
-            logSqlChangeCounters("rating", imageId)
-            logImmediatePreferenceSelect(imageId, "rating")
-            Log.d(REPO_TRACE_TAG, "Repository returning (rating): imageId=$imageId result=${count > 0}")
-            return count > 0
-        } catch (t: Throwable) {
-            Log.e(REPO_TRACE_TAG, "Post-update logging failed (rating): imageId=$imageId", t)
-            throw t
-        }
-    }
-
     fun setTags(imageId: Int, tags: List<String>): Boolean {
         val normalized = tags.map { it.trim() }.filter { it.isNotBlank() }.joinToString("|")
         val values = ContentValues().apply { put("tags_text", normalized) }
         val whereClause = "image_id = ?"
         val whereArgs = arrayOf(imageId.toString())
+        logImmediatePreferenceSelect(imageId, "before tags update")
         Log.d(REPO_TRACE_TAG, "SQLite UPDATE SQL: UPDATE images SET tags_text = ? WHERE $whereClause args=[$normalized, ${whereArgs.joinToString()}]")
-        val count = database.writableDatabase.update("images", values, whereClause, whereArgs)
+        val count = try {
+            database.writableDatabase.update("images", values, whereClause, whereArgs)
+        } catch (t: Throwable) {
+            Log.e(REPO_TRACE_TAG, "SQLite UPDATE failed (tags): imageId=$imageId requestedTags=$normalized", t)
+            throw t
+        }
         Log.d(REPO_TRACE_TAG, "AFTER UPDATE reached (tags): imageId=$imageId")
         try {
             Log.d(REPO_TRACE_TAG, "SQLite rows affected (tags): imageId=$imageId rows=$count")
@@ -833,7 +834,9 @@ class LocalRepository(
                 Log.d(REPO_TRACE_TAG, "SQLite UPDATE affected 0 rows (tags): where=$whereClause whereArgs=${whereArgs.joinToString()}")
             }
             logSqlChangeCounters("tags", imageId)
-            logImmediatePreferenceSelect(imageId, "tags")
+            logImmediatePreferenceSelect(imageId, "after tags update")
+            logImmediateFtsSelect(imageId)
+            Log.d(REPO_TRACE_TAG, "SQLite statement transaction result (tags): imageId=$imageId committed=${count > 0}")
             Log.d(REPO_TRACE_TAG, "Repository returning (tags): imageId=$imageId result=${count > 0}")
             return count > 0
         } catch (t: Throwable) {
@@ -843,17 +846,29 @@ class LocalRepository(
     }
 
     private fun logImmediatePreferenceSelect(imageId: Int, action: String) {
-        val sql = "SELECT image_id, favorite, rating, tags_text FROM images WHERE image_id = ?"
+        val sql = "SELECT image_id, tags_text FROM images WHERE image_id = ?"
         database.readableDatabase.rawQuery(sql, arrayOf(imageId.toString())).use { cursor ->
             if (!cursor.moveToFirst()) {
                 Log.d(REPO_TRACE_TAG, "Immediate SELECT ($action): imageId=$imageId row=missing")
                 return
             }
             val selectedImageId = cursor.getInt(0)
-            val favorite = cursor.getInt(1)
-            val rating = cursor.getInt(2)
-            val tags = cursor.getString(3) ?: ""
-            Log.d(REPO_TRACE_TAG, "Immediate SELECT ($action): image_id=$selectedImageId favorite=$favorite rating=$rating tags_text=$tags")
+            val tags = cursor.getString(1) ?: ""
+            Log.d(REPO_TRACE_TAG, "Immediate SELECT ($action): image_id=$selectedImageId tags_text=$tags")
+        }
+    }
+
+    private fun logImmediateFtsSelect(imageId: Int) {
+        val sql = "SELECT rowid, tags_text FROM image_fts WHERE rowid = ?"
+        database.readableDatabase.rawQuery(sql, arrayOf(imageId.toString())).use { cursor ->
+            if (!cursor.moveToFirst()) {
+                Log.d(REPO_TRACE_TAG, "Immediate FTS SELECT: imageId=$imageId row=missing")
+                return
+            }
+            Log.d(
+                REPO_TRACE_TAG,
+                "Immediate FTS SELECT: rowid=${cursor.getLong(0)} tags_text=${cursor.getString(1) ?: ""}",
+            )
         }
     }
 
@@ -888,17 +903,6 @@ class LocalRepository(
         options.folderQuery?.takeIf { it.isNotBlank() }?.let {
             whereClauses += "LOWER(i.folder_uri) LIKE ?"
             args += "%${it.trim().lowercase()}%"
-        }
-        if (options.favoritesOnly) {
-            whereClauses += "i.favorite = 1"
-        }
-        options.minRating?.let {
-            whereClauses += "i.rating >= ?"
-            args += it.toString()
-        }
-        options.maxRating?.let {
-            whereClauses += "i.rating <= ?"
-            args += it.toString()
         }
         if (!options.query.isNullOrBlank()) {
             whereClauses += "(LOWER(i.filename) LIKE ? OR LOWER(i.uri) LIKE ? OR LOWER(i.metadata_text) LIKE ?)"
@@ -998,6 +1002,53 @@ class LocalRepository(
 
     fun optimizeDatabase() {
         database.writableDatabase.execSQL("PRAGMA optimize")
+    }
+
+    fun fusionManagementStatus(): Map<String, Any> {
+        return fusionRepository.managementStatus() + mapOf(
+            "last_build_ms" to (getSetting("fusion.last_build_ms", "0").toLongOrNull() ?: 0L),
+            "last_optimization_ms" to (getSetting("fusion.last_optimization_ms", "0").toLongOrNull() ?: 0L),
+            "last_export_ms" to (getSetting("fusion.last_export_ms", "0").toLongOrNull() ?: 0L),
+        )
+    }
+
+    fun rebuildFusionOptimizations(): Map<String, Any> {
+        val before = fusionRepository.logicalContentCounts()
+        val db = database.writableDatabase
+        var after = before
+        var rebuildError: String? = null
+        var logicalContentPreserved = false
+        db.beginTransaction()
+        try {
+            FusionDatabaseSchema.ensureArtifacts(db)
+            rebuildSearchIndex()
+            optimizeDatabase()
+            after = fusionRepository.logicalContentCounts()
+            logicalContentPreserved = before == after
+            if (logicalContentPreserved) {
+                db.setTransactionSuccessful()
+            } else {
+                rebuildError = "Rebuild aborted because logical Fusion row counts changed."
+            }
+        } catch (error: Throwable) {
+            rebuildError = error.message ?: "Fusion rebuild failed."
+        } finally {
+            db.endTransaction()
+        }
+        val validation = fusionRepository.validateDatabase(persistRun = logicalContentPreserved)
+        if (logicalContentPreserved) {
+            val now = System.currentTimeMillis()
+            setSetting("fusion.last_build_ms", now.toString())
+            setSetting("fusion.last_optimization_ms", now.toString())
+        }
+        return fusionManagementStatus() + mapOf(
+            "ok" to (logicalContentPreserved && validation.valid),
+            "action" to "rebuild_fusion_optimizations",
+            "logical_content_preserved" to logicalContentPreserved,
+            "before_logical_table_counts" to before,
+            "after_logical_table_counts" to after,
+            "error" to (rebuildError ?: ""),
+        )
     }
 
     fun putThumbnailCache(imageUri: String, cachePath: String, sizeBytes: Long, lastAccessMs: Long) {
@@ -1119,6 +1170,10 @@ class LocalRepository(
         return result.toFusionImportResult(format)
     }
 
+    fun persistFusionRows(candidates: List<FusionRowCandidate>, replaceExisting: Boolean = false): Map<String, Any> {
+        return fusionRepository.persistFusionRows(candidates, replaceExisting)
+    }
+
     fun previewImport(
         request: ExternalImportRequest,
         callback: ExternalImportProgressCallback? = null,
@@ -1178,8 +1233,6 @@ class LocalRepository(
         metadata["folder_uri"] = folderUri
         metadata["imported_order"] = cursor.getLong(cursor.getColumnIndexOrThrow("imported_order"))
         metadata["active"] = cursor.getInt(cursor.getColumnIndexOrThrow("active")) == 1
-        metadata["favorite"] = cursor.getInt(cursor.getColumnIndexOrThrow("favorite")) == 1
-        metadata["rating"] = cursor.getInt(cursor.getColumnIndexOrThrow("rating"))
         val tagsText = cursor.getString(cursor.getColumnIndexOrThrow("tags_text")) ?: ""
         metadata["tags"] = tagsText
             .split('|')
@@ -1254,8 +1307,6 @@ class LocalRepository(
             "mime_type" to mimeType,
             "thumbnail_url" to uri,
             "file_url" to uri,
-            "favorite" to metadata["favorite"].toString().equals("true", ignoreCase = true),
-            "rating" to (metadata["rating"] as? Int ?: 0),
             "date_indexed_ms" to (metadata["date_indexed_ms"] ?: 0L),
             "metadata" to metadata,
         )
@@ -1280,26 +1331,83 @@ class LocalRepository(
     }
 
     private data class ImagePreferences(
-        val favorite: Int,
-        val rating: Int,
+        val imageId: Int,
+        val uri: String,
         val tagsText: String,
         val taxonomyText: String,
         val importedOrder: Long,
     )
 
     private fun readImagePreferences(uri: String): ImagePreferences? {
-        val sql = "SELECT favorite, rating, tags_text, taxonomy_text, imported_order FROM images WHERE uri = ? LIMIT 1"
+        val sql = "SELECT image_id, uri, tags_text, taxonomy_text, imported_order FROM images WHERE uri = ? LIMIT 1"
         database.readableDatabase.rawQuery(sql, arrayOf(uri)).use { cursor ->
             if (!cursor.moveToFirst()) {
                 return null
             }
             return ImagePreferences(
-                favorite = cursor.getInt(0),
-                rating = cursor.getInt(1),
+                imageId = cursor.getInt(0),
+                uri = cursor.getString(1) ?: uri,
                 tagsText = cursor.getString(2) ?: "",
                 taxonomyText = cursor.getString(3) ?: "",
                 importedOrder = if (cursor.isNull(4)) 0L else cursor.getLong(4),
             )
         }
+    }
+
+    private fun findUniqueRenameCandidate(
+        folderUri: String,
+        newUri: String,
+        sizeBytes: Long?,
+        modifiedAtMs: Long?,
+        seenUris: Set<String>,
+    ): ImagePreferences? {
+        if (sizeBytes == null || modifiedAtMs == null || modifiedAtMs <= 0L) {
+            return null
+        }
+
+        val placeholders = seenUris.joinToString(",") { "?" }
+        val seenClause = if (placeholders.isBlank()) "" else " AND uri NOT IN ($placeholders)"
+        val sql = """
+            SELECT image_id, uri, tags_text, taxonomy_text, imported_order
+            FROM images
+            WHERE folder_uri = ?
+              AND active = 1
+              AND uri <> ?
+              AND COALESCE(size_bytes, -1) = ?
+              AND COALESCE(last_modified_ms, modified_at_ms, -1) = ?
+              $seenClause
+            LIMIT 2
+        """.trimIndent()
+        val args = mutableListOf(folderUri, newUri, sizeBytes.toString(), modifiedAtMs.toString())
+        args += seenUris
+        val candidates = mutableListOf<ImagePreferences>()
+        database.readableDatabase.rawQuery(sql, args.toTypedArray()).use { cursor ->
+            while (cursor.moveToNext()) {
+                candidates += ImagePreferences(
+                    imageId = cursor.getInt(0),
+                    uri = cursor.getString(1) ?: "",
+                    tagsText = cursor.getString(2) ?: "",
+                    taxonomyText = cursor.getString(3) ?: "",
+                    importedOrder = if (cursor.isNull(4)) 0L else cursor.getLong(4),
+                )
+            }
+        }
+        return candidates.singleOrNull()
+    }
+
+    private fun logImageRows(action: String, imageId: Int, oldUri: String, newUri: String) {
+        val sql = """
+            SELECT image_id, uri, relative_path, filename, active
+            FROM images
+            WHERE image_id = ? OR uri IN (?, ?)
+            ORDER BY image_id
+        """.trimIndent()
+        val rows = mutableListOf<String>()
+        database.readableDatabase.rawQuery(sql, arrayOf(imageId.toString(), oldUri, newUri)).use { cursor ->
+            while (cursor.moveToNext()) {
+                rows += "id=${cursor.getInt(0)} uri=${cursor.getString(1)} relative_path=${cursor.getString(2)} filename=${cursor.getString(3)} active=${cursor.getInt(4)}"
+            }
+        }
+        Log.d(REPO_TRACE_TAG, "Image rows $action: ${rows.ifEmpty { listOf("none") }.joinToString(" | ")}")
     }
 }

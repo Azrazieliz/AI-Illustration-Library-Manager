@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from engine.character_database import (
     CharacterRelationship,
     CharacterDatabaseBuilder,
@@ -9,7 +13,28 @@ from engine.character_database import (
     RelationshipType,
     WorkerJobStatus,
 )
+from engine.config import settings
+from engine.database.database import database_manager
 from engine.repositories.character_database_repository import CharacterDatabaseRepository
+
+
+@pytest.fixture(autouse=True)
+def character_database_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    original_engine = database_manager._engine
+    original_session_factory = database_manager._session_factory
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    database_manager._engine = None
+    database_manager._session_factory = None
+    CharacterDatabaseRepository.reset_state()
+    try:
+        yield
+    finally:
+        test_engine = database_manager._engine
+        if test_engine is not None and test_engine is not original_engine:
+            test_engine.dispose()
+        database_manager._engine = original_engine
+        database_manager._session_factory = original_session_factory
 
 
 def _engine() -> CharacterDatabaseEngine:
@@ -39,6 +64,27 @@ def test_character_series_creation_and_lookup() -> None:
     assert character.character_id == by_alias[0].character_id
     assert series_lookup is not None
     assert series_lookup.series_id == 10
+
+
+def test_character_database_records_survive_engine_restart() -> None:
+    first = _engine()
+    series = first.create_series(series_id=10, canonical_title="Persistent Series", aliases=["PS"])
+    first.create_character(character_id=1, series_id=series.series_id, canonical_name="Source")
+    first.create_character(
+        character_id=2,
+        series_id=series.series_id,
+        canonical_name="Persistent Character",
+        aliases=["Persist"],
+        relationships=[CharacterRelationship(2, 1, RelationshipType.PARENT)],
+    )
+
+    second = _engine()
+    restored = second.lookup_character("Persist")
+
+    assert restored is not None
+    assert restored.series_id == 10
+    assert restored.relationships == [CharacterRelationship(2, 1, RelationshipType.PARENT)]
+    assert second.lookup_series("PS") is not None
 
 
 def test_same_name_disambiguation_across_series() -> None:

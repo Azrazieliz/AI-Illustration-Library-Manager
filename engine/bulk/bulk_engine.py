@@ -1014,19 +1014,13 @@ class BulkEngine:
             return
 
         if record.operation_type in {BulkOperationType.REVIEW_APPROVE, BulkOperationType.REVIEW_REJECT}:
-            review_store = getattr(review_repo, "_queue_reviews", {})
-            review = review_store.get(record.entity_id)
-            if review is None:
-                return
             if isinstance(record.previous_value, dict):
                 status_text = record.previous_value.get("status", ReviewStatus.PENDING.value)
-                try:
-                    review.status = ReviewStatus(status_text)
-                except ValueError:
-                    review.status = ReviewStatus.PENDING
-                review.current_value = record.previous_value.get("current_value")
-                review.reviewer = None
-                review.decision_reason = None
+                review_repo.restore_review_item(
+                    record.entity_id,
+                    status=status_text,
+                    current_value=record.previous_value.get("current_value"),
+                )
             return
 
         raise BulkRollbackError(f"Unsupported rollback operation: {record.operation_type}")

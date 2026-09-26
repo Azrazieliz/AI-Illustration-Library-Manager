@@ -32,6 +32,12 @@ class Settings(BaseSettings):
 
     datasets_directory: Path = Field(default=Path("datasets"))
 
+    embedding_provider: str = "clip"
+
+    embedding_model_name: str = "openai/clip-vit-base-patch32"
+
+    embedding_device: str = "cpu"
+
     max_background_workers: int = 4
 
     auto_save_interval: int = 60

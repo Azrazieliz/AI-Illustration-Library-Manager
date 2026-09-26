@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 from uuid import uuid4
 
+from engine.embeddings import EmbeddingService
+from engine.database.models.embedding import Embedding
 from engine.library_maintenance.maintenance_builder import MaintenanceBuilder
 from engine.library_maintenance.maintenance_models import (
     MaintenanceCheckpoint,
@@ -20,6 +24,8 @@ from engine.library_maintenance.maintenance_models import (
     MaintenanceWarning,
 )
 from engine.library_maintenance.maintenance_statistics import MaintenanceStatistics
+from engine.pipeline import PipelineJob, QueueType
+from engine.repositories.embedding_repository import EmbeddingRepository
 from engine.repositories.maintenance_repository import MaintenanceRepository
 
 
@@ -31,16 +37,20 @@ class LibraryMaintenanceEngine:
         *,
         repository: MaintenanceRepository | None = None,
         builder: MaintenanceBuilder | None = None,
+        embedding_service: EmbeddingService | None = None,
         callback=None,
     ) -> None:
         self.repository = repository or MaintenanceRepository()
         self.builder = builder or MaintenanceBuilder()
+        self.embedding_service = embedding_service or EmbeddingService()
         self.callback = callback
         self.statistics = MaintenanceStatistics()
         self._jobs: dict[str, MaintenanceJob] = {}
+        self._job_tasks: dict[str, list[MaintenanceTaskType]] = {}
         self._checkpoints: dict[str, MaintenanceCheckpoint] = {}
         self._cancel_requested: set[str] = set()
         self._rollback_records: dict[str, list[MaintenanceRollbackRecord]] = {}
+        self._load_state()
 
     def run_full_maintenance(self, *, preview: bool = False, dry_run: bool = False, job_id: str | None = None, resumed: bool = False) -> MaintenanceReport:
         tasks = [item for item in MaintenanceTaskType]
@@ -60,24 +70,27 @@ class LibraryMaintenanceEngine:
         resumed: bool = False,
     ) -> MaintenanceReport:
         resolved_id = job_id or str(uuid4())
+        selected = list(tasks)
         checkpoint = self._checkpoints.get(resolved_id, MaintenanceCheckpoint())
         job = self._jobs.get(resolved_id)
         if job is None:
             job = MaintenanceJob(
                 job_id=resolved_id,
-                job_type="selected" if len(tasks) < len(MaintenanceTaskType) else "full",
+                job_type="selected" if len(selected) < len(MaintenanceTaskType) else "full",
                 status=MaintenanceJobStatus.PENDING,
             )
             self._jobs[resolved_id] = job
+        self._job_tasks.setdefault(resolved_id, list(selected))
         self._rollback_records.setdefault(resolved_id, [])
+        self._persist_state()
 
         started = perf_counter()
         results: list[MaintenanceResult] = []
-        selected = list(tasks)
         total = len(selected)
 
         job.status = MaintenanceJobStatus.RUNNING
         job.started_at = datetime.now(timezone.utc)
+        self._persist_state()
         cancelled = False
 
         completed = len([item for item in selected if checkpoint.contains(item)])
@@ -107,6 +120,8 @@ class LibraryMaintenanceEngine:
             job.completed_tasks.add(task)
             completed += 1
             job.progress = int((completed / max(1, total)) * 100)
+            self._checkpoints[resolved_id] = checkpoint
+            self._persist_state()
 
         job.finished_at = datetime.now(timezone.utc)
         if cancelled:
@@ -119,6 +134,7 @@ class LibraryMaintenanceEngine:
 
         job.affected_items = sum(item.repaired_items + item.skipped_items + item.failed_items for item in results)
         self._checkpoints[resolved_id] = checkpoint
+        self._persist_state()
 
         report = self.builder.build_report(
             job=job,
@@ -146,20 +162,23 @@ class LibraryMaintenanceEngine:
         self._cancel_requested.add(job_id)
         if job_id in self._jobs:
             self._jobs[job_id].status = MaintenanceJobStatus.CANCELLED
+            self._persist_state()
 
     def resume_job(self, job_id: str) -> MaintenanceReport:
         job = self._jobs.get(job_id)
         if job is None:
             raise ValueError(f"Maintenance job not found: {job_id}")
-        remaining = [task for task in MaintenanceTaskType if task not in self._checkpoints.get(job_id, MaintenanceCheckpoint()).completed_tasks]
+        planned_tasks = self._job_tasks.get(job_id, list(MaintenanceTaskType))
+        remaining = [task for task in planned_tasks if task not in self._checkpoints.get(job_id, MaintenanceCheckpoint()).completed_tasks]
         if not remaining:
             return self.run_selected_tasks([], job_id=job_id, resumed=True)
         return self.run_selected_tasks(remaining, job_id=job_id, resumed=True)
 
     def rollback_job(self, job_id: str) -> int:
-        records = list(reversed(self._rollback_records.get(job_id, [])))
+        records = self._rollback_records.get(job_id, [])
         restored = 0
-        for record in records:
+        while records:
+            record = records[-1]
             if record.task == MaintenanceTaskType.REMOVE_ORPHAN_METADATA:
                 payload = record.data
                 self.repository.metadata_repository.create_metadata_record(
@@ -170,12 +189,22 @@ class LibraryMaintenanceEngine:
                 restored += 1
             elif record.task == MaintenanceTaskType.REMOVE_ORPHAN_EMBEDDINGS:
                 payload = record.data
-                self.repository.embedding_repository.create_embedding_record(
+                self.repository.session.add(Embedding(
+                    id=payload["id"],
+                    uuid=payload["uuid"],
+                    created_at=payload["created_at"],
+                    updated_at=payload["updated_at"],
                     image_id=payload["image_id"],
                     vector_path=payload["vector_path"],
-                    model_name=payload.get("model_name", "restored"),
-                    model_version=payload.get("model_version", "1"),
-                )
+                    model_name=payload["model_name"],
+                    model_version=payload["model_version"],
+                    image_uuid=payload["image_uuid"],
+                    dimension=payload["dimension"],
+                    dtype=payload["dtype"],
+                    storage_path=payload["storage_path"],
+                    checksum=payload["checksum"],
+                    version=payload["version"],
+                ))
                 self.repository.session.commit()
                 restored += 1
             elif record.task == MaintenanceTaskType.REMOVE_ORPHAN_THUMBNAILS:
@@ -191,8 +220,161 @@ class LibraryMaintenanceEngine:
                     thumb_height=payload.get("thumb_height", 64),
                 )
                 restored += 1
-        self._rollback_records[job_id] = []
+            records.pop()
+            self._persist_state()
         return restored
+
+    def _append_rollback_record(self, job_id: str, record: MaintenanceRollbackRecord) -> None:
+        self._rollback_records.setdefault(job_id, []).append(record)
+        self._persist_state()
+
+    def _load_state(self) -> None:
+        load_state = getattr(self.repository, "load_maintenance_state", None)
+        if not callable(load_state):
+            return
+        payload = load_state()
+        if payload is None:
+            return
+        self._restore_state(payload)
+        interrupted = False
+        for job in self._jobs.values():
+            if job.status is MaintenanceJobStatus.RUNNING:
+                job.status = MaintenanceJobStatus.PAUSED
+                interrupted = True
+        if interrupted:
+            self._persist_state()
+
+    def _persist_state(self) -> None:
+        save_state = getattr(self.repository, "save_maintenance_state", None)
+        if callable(save_state):
+            save_state(self._state_payload())
+
+    def _state_payload(self) -> dict[str, Any]:
+        return {
+            "jobs": {
+                job_id: {
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "status": job.status.value,
+                    "started_at": self._datetime_value(job.started_at),
+                    "finished_at": self._datetime_value(job.finished_at),
+                    "progress": job.progress,
+                    "affected_items": job.affected_items,
+                    "errors": list(job.errors),
+                    "completed_tasks": [task.value for task in sorted(job.completed_tasks, key=lambda item: item.value)],
+                }
+                for job_id, job in sorted(self._jobs.items())
+            },
+            "job_tasks": {
+                job_id: [task.value for task in tasks]
+                for job_id, tasks in sorted(self._job_tasks.items())
+            },
+            "checkpoints": {
+                job_id: [task.value for task in sorted(checkpoint.completed_tasks, key=lambda item: item.value)]
+                for job_id, checkpoint in sorted(self._checkpoints.items())
+            },
+            "rollback_records": {
+                job_id: [
+                    {"task": record.task.value, "data": self._json_value(record.data)}
+                    for record in records
+                ]
+                for job_id, records in sorted(self._rollback_records.items())
+            },
+        }
+
+    def _restore_state(self, payload: dict[str, Any]) -> None:
+        jobs = payload.get("jobs", {})
+        job_tasks = payload.get("job_tasks", {})
+        checkpoints = payload.get("checkpoints", {})
+        rollback_records = payload.get("rollback_records", {})
+        if not all(isinstance(value, dict) for value in (jobs, job_tasks, checkpoints, rollback_records)):
+            raise RuntimeError("Persisted maintenance state is invalid")
+
+        self._jobs = {
+            str(job_id): self._job_from_payload(item)
+            for job_id, item in jobs.items()
+            if isinstance(item, dict)
+        }
+        self._job_tasks = {
+            str(job_id): self._task_list_from_payload(tasks)
+            for job_id, tasks in job_tasks.items()
+        }
+        self._checkpoints = {
+            str(job_id): MaintenanceCheckpoint(completed_tasks=set(self._task_list_from_payload(tasks)))
+            for job_id, tasks in checkpoints.items()
+        }
+        self._rollback_records = {
+            str(job_id): [
+                self._rollback_record_from_payload(record)
+                for record in records
+                if isinstance(record, dict)
+            ]
+            for job_id, records in rollback_records.items()
+            if isinstance(records, list)
+        }
+        for job_id in self._jobs:
+            self._job_tasks.setdefault(job_id, list(MaintenanceTaskType))
+            self._checkpoints.setdefault(job_id, MaintenanceCheckpoint())
+            self._rollback_records.setdefault(job_id, [])
+
+    @classmethod
+    def _job_from_payload(cls, payload: dict[str, Any]) -> MaintenanceJob:
+        return MaintenanceJob(
+            job_id=str(payload.get("job_id", "")),
+            job_type=str(payload.get("job_type", "selected")),
+            status=MaintenanceJobStatus(str(payload.get("status", MaintenanceJobStatus.PENDING.value))),
+            started_at=cls._as_utc(payload.get("started_at")),
+            finished_at=cls._as_utc(payload.get("finished_at")),
+            progress=int(payload.get("progress", 0)),
+            affected_items=int(payload.get("affected_items", 0)),
+            errors=[str(item) for item in payload.get("errors", [])],
+            completed_tasks=set(cls._task_list_from_payload(payload.get("completed_tasks", []))),
+        )
+
+    @classmethod
+    def _rollback_record_from_payload(cls, payload: dict[str, Any]) -> MaintenanceRollbackRecord:
+        data = dict(payload.get("data", {}))
+        for field_name in ("created_at", "updated_at"):
+            if field_name in data:
+                data[field_name] = cls._as_utc(data[field_name])
+        return MaintenanceRollbackRecord(
+            task=MaintenanceTaskType(str(payload.get("task", ""))),
+            data=data,
+        )
+
+    @staticmethod
+    def _task_list_from_payload(payload: Any) -> list[MaintenanceTaskType]:
+        if not isinstance(payload, list):
+            raise RuntimeError("Persisted maintenance task list is invalid")
+        return [MaintenanceTaskType(str(item)) for item in payload]
+
+    @classmethod
+    def _json_value(cls, value: Any) -> Any:
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        if isinstance(value, datetime):
+            return cls._datetime_value(value)
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, dict):
+            return {str(key): cls._json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_value(item) for item in value]
+        raise ValueError(f"Maintenance state values must be JSON-compatible, got {type(value).__name__}")
+
+    @staticmethod
+    def _datetime_value(value: datetime | None) -> str | None:
+        return None if value is None else value.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _as_utc(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            raise RuntimeError("Persisted maintenance timestamp is invalid") from None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
     def _execute_task(self, task: MaintenanceTaskType, *, preview: bool, dry_run: bool, job_id: str) -> MaintenanceResult:
         if preview:
@@ -277,25 +459,41 @@ class LibraryMaintenanceEngine:
         embeddings = {row.image_id: row for row in self.repository.scan_embeddings()}
         repaired = 0
         skipped = 0
+        failed = 0
+        warnings: list[MaintenanceWarning] = []
         for image in images:
             path = Path(image.current_path or image.original_path)
             if not path.exists():
                 skipped += 1
                 continue
             row = embeddings.get(image.id)
-            missing = row is None or not Path(row.vector_path).exists()
+            missing = row is None or not self._has_valid_embedding_artifact(row.vector_path)
             if not missing:
                 skipped += 1
                 continue
-            vector_path = path.with_suffix(".npy")
             if not dry_run:
-                vector_path.write_bytes(b"vec")
-                self.repository.repair_embeddings(image.id, str(vector_path))
-                image.embedding_exists = True
+                try:
+                    result = self.embedding_service.process_embedding_job(
+                        PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
+                    )
+                except Exception as error:
+                    failed += 1
+                    warnings.append(MaintenanceWarning(MaintenanceTaskType.RECOMPUTE_EMBEDDINGS, f"Embedding regeneration failed for {path}: {error}"))
+                    continue
+                if result is None:
+                    failed += 1
+                    warnings.append(MaintenanceWarning(MaintenanceTaskType.RECOMPUTE_EMBEDDINGS, f"Embedding regeneration produced no artifact for {path}"))
+                    continue
             repaired += 1
         if not dry_run:
             self.repository.session.commit()
-        return MaintenanceResult(task=MaintenanceTaskType.RECOMPUTE_EMBEDDINGS, repaired_items=repaired, skipped_items=skipped)
+        return MaintenanceResult(
+            task=MaintenanceTaskType.RECOMPUTE_EMBEDDINGS,
+            repaired_items=repaired,
+            skipped_items=skipped,
+            failed_items=failed,
+            warnings=warnings,
+        )
 
     def _task_rebuild_search_index(self, *, dry_run: bool, job_id: str) -> MaintenanceResult:
         images = self.repository.scan_images()
@@ -311,9 +509,19 @@ class LibraryMaintenanceEngine:
                 skipped += 1
                 continue
             if not dry_run:
-                vector_path = Path(image.current_path or image.original_path).with_suffix(".npy")
-                vector_path.write_bytes(b"search")
-                self.repository.repair_embeddings(image.id, str(vector_path))
+                try:
+                    result = self.embedding_service.process_embedding_job(
+                        PipelineJob(
+                            source_path=str(image.current_path or image.original_path),
+                            queue_type=QueueType.EMBEDDING,
+                        )
+                    )
+                except Exception:
+                    skipped += 1
+                    continue
+                if result is None:
+                    skipped += 1
+                    continue
             repaired += 1
         return MaintenanceResult(task=MaintenanceTaskType.REBUILD_SEARCH_INDEX, repaired_items=repaired, skipped_items=skipped)
 
@@ -332,11 +540,19 @@ class LibraryMaintenanceEngine:
                 skipped += 1
                 continue
             if not dry_run:
-                source = image.current_path or image.original_path
-                digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+                source = Path(image.current_path or image.original_path)
+                digest = hashlib.sha256(source.read_bytes()).hexdigest()
                 self.repository.repair_hashes(image.id, digest)
             repaired += 1
         return MaintenanceResult(task=MaintenanceTaskType.RECOMPUTE_HASHES, repaired_items=repaired, skipped_items=skipped)
+
+    @staticmethod
+    def _has_valid_embedding_artifact(vector_path: str) -> bool:
+        try:
+            dimension, _, _ = EmbeddingRepository._read_artifact_metadata(vector_path)
+        except ValueError:
+            return False
+        return dimension is not None
 
     def _task_remove_orphan_metadata(self, *, dry_run: bool, job_id: str) -> MaintenanceResult:
         image_ids = {img.id for img in self.repository.scan_images()}
@@ -345,11 +561,12 @@ class LibraryMaintenanceEngine:
             if row.image_id in image_ids:
                 continue
             if not dry_run:
-                self._rollback_records[job_id].append(
+                self._append_rollback_record(
+                    job_id,
                     MaintenanceRollbackRecord(
                         task=MaintenanceTaskType.REMOVE_ORPHAN_METADATA,
                         data={"image_id": row.image_id, "mime_type": row.mime_type, "exif_data": row.exif_data},
-                    )
+                    ),
                 )
                 self.repository.metadata_repository.delete_metadata_record(row)
             repaired += 1
@@ -362,16 +579,27 @@ class LibraryMaintenanceEngine:
             if row.image_id in image_ids:
                 continue
             if not dry_run:
-                self._rollback_records[job_id].append(
+                self._append_rollback_record(
+                    job_id,
                     MaintenanceRollbackRecord(
                         task=MaintenanceTaskType.REMOVE_ORPHAN_EMBEDDINGS,
                         data={
+                            "id": row.id,
+                            "uuid": row.uuid,
+                            "created_at": row.created_at,
+                            "updated_at": row.updated_at,
                             "image_id": row.image_id,
                             "vector_path": row.vector_path,
                             "model_name": row.model_name,
                             "model_version": row.model_version,
+                            "image_uuid": row.image_uuid,
+                            "dimension": row.dimension,
+                            "dtype": row.dtype,
+                            "storage_path": row.storage_path,
+                            "checksum": row.checksum,
+                            "version": row.version,
                         },
-                    )
+                    ),
                 )
                 self.repository.embedding_repository.delete_embedding_record(row)
                 self.repository.session.commit()
@@ -385,7 +613,8 @@ class LibraryMaintenanceEngine:
             if row.image_id in image_ids:
                 continue
             if not dry_run:
-                self._rollback_records[job_id].append(
+                self._append_rollback_record(
+                    job_id,
                     MaintenanceRollbackRecord(
                         task=MaintenanceTaskType.REMOVE_ORPHAN_THUMBNAILS,
                         data={
@@ -398,7 +627,7 @@ class LibraryMaintenanceEngine:
                             "thumb_width": row.thumb_width,
                             "thumb_height": row.thumb_height,
                         },
-                    )
+                    ),
                 )
                 self.repository.thumbnail_repository.delete_thumbnail_record(row)
             repaired += 1
@@ -452,7 +681,7 @@ class LibraryMaintenanceEngine:
         for row in rows:
             if row.parent_id is not None and row.parent_id not in by_id:
                 if not dry_run:
-                    row.parent_id = None
+                    self.repository.collection_repository.clear_parent(row.collection_id)
                 repaired += 1
 
             visited: set[int] = set()
@@ -469,7 +698,7 @@ class LibraryMaintenanceEngine:
                 current = nxt
             if cycle_found:
                 if not dry_run:
-                    row.parent_id = None
+                    self.repository.collection_repository.clear_parent(row.collection_id)
                 repaired += 1
         return MaintenanceResult(task=MaintenanceTaskType.REPAIR_COLLECTION_HIERARCHY, repaired_items=repaired)
 
@@ -485,9 +714,7 @@ class LibraryMaintenanceEngine:
             repaired += 1
         stale_queue = [item for item in self.repository.review_repository.list_review_items() if item.image_id not in image_ids]
         if not dry_run:
-            with self.repository.review_repository._lock:
-                for item in stale_queue:
-                    self.repository.review_repository._queue_reviews.pop(item.review_id, None)
+            self.repository.review_repository.delete_review_items([item.review_id for item in stale_queue])
         repaired += len(stale_queue)
         return MaintenanceResult(task=MaintenanceTaskType.REPAIR_REVIEW_REFERENCES, repaired_items=repaired)
 
@@ -556,11 +783,11 @@ class LibraryMaintenanceEngine:
     def _task_rebuild_dataset_indexes(self, *, dry_run: bool, job_id: str) -> MaintenanceResult:
         repaired = 0
         skipped = 0
-        image_ids = {img.id for img in self.repository.scan_images()}
-        for image_id in sorted(list(self.repository.dataset_repository._dataset_provenance.keys())):
-            if image_id not in image_ids:
+        image_uuids = {img.uuid for img in self.repository.scan_images()}
+        for record in self.repository.scan_dataset():
+            if record.image_uuid not in image_uuids:
                 if not dry_run:
-                    self.repository.dataset_repository._dataset_provenance.pop(image_id, None)
+                    self.repository.dataset_repository.delete_dataset_record(record.uuid)
                 repaired += 1
             else:
                 skipped += 1
@@ -579,13 +806,13 @@ class LibraryMaintenanceEngine:
             invalid = fmt not in valid_formats or image_id not in image_ids or not isinstance(manifest, dict)
             if invalid:
                 if not dry_run:
-                    self.repository.export_repository._manifest_store.pop(key, None)
+                    self.repository.export_repository.clear_export_manifest(format_type=fmt, image_id=image_id)
                 repaired += 1
                 continue
             path_text = manifest.get("file_path") if isinstance(manifest, dict) else None
             if path_text and not Path(path_text).exists():
                 if not dry_run:
-                    self.repository.export_repository._manifest_store.pop(key, None)
+                    self.repository.export_repository.clear_export_manifest(format_type=fmt, image_id=image_id)
                 repaired += 1
             else:
                 skipped += 1

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 @dataclass(slots=True)
@@ -19,6 +20,18 @@ class DatasetEntry:
     provenance: list[str]
     built_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    dataset_uuid: str = field(default_factory=lambda: str(uuid4()))
+    image_uuid: str | None = None
+    caption: str | None = None
+    tag_ids: list[str] = field(default_factory=list)
+    negative_tags: list[str] = field(default_factory=list)
+    character_ids: list[str] = field(default_factory=list)
+    series_ids: list[str] = field(default_factory=list)
+    artist_ids: list[str] = field(default_factory=list)
+    embedding_uuid: str | None = None
+    content_hash: str | None = None
+    dataset_split: str | None = None
+    format: str | None = None
 
 
 @dataclass(slots=True)

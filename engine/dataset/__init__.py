@@ -1,4 +1,4 @@
-from engine.dataset.dataset_backend import DatasetBackend, InMemoryDatasetBackend
+from engine.dataset.dataset_backend import DatasetBackend, InMemoryDatasetBackend, PersistentDatasetBackend
 from engine.dataset.dataset_builder import DatasetBuilder
 from engine.dataset.dataset_engine import DatasetEngine
 from engine.dataset.dataset_events import (
@@ -39,4 +39,5 @@ __all__ = [
     "DatasetStatistics",
     "DatasetWorker",
     "InMemoryDatasetBackend",
+    "PersistentDatasetBackend",
 ]

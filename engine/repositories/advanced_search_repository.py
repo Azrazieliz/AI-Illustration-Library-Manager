@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import delete, select
+
+from engine.database.models.advanced_search import AdvancedSavedSearchRecord, AdvancedSearchHistoryRecord
 from engine.database.models.image import Image
+from engine.database.session import session_scope
 from engine.repositories.duplicate_repository import DuplicateRepository
 from engine.repositories.embedding_repository import EmbeddingRepository
 from engine.repositories.image_repository import ImageRepository
@@ -52,33 +56,58 @@ class AdvancedSearchRepository:
         self.review_repository = review_repository or ReviewRepository()
         self.builder = builder or AdvancedSearchBuilder()
 
-        self._saved_searches: dict[str, AdvancedSavedSearch] = {}
-        self._search_history: list[AdvancedSearchHistoryEntry] = []
         self._query_cache: dict[str, AdvancedSearchResponse] = {}
 
     # ------------------------------------------------------------------
     # Saved search and history
     # ------------------------------------------------------------------
+    @classmethod
+    def reset_state(cls) -> None:
+        with session_scope() as session:
+            session.execute(delete(AdvancedSearchHistoryRecord))
+            session.execute(delete(AdvancedSavedSearchRecord))
+
     def save_search(self, *, name: str, query: AdvancedSearchQuery) -> AdvancedSavedSearch:
         search_id = str(uuid4())
-        saved = AdvancedSavedSearch(search_id=search_id, name=name, query=replace(query))
-        self._saved_searches[search_id] = saved
-        return saved
+        with session_scope() as session:
+            row = AdvancedSavedSearchRecord(
+                search_id=search_id,
+                name=name,
+                query_payload=self.builder.query_to_payload(query),
+            )
+            session.add(row)
+            session.flush()
+            return self._to_saved_search(row)
 
     def list_saved_searches(self) -> list[AdvancedSavedSearch]:
-        return [self._saved_searches[key] for key in sorted(self._saved_searches.keys())]
+        with session_scope() as session:
+            rows = list(session.scalars(select(AdvancedSavedSearchRecord).order_by(AdvancedSavedSearchRecord.search_id)))
+            return [self._to_saved_search(row) for row in rows]
 
     def get_saved_search(self, search_id: str) -> AdvancedSavedSearch | None:
-        return self._saved_searches.get(search_id)
+        with session_scope() as session:
+            row = session.scalar(select(AdvancedSavedSearchRecord).where(AdvancedSavedSearchRecord.search_id == search_id))
+            return None if row is None else self._to_saved_search(row)
 
     def delete_saved_search(self, search_id: str) -> bool:
-        if search_id not in self._saved_searches:
-            return False
-        del self._saved_searches[search_id]
-        return True
+        with session_scope() as session:
+            row = session.scalar(select(AdvancedSavedSearchRecord).where(AdvancedSavedSearchRecord.search_id == search_id))
+            if row is None:
+                return False
+            session.delete(row)
+            return True
 
     def search_history(self) -> list[AdvancedSearchHistoryEntry]:
-        return list(self._search_history)
+        with session_scope() as session:
+            rows = list(
+                session.scalars(
+                    select(AdvancedSearchHistoryRecord).order_by(
+                        AdvancedSearchHistoryRecord.executed_at,
+                        AdvancedSearchHistoryRecord.id,
+                    )
+                )
+            )
+            return [self._to_history_entry(row) for row in rows]
 
     def invalidate_cache(self) -> None:
         self._query_cache = {}
@@ -169,13 +198,32 @@ class AdvancedSearchRepository:
             query_id=query.query_id,
         )
 
-        self._search_history.append(AdvancedSearchHistoryEntry(query=replace(query), total=total))
-        self._search_history = self._search_history[-200:]
+        self._append_search_history(query, total)
 
         if query.use_cache:
             self._query_cache[cache_key] = response
 
         return response, False, scanned
+
+    def _append_search_history(self, query: AdvancedSearchQuery, total: int) -> None:
+        with session_scope() as session:
+            session.add(
+                AdvancedSearchHistoryRecord(
+                    query_payload=self.builder.query_to_payload(query),
+                    total=total,
+                    executed_at=datetime.now(timezone.utc),
+                )
+            )
+            session.flush()
+            stale_ids = list(
+                session.scalars(
+                    select(AdvancedSearchHistoryRecord.id)
+                    .order_by(AdvancedSearchHistoryRecord.executed_at.desc(), AdvancedSearchHistoryRecord.id.desc())
+                    .offset(200)
+                )
+            )
+            if stale_ids:
+                session.execute(delete(AdvancedSearchHistoryRecord).where(AdvancedSearchHistoryRecord.id.in_(stale_ids)))
 
     def batch_search(
         self,
@@ -263,6 +311,25 @@ class AdvancedSearchRepository:
 
         documents.sort(key=lambda item: item.image_id)
         return documents
+
+    def _to_saved_search(self, row: AdvancedSavedSearchRecord) -> AdvancedSavedSearch:
+        return AdvancedSavedSearch(
+            search_id=row.search_id,
+            name=row.name,
+            query=self.builder.query_from_payload(dict(row.query_payload or {})),
+            created_at=self._as_utc(row.created_at),
+        )
+
+    def _to_history_entry(self, row: AdvancedSearchHistoryRecord) -> AdvancedSearchHistoryEntry:
+        return AdvancedSearchHistoryEntry(
+            query=self.builder.query_from_payload(dict(row.query_payload or {})),
+            total=row.total,
+            executed_at=self._as_utc(row.executed_at),
+        )
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
     def _passes_filters(self, document: AdvancedSearchDocument, query: AdvancedSearchQuery) -> bool:
         filters = query.filters

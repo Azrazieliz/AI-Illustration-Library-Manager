@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from engine.dataset.dataset_backend import DatasetBackend, InMemoryDatasetBackend
+from engine.dataset.dataset_backend import DatasetBackend, PersistentDatasetBackend
 from engine.dataset.dataset_builder import DatasetBuilder
 from engine.dataset.dataset_events import (
     DatasetBuilt,
@@ -32,7 +32,7 @@ class DatasetEngine:
         max_workers: int = 4,
     ) -> None:
         self.repository = repository or DatasetRepository()
-        self.backend = backend or InMemoryDatasetBackend()
+        self.backend = backend or PersistentDatasetBackend()
         self.callback = callback
         self.max_workers = max_workers
         self.logger = get_logger(self.__class__.__name__)
@@ -130,7 +130,6 @@ class DatasetEngine:
                 entry.updated_at = entry.built_at
 
             _ = self.backend.upsert(entry)
-            repository.save_dataset_provenance(entry.image_id, entry.provenance)
 
             if checkpoint is not None:
                 checkpoint.add_processed(path)

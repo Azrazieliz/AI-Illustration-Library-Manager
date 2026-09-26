@@ -18,6 +18,8 @@ from engine.indexer import IndexerService, IncrementalIndexer
 from engine.knowledge_base import KnowledgeBaseService
 from engine.library import LibraryService
 from engine.knowledge_graph import KnowledgeGraphService
+from engine.library_integrity import LibraryIntegrityService
+from engine.library_maintenance import LibraryMaintenanceService, MaintenanceTaskType
 from engine.logging import get_logger
 from engine.metadata import MetadataService
 from engine.pipeline import PipelineJob, QueueManager, QueueType
@@ -36,6 +38,7 @@ from engine.search_advanced import AdvancedSearchService
 from engine.tagging import TaggingService
 from engine.thumbnails import ThumbnailService
 from engine.dataset import DatasetService
+from engine.filesystem import TransactionEngine
 
 
 QueueHandler = Callable[[PipelineJob], Any]
@@ -75,6 +78,8 @@ class RuntimeQueueWorker:
                     sleep(0.05)
                     continue
                 try:
+                    job.worker = self.name
+                    self.queue_manager.mark_started(self.queue_type, job)
                     self.handler(job)
                 except Exception as exc:  # pragma: no cover - defensive runtime boundary
                     self.queue_manager.mark_failed(self.queue_type, job, str(exc))
@@ -149,6 +154,9 @@ class RuntimeServices:
     automation: AutomationService
     plugins: PluginService
     knowledge_base: KnowledgeBaseService
+    integrity: LibraryIntegrityService
+    maintenance: LibraryMaintenanceService
+    transactions: TransactionEngine
 
 
 class ApplicationHost:
@@ -158,7 +166,7 @@ class ApplicationHost:
         self.configuration = settings
         self.database: DatabaseManager = get_database_manager()
         self.unit_of_work = UnitOfWork()
-        self.queue_manager = QueueManager()
+        self.queue_manager = QueueManager(recover_unfinished=True)
         self.repositories = RuntimeRepositories(
             image=ImageRepository(),
             hash=HashRepository(),
@@ -246,6 +254,11 @@ class ApplicationHost:
                 metadata_repository=self.repositories.metadata,
             ),
         )
+        recognition = RecognitionService(queue_manager=self.queue_manager)
+        embedding = EmbeddingService(
+            queue_manager=self.queue_manager,
+            publish_recognition=recognition.provider is not None,
+        )
         return RuntimeServices(
             scanner=scanner,
             indexer=indexer,
@@ -253,8 +266,8 @@ class ApplicationHost:
             duplicate=duplicate,
             thumbnail=thumbnail,
             metadata=metadata,
-            embedding=EmbeddingService(queue_manager=self.queue_manager),
-            recognition=RecognitionService(queue_manager=self.queue_manager),
+            embedding=embedding,
+            recognition=recognition,
             review=ReviewService(queue_manager=self.queue_manager),
             search=SearchService(queue_manager=self.queue_manager),
             advanced_search=AdvancedSearchService(queue_manager=self.queue_manager),
@@ -267,10 +280,13 @@ class ApplicationHost:
             automation=AutomationService(queue_manager=self.queue_manager),
             plugins=PluginService(queue_manager=self.queue_manager),
             knowledge_base=KnowledgeBaseService(queue_manager=self.queue_manager),
+            integrity=LibraryIntegrityService(),
+            maintenance=LibraryMaintenanceService(),
+            transactions=TransactionEngine(),
         )
 
     def _build_workers(self) -> dict[QueueType, RuntimeQueueWorker]:
-        return {
+        workers = {
             QueueType.DISCOVERY: RuntimeQueueWorker(self.queue_manager, QueueType.DISCOVERY, self.services.indexer.process_discovery_job),
             QueueType.INDEX: RuntimeQueueWorker(self.queue_manager, QueueType.INDEX, self.services.indexer.process_discovery_job),
             QueueType.HASH: RuntimeQueueWorker(self.queue_manager, QueueType.HASH, self.services.hash.process_hash_job),
@@ -278,11 +294,17 @@ class ApplicationHost:
             QueueType.THUMBNAIL: RuntimeQueueWorker(self.queue_manager, QueueType.THUMBNAIL, self.services.thumbnail.process_review_job),
             QueueType.METADATA: RuntimeQueueWorker(self.queue_manager, QueueType.METADATA, self.services.metadata.process_metadata_job),
             QueueType.EMBEDDING: RuntimeQueueWorker(self.queue_manager, QueueType.EMBEDDING, self.services.embedding.process_embedding_job),
-            QueueType.RECOGNITION: RuntimeQueueWorker(self.queue_manager, QueueType.RECOGNITION, self.services.recognition.process_recognition_job),
             QueueType.REVIEW: RuntimeQueueWorker(self.queue_manager, QueueType.REVIEW, self.services.review.process_review_job),
             QueueType.SEARCH: RuntimeQueueWorker(self.queue_manager, QueueType.SEARCH, self._route_search_job),
             QueueType.TRANSACTION: RuntimeQueueWorker(self.queue_manager, QueueType.TRANSACTION, self._route_transaction_job),
         }
+        if self.services.recognition.provider is not None:
+            workers[QueueType.RECOGNITION] = RuntimeQueueWorker(
+                self.queue_manager,
+                QueueType.RECOGNITION,
+                self.services.recognition.process_recognition_job,
+            )
+        return workers
 
     def _route_search_job(self, job: PipelineJob) -> Any:
         stage = str((job.metadata or {}).get("stage", "search"))
@@ -303,6 +325,40 @@ class ApplicationHost:
             raise ValueError(f"No SEARCH consumer registered for stage '{stage}'")
         return handler(job)
 
-    @staticmethod
-    def _route_transaction_job(job: PipelineJob) -> None:
-        raise ValueError("No transaction pipeline operation is registered for this job")
+    def _route_transaction_job(self, job: PipelineJob) -> Any:
+        metadata = job.metadata or {}
+        kind = str(metadata.get("kind", "")).strip().lower()
+        action = str(metadata.get("automation_action", "")).strip().lower()
+
+        if kind == "integrity_verification" or action == "verify_integrity":
+            return self.services.integrity.run_full_scan(scan_id=str(job.id))
+
+        if kind == "maintenance":
+            raw_tasks = metadata.get("tasks")
+            if not isinstance(raw_tasks, list) or not raw_tasks:
+                raise ValueError("Maintenance transaction jobs require a non-empty metadata.tasks list of MaintenanceTaskType values")
+            try:
+                tasks = [MaintenanceTaskType(str(item)) for item in raw_tasks]
+            except ValueError as exc:
+                raise ValueError(f"Maintenance transaction job declares an unknown task: {exc}") from exc
+            return self.services.maintenance.run_selected_tasks(
+                tasks,
+                preview=bool(metadata.get("preview", False)),
+                dry_run=bool(metadata.get("dry_run", False)),
+                job_id=str(job.id),
+            )
+
+        operation = str(metadata.get("operation", metadata.get("transaction_operation", ""))).strip().lower()
+        if operation in {"undo", "rollback"}:
+            return self.services.transactions.rollback()
+        if operation in {"move", "rename", "copy", "restore"}:
+            source = job.source_path or metadata.get("source_path")
+            destination = metadata.get("destination_path")
+            if not source or not destination:
+                raise ValueError(f"Transaction operation '{operation}' requires source_path and destination_path")
+            return getattr(self.services.transactions, operation)(source, destination)
+
+        raise ValueError(
+            "Transaction jobs must declare metadata.kind=integrity_verification, metadata.kind=maintenance with tasks, "
+            "or a filesystem metadata.operation",
+        )

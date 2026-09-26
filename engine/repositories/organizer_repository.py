@@ -2,23 +2,28 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from engine.database.models.image import Image
+from engine.database.models.organizer_batch_state import OrganizerBatchStateRecord
+from engine.organizer.organizer_models import RollbackBatch, RollbackRecord
 from engine.repositories.base_repository import BaseRepository
-from engine.repositories.dataset_repository import DatasetRepository
 
 
 class OrganizerRepository(BaseRepository[Image]):
     """Repository for organizer metadata resolution and moved-path persistence."""
 
-    _dataset_repo = DatasetRepository()
+    _last_batch_state_key = "last_applied"
 
     def __init__(self, session: Session | None = None) -> None:
         super().__init__(Image, session=session)
+        from engine.repositories.dataset_repository import DatasetRepository
+
+        self._dataset_repo = DatasetRepository()
 
     def get_image_by_path(self, path: str | Path) -> Image | None:
         value = str(path)
@@ -68,6 +73,93 @@ class OrganizerRepository(BaseRepository[Image]):
         image.extension = new_path.suffix
         if commit:
             self.commit()
+
+    def save_last_rollback_batch(self, batch: RollbackBatch) -> None:
+        record = (
+            self.session.query(OrganizerBatchStateRecord)
+            .filter(OrganizerBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        payload = self._batch_to_payload(batch)
+        if record is None:
+            self.add(
+                OrganizerBatchStateRecord(
+                    state_key=self._last_batch_state_key,
+                    batch_payload=payload,
+                )
+            )
+        else:
+            record.batch_payload = payload
+        self.commit()
+
+    def get_last_rollback_batch(self) -> RollbackBatch | None:
+        record = (
+            self.session.query(OrganizerBatchStateRecord)
+            .filter(OrganizerBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        if record is None:
+            return None
+        return self._batch_from_payload(dict(record.batch_payload or {}))
+
+    def clear_last_rollback_batch(self) -> None:
+        record = (
+            self.session.query(OrganizerBatchStateRecord)
+            .filter(OrganizerBatchStateRecord.state_key == self._last_batch_state_key)
+            .one_or_none()
+        )
+        if record is None:
+            return
+        self.delete(record)
+        self.commit()
+
+    @staticmethod
+    def _batch_to_payload(batch: RollbackBatch) -> dict[str, object]:
+        return {
+            "batch_id": batch.batch_id,
+            "created_at": batch.created_at.astimezone(timezone.utc).isoformat(),
+            "records": [
+                {
+                    "image_id": record.image_id,
+                    "source_path": str(record.source_path),
+                    "destination_path": str(record.destination_path),
+                }
+                for record in batch.records
+            ],
+        }
+
+    @staticmethod
+    def _batch_from_payload(payload: dict[str, object]) -> RollbackBatch:
+        batch_id = str(payload.get("batch_id", ""))
+        records_payload = payload.get("records")
+        if not batch_id or not isinstance(records_payload, list):
+            raise RuntimeError("Persisted organizer batch state is invalid")
+
+        records: list[RollbackRecord] = []
+        for item in records_payload:
+            if not isinstance(item, dict):
+                raise RuntimeError("Persisted organizer batch record is invalid")
+            records.append(
+                RollbackRecord(
+                    image_id=int(item["image_id"]),
+                    source_path=Path(str(item["source_path"])),
+                    destination_path=Path(str(item["destination_path"])),
+                )
+            )
+
+        return RollbackBatch(
+            batch_id=batch_id,
+            records=records,
+            created_at=OrganizerRepository._as_utc(payload.get("created_at")),
+        )
+
+    @staticmethod
+    def _as_utc(value: object) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            raise RuntimeError("Persisted organizer batch timestamp is invalid") from None
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _parse_exif(exif_data: str | None) -> dict[str, object]:

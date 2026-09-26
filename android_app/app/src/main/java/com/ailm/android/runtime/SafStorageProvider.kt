@@ -23,7 +23,7 @@ class SafStorageProvider(
     private val resolver: ContentResolver = appContext.contentResolver
 
     override fun walkTree(rootUri: String): Sequence<StorageNode> = sequence {
-        val root = DocumentFile.fromTreeUri(appContext, Uri.parse(rootUri)) ?: return@sequence
+        val root = resolveDocument(rootUri, mutableMapOf()) ?: return@sequence
         val stack = ArrayDeque<Pair<DocumentFile, String?>>()
         stack.add(root to null)
 
@@ -87,7 +87,7 @@ class SafStorageProvider(
         return document?.exists() == true
     }
 
-    override fun rename(uri: String, newName: String): StorageWriteResult {
+    override fun rename(uri: String, newName: String, parentUri: String): StorageWriteResult {
         val totalStart = SystemClock.elapsedRealtime()
         val cleaned = newName.trim()
         if (cleaned.isBlank()) {
@@ -96,22 +96,24 @@ class SafStorageProvider(
         val cache = mutableMapOf<String, DocumentFile?>()
         val stage1Start = SystemClock.elapsedRealtime()
         val document = resolveDocument(uri, cache) ?: return StorageWriteResult(ok = false, message = "source not found")
+        val parent = parentUri.trim().takeIf { it.isNotBlank() }?.let { resolveDocument(it, cache) } ?: document.parentFile
         val stage1Ms = SystemClock.elapsedRealtime() - stage1Start
 
         val stage4Start = SystemClock.elapsedRealtime()
         val ok = document.renameTo(cleaned)
         val stage4Ms = SystemClock.elapsedRealtime() - stage4Start
         if (ok) {
+            val renamedUri = resolveRenamedUri(parent, cleaned)
+                ?: return StorageWriteResult(ok = false, message = "renamed document URI could not be resolved")
             val totalMs = SystemClock.elapsedRealtime() - totalStart
             Log.d(TIMING_TAG, "rename stage1_resolve_source_ms=$stage1Ms")
             Log.d(TIMING_TAG, "rename stage2_resolve_destination_ms=0")
             Log.d(TIMING_TAG, "rename stage3_conflict_detection_ms=0")
             Log.d(TIMING_TAG, "rename stage4_saf_call_ms=$stage4Ms")
             Log.d(TIMING_TAG, "rename stage1to4_total_ms=$totalMs")
-            return StorageWriteResult(ok = true, uri = document.uri.toString(), changed = true)
+            return StorageWriteResult(ok = true, uri = renamedUri, changed = true)
         }
         val stage3Start = SystemClock.elapsedRealtime()
-        val parent = document.parentFile
         if (parent != null) {
             val sibling = parent.findFile(cleaned)
             val stage3Ms = SystemClock.elapsedRealtime() - stage3Start
@@ -133,6 +135,13 @@ class SafStorageProvider(
             Log.d(TIMING_TAG, "rename stage1to4_total_ms=$totalMs")
         }
         return StorageWriteResult(ok = false, message = "rename failed")
+    }
+
+    private fun resolveRenamedUri(parent: DocumentFile?, expectedName: String): String? {
+        return parent?.findFile(expectedName)?.uri?.toString()
+            ?: parent?.listFiles()?.firstOrNull { child ->
+                child.name.equals(expectedName, ignoreCase = true)
+            }?.uri?.toString()
     }
 
     override fun createFolder(parentUri: String, folderName: String): StorageWriteResult {
@@ -204,13 +213,15 @@ class SafStorageProvider(
             val renamed = source.renameTo(requestedName)
             val stage4Ms = SystemClock.elapsedRealtime() - stage4Start
             if (renamed) {
+                val renamedUri = resolveRenamedUri(targetFolder, requestedName)
+                    ?: return StorageWriteResult(ok = false, message = "renamed document URI could not be resolved")
                 val totalMs = SystemClock.elapsedRealtime() - totalStart
                 Log.d(TIMING_TAG, "move stage1_resolve_source_ms=$stage1Ms")
                 Log.d(TIMING_TAG, "move stage2_resolve_destination_ms=$stage2Ms")
                 Log.d(TIMING_TAG, "move stage3_conflict_detection_ms=0")
                 Log.d(TIMING_TAG, "move stage4_saf_call_ms=$stage4Ms")
                 Log.d(TIMING_TAG, "move stage1to4_total_ms=$totalMs")
-                return StorageWriteResult(ok = true, uri = source.uri.toString(), changed = true)
+                return StorageWriteResult(ok = true, uri = renamedUri, changed = true)
             }
             val stage3Start = SystemClock.elapsedRealtime()
             val sibling = source.parentFile?.findFile(requestedName)
@@ -352,9 +363,31 @@ class SafStorageProvider(
 
     private fun hasPersistedTreePermission(uri: Uri): Boolean {
         val target = uri.normalizeScheme().toString()
-        val permission = resolver.persistedUriPermissions.firstOrNull {
-            it.uri.normalizeScheme().toString() == target
-        } ?: return false
-        return permission.isReadPermission && permission.isWritePermission
+        return resolver.persistedUriPermissions.any { permission ->
+            if (!permission.isReadPermission || !permission.isWritePermission) {
+                return@any false
+            }
+            if (permission.uri.normalizeScheme().toString() == target) {
+                return@any true
+            }
+            containsDocument(permission.uri, uri)
+        }
+    }
+
+    private fun containsDocument(treeUri: Uri, documentUri: Uri): Boolean {
+        if (!DocumentsContract.isTreeUri(treeUri)) {
+            return false
+        }
+        return try {
+            val treeId = DocumentsContract.getTreeDocumentId(treeUri)
+            val documentId = if (DocumentsContract.isTreeUri(documentUri)) {
+                DocumentsContract.getTreeDocumentId(documentUri)
+            } else {
+                DocumentsContract.getDocumentId(documentUri)
+            }
+            documentId == treeId || documentId.startsWith("$treeId/")
+        } catch (_: IllegalArgumentException) {
+            false
+        }
     }
 }

@@ -8,16 +8,16 @@ import pytest
 from engine.config import settings
 from engine.database.database import database_manager
 from engine.dataset import DatasetCheckpoint, DatasetEngine, DatasetService
-from engine.embeddings import EmbeddingService
+from engine.embeddings import EmbeddingService, MockProvider
 from engine.knowledge_graph import KnowledgeGraphService
 from engine.pipeline import PipelineJob, QueueManager, QueueType
-from engine.recognition import RecognitionService
+from engine.recognition import MockRecognitionProvider, RecognitionService
 from engine.repositories.dataset_repository import DatasetRepository
 from engine.repositories.duplicate_repository import DuplicateRepository
 from engine.repositories.hash_repository import HashRepository
 from engine.repositories.image_repository import ImageRepository
 from engine.search import SearchService
-from engine.tagging import TaggingService
+from engine.tagging import RuleBasedTaggingBackend, TaggingEngine, TaggingService
 
 
 @pytest.fixture()
@@ -53,11 +53,14 @@ def _build_dataset_job(
 ) -> PipelineJob:
     _register_image(path)
 
-    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    embedding_service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
     embedding_job = PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
     assert embedding_service.process_embedding_job(embedding_job) is not None
 
-    recognition_service = RecognitionService(queue_manager=queue_manager)
+    recognition_service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     recognition_job = queue_manager.dequeue(QueueType.RECOGNITION)
     assert recognition_job is not None
     assert recognition_service.process_recognition_job(recognition_job) is not None
@@ -74,7 +77,10 @@ def _build_dataset_job(
 
     tagging_job = queue_manager.dequeue(QueueType.SEARCH)
     assert tagging_job is not None
-    tagging_service = TaggingService(queue_manager=queue_manager)
+    tagging_service = TaggingService(
+        queue_manager=queue_manager,
+        engine=TaggingEngine(backend=RuleBasedTaggingBackend()),
+    )
     assert tagging_service.process_tagging_job(tagging_job) is not None
 
     if keep_in_queue:
@@ -238,6 +244,13 @@ def test_repository_persistence(dataset_env: None, tmp_path: Path) -> None:
     repo = DatasetRepository()
     provenance = repo.get_dataset_provenance(result.image_id)
     assert len(provenance) > 0
+
+    restored = repo.get_dataset_entry(result.image_id)
+    assert restored is not None
+    assert restored.dataset_uuid == result.entry.dataset_uuid
+    assert restored.image_uuid == result.entry.image_uuid
+    assert restored.tag_ids == result.entry.tag_ids
+    assert restored.embedding_uuid == result.entry.embedding_uuid
 
 
 def test_events(dataset_env: None, tmp_path: Path) -> None:

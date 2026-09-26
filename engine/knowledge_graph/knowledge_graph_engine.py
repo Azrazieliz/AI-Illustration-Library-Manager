@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from engine.knowledge_graph.knowledge_graph_backend import (
+    DurableKnowledgeGraphBackend,
     InMemoryKnowledgeGraphBackend,
     KnowledgeGraphBackend,
 )
@@ -45,7 +46,7 @@ class KnowledgeGraphEngine:
         max_workers: int = 4,
     ) -> None:
         self.repository = repository or KnowledgeGraphRepository()
-        self.backend = backend or InMemoryKnowledgeGraphBackend()
+        self.backend = backend or DurableKnowledgeGraphBackend()
         self.builder = KnowledgeGraphBuilder(self.backend)
         self.callback = callback
         self.max_workers = max_workers

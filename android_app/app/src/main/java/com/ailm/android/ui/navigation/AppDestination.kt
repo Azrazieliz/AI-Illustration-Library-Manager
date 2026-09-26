@@ -18,6 +18,7 @@ enum class AppDestination(val route: String, val title: String) {
     Tags("tags", "Tags"),
     BulkOperations("bulk_operations", "Bulk Operations"),
     KnowledgePacks("knowledge_packs", "Knowledge Packs"),
+    FusionDatabase("fusion_database", "Fusion Database"),
     Downloads("downloads", "Downloads"),
     Automation("automation", "Automation"),
     PluginManager("plugin_manager", "Plugin Manager"),

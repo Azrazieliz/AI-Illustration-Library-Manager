@@ -37,3 +37,12 @@ Thumbs.db
 android_app/.gradle/
 android_app/.idea/
 android_app/local.properties
+
+# Android signing
+keystore.properties
+*.jks
+*.keystore
+keystore/
+
+branding/New Tab.html
+branding/New Tab_files/

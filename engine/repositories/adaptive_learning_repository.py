@@ -13,8 +13,8 @@ from engine.adaptive_learning.adaptive_models import AdaptiveUncertaintyItem, Ch
 MAX_ADAPTIVE_STORAGE_BYTES = 5 * 1024 * 1024 * 1024
 
 
-class AdaptiveLearningRepository:
-    """Repository facade for adaptive-learning profile and uncertainty persistence."""
+class InMemoryAdaptiveLearningRepository:
+    """In-memory adapter for isolated adaptive-learning tests."""
 
     def __init__(self, *, builder: AdaptiveLearningBuilder | None = None) -> None:
         self.builder = builder or AdaptiveLearningBuilder()
@@ -75,3 +75,9 @@ class AdaptiveLearningRepository:
         self._profiles = {}
         self._uncertainty = []
         self._persisted_state = self.builder.serialize_state(profiles={}, uncertainty=[])
+
+
+from engine.repositories.adaptive_learning_repository_durable import DurableAdaptiveLearningRepository
+
+
+AdaptiveLearningRepository = DurableAdaptiveLearningRepository

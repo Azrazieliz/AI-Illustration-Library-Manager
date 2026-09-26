@@ -46,5 +46,7 @@ class PipelineJob:
     source_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     retry_count: int = 0
+    max_retries: int | None = None
     worker: str | None = None
     error_message: str | None = None
+    output_payload: dict[str, Any] | None = None

@@ -35,7 +35,7 @@ class RenameEngine:
         self.rule = rule or RenameRule()
         self.logger = get_logger(self.__class__.__name__)
         self.statistics = RenameStatistics()
-        self._last_batch: RenameBatch | None = None
+        self._last_batch = self.repository.get_last_batch()
 
     def preview_rename(
         self,
@@ -122,6 +122,7 @@ class RenameEngine:
                 ],
                 applied_at=datetime.now(timezone.utc),
             )
+            self.repository.save_last_batch(self._last_batch)
 
             return RenameResult(
                 batch_id=batch_id,
@@ -174,6 +175,7 @@ class RenameEngine:
             raise RenameRollbackError(f"Failed to rollback batch {batch.batch_id}: {exc}") from exc
 
         self._last_batch = None
+        self.repository.clear_last_batch()
         previews.reverse()
         return RenameResult(
             batch_id=batch.batch_id,

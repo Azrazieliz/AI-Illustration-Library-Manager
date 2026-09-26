@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from engine.search.search_backend import InMemorySearchBackend, SearchBackend
+from engine.repositories.search_repository import SearchRepository
+from engine.search.search_backend import RepositorySearchBackend, SearchBackend
 from engine.search.search_models import SearchRecord, SearchResult, SearchQuery
 
 
 class SearchIndex:
     """Backend-agnostic index facade for semantic vector search."""
 
-    def __init__(self, backend: SearchBackend | None = None) -> None:
-        self.backend = backend or InMemorySearchBackend()
+    def __init__(
+        self,
+        backend: SearchBackend | None = None,
+        repository: SearchRepository | None = None,
+    ) -> None:
+        self.backend = backend or RepositorySearchBackend(repository)
 
     def upsert(self, record: SearchRecord) -> None:
         """Insert or update one searchable vector record."""

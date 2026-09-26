@@ -338,14 +338,66 @@ class KnowledgeBaseBuilder:
         raise KnowledgeBaseImportError(f"Unsupported export format: {format_value}")
 
     def deserialize_bundle(self, data: str | dict[str, Any], *, format: KnowledgeBaseImportFormat | str) -> dict[str, Any]:
+        bundles = self.deserialize_bundles(data, format=format)
+        if len(bundles) != 1:
+            raise KnowledgeBaseImportError(
+                f"Expected one knowledge-base bundle, received {len(bundles)}; use the batch import API for array-root JSON."
+            )
+        return bundles[0]
+
+    def deserialize_bundles(
+        self,
+        data: str | dict[str, Any] | list[dict[str, Any]],
+        *,
+        format: KnowledgeBaseImportFormat | str,
+    ) -> list[dict[str, Any]]:
         format_value = format.value if isinstance(format, KnowledgeBaseImportFormat) else str(format).lower()
-        if isinstance(data, dict):
-            return data
-        if format_value in {KnowledgeBaseImportFormat.JSON.value, KnowledgeBaseImportFormat.YAML.value}:
-            return json.loads(data)
-        if format_value == KnowledgeBaseImportFormat.CSV.value:
-            return self.csv_to_bundle(data)
-        raise KnowledgeBaseImportError(f"Unsupported import format: {format_value}")
+        if isinstance(data, (dict, list)):
+            payload: object = data
+        elif format_value in {KnowledgeBaseImportFormat.JSON.value, KnowledgeBaseImportFormat.YAML.value}:
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError as error:
+                raise KnowledgeBaseImportError(
+                    f"Invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
+                ) from error
+        elif format_value == KnowledgeBaseImportFormat.CSV.value:
+            payload = self.csv_to_bundle(data)
+        else:
+            raise KnowledgeBaseImportError(f"Unsupported import format: {format_value}")
+
+        if isinstance(payload, dict):
+            return [self._validate_import_bundle(payload, location="root")]
+        if isinstance(payload, list):
+            if not payload:
+                raise KnowledgeBaseImportError("Array-root JSON import must contain at least one canonical bundle")
+            return [
+                self._validate_import_bundle(item, location=f"root[{index}]")
+                for index, item in enumerate(payload)
+            ]
+        raise KnowledgeBaseImportError(
+            f"Canonical JSON import root must be an object bundle or an array of bundles, got {type(payload).__name__}"
+        )
+
+    def _validate_import_bundle(self, bundle: object, *, location: str) -> dict[str, Any]:
+        if not isinstance(bundle, dict):
+            raise KnowledgeBaseImportError(f"{location} must be an object containing one canonical knowledge-base bundle")
+        dataset = bundle.get("dataset")
+        if not isinstance(dataset, dict) or not dataset:
+            raise KnowledgeBaseImportError(f"{location}.dataset must be a non-empty object")
+        for field in ("series", "characters", "reference_images", "training_samples"):
+            value = bundle.get(field, [])
+            if not isinstance(value, list):
+                raise KnowledgeBaseImportError(f"{location}.{field} must be an array")
+            for index, item in enumerate(value):
+                if not isinstance(item, dict):
+                    raise KnowledgeBaseImportError(f"{location}.{field}[{index}] must be an object")
+        format_version = bundle.get("format_version")
+        if format_version is not None and format_version not in {1, "1"}:
+            raise KnowledgeBaseImportError(
+                f"{location}.format_version must be 1 when provided, got {format_version!r}"
+            )
+        return dict(bundle)
 
     def bundle_to_csv(self, bundle: dict[str, Any]) -> str:
         buffer = io.StringIO()

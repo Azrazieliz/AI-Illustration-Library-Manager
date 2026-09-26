@@ -1,5 +1,7 @@
 package com.ailm.android.runtime
 
+import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -391,6 +393,7 @@ class FusionDatabaseRepository(
 
     fun exportJson(pretty: Boolean = true): String {
         val payload = JSONObject()
+        payload.put("application", "AsterionCore")
         payload.put("format", "fusion_json")
         payload.put("fusion_schema_version", FusionDatabaseSchema.FUSION_SCHEMA_VERSION)
         payload.put("generated_at_ms", System.currentTimeMillis())
@@ -407,6 +410,7 @@ class FusionDatabaseRepository(
 
     fun exportWorkbookCompatJson(pretty: Boolean = true): String {
         val payload = JSONObject()
+        payload.put("application", "AsterionCore")
         payload.put("format", "fusion_workbook_compat")
         payload.put("fusion_schema_version", FusionDatabaseSchema.FUSION_SCHEMA_VERSION)
         payload.put("generated_at_ms", System.currentTimeMillis())
@@ -441,6 +445,67 @@ class FusionDatabaseRepository(
             ),
         )
         return result.toFusionImportResult(FusionImportFormat.WORKBOOK_COMPAT)
+    }
+
+    fun persistFusionRows(candidates: List<FusionRowCandidate>, replaceExisting: Boolean = false): Map<String, Any> {
+        val rowsByTable = candidates.groupBy { it.table }
+        database.writableDatabase.beginTransaction()
+        try {
+            rowsByTable.forEach { (tableName, rowCandidates) ->
+                if (replaceExisting && rowCandidates.isNotEmpty()) {
+                    val ids = rowCandidates.mapNotNull { candidate -> candidate.row[tableIdColumn(tableName)]?.toString() }.filter { it.isNotBlank() }
+                    if (ids.isNotEmpty()) {
+                        val placeholders = ids.joinToString(",") { "?" }
+                        database.writableDatabase.delete(tableName, "${tableIdColumn(tableName)} IN ($placeholders)", ids.toTypedArray())
+                    }
+                }
+                rowCandidates.forEach { candidate ->
+                    val values = contentValuesForRow(candidate.row)
+                    database.writableDatabase.insertWithOnConflict(
+                        tableName,
+                        null,
+                        values,
+                        SQLiteDatabase.CONFLICT_REPLACE,
+                    )
+                }
+            }
+            database.writableDatabase.setTransactionSuccessful()
+        } finally {
+            database.writableDatabase.endTransaction()
+        }
+        return mapOf(
+            "ok" to true,
+            "rows_imported" to candidates.size,
+            "tables_touched" to rowsByTable.keys.size,
+        )
+    }
+
+    private fun tableIdColumn(tableName: String): String {
+        return when (tableName) {
+            FusionDatabaseSchema.TABLE_CHARACTERS -> "character_id"
+            FusionDatabaseSchema.TABLE_TAGS -> "tag_id"
+            else -> "id"
+        }
+    }
+
+    private fun contentValuesForRow(row: Map<String, Any?>): ContentValues {
+        val values = ContentValues()
+        row.forEach { (key, value) ->
+            when (value) {
+                null -> values.putNull(key)
+                is String -> values.put(key, value)
+                is Int -> values.put(key, value)
+                is Long -> values.put(key, value)
+                is Float -> values.put(key, value)
+                is Double -> values.put(key, value)
+                is Boolean -> values.put(key, value)
+                is Short -> values.put(key, value)
+                is Byte -> values.put(key, value)
+                is ByteArray -> values.put(key, value)
+                else -> values.put(key, value.toString())
+            }
+        }
+        return values
     }
 
     fun previewImport(
@@ -673,6 +738,52 @@ class FusionDatabaseRepository(
         return report
     }
 
+    fun logicalContentCounts(): Map<String, Int> {
+        return tableSpecs.associate { spec ->
+            spec.tableName to scalarInt("SELECT COUNT(*) FROM ${spec.tableName}")
+        }
+    }
+
+    fun managementStatus(): Map<String, Any> {
+        val report = validateDatabase(persistRun = false)
+        val sqliteHealthy = report.quickCheckResult == "ok"
+        val fusionIndexCount = scalarInt(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_fusion_%'",
+        )
+        val searchIndexExists = scalarInt(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'image_fts'",
+        ) > 0
+        val searchIndexRows = if (searchIndexExists) scalarInt("SELECT COUNT(*) FROM image_fts") else 0
+        val imageCount = scalarInt("SELECT COUNT(*) FROM images")
+        val ftsHealthy = searchIndexExists && searchIndexRows == imageCount
+        val lastIntegrityCheckMs = scalarLong("SELECT COALESCE(MAX(checked_at_ms), 0) FROM ${FusionDatabaseSchema.TABLE_INTEGRITY_RUNS}")
+        return mapOf(
+            "fusion_version" to FusionDatabaseSchema.FUSION_SCHEMA_VERSION,
+            "database_status" to if (report.valid) "Ready" else "Needs attention",
+            "database_health" to if (report.valid) "Healthy" else "Issues detected",
+            "rebuild_required" to !report.valid,
+            "fusion_entries" to logicalContentCounts().values.sum(),
+            "logical_table_counts" to logicalContentCounts(),
+            "sqlite_health" to if (sqliteHealthy) "Healthy" else "Corrupted",
+            "database_integrity" to if (sqliteHealthy) "Healthy" else "Failed: ${report.quickCheckResult}",
+            "index_integrity" to if (sqliteHealthy && fusionIndexCount > 0) "Healthy ($fusionIndexCount Fusion indexes)" else "Needs attention",
+            "fts_integrity" to when {
+                !searchIndexExists -> "Unavailable"
+                ftsHealthy -> "Healthy ($searchIndexRows entries)"
+                else -> "Needs rebuild ($searchIndexRows of $imageCount entries)"
+            },
+            "missing_references" to report.brokenReferenceCount,
+            "orphan_entries" to report.brokenReferenceCount,
+            "corrupted_records" to (report.duplicateIdCount + report.missingRequiredEntityCount + report.invalidRelationshipCount),
+            "knowledge_consistency" to if (report.brokenReferenceCount == 0 && report.missingRequiredEntityCount == 0) "Consistent" else "Needs attention",
+            "search_index_status" to if (ftsHealthy) "Ready ($searchIndexRows entries)" else "Needs attention",
+            "embedding_index_status" to "Not configured",
+            "cache_status" to "Managed automatically",
+            "last_integrity_check_ms" to lastIntegrityCheckMs,
+            "validation" to report.toMap(),
+        )
+    }
+
     private fun readRows(spec: FusionTableSpec): JSONArray {
         val rows = JSONArray()
         val sql = "SELECT ${spec.columns.joinToString(",") { it.name }} FROM ${spec.tableName} ORDER BY ROWID ASC"
@@ -729,6 +840,12 @@ class FusionDatabaseRepository(
             } else {
                 cursor.getInt(0)
             }
+        }
+    }
+
+    private fun scalarLong(sql: String, args: Array<String> = emptyArray()): Long {
+        return database.readableDatabase.rawQuery(sql, args).use { cursor ->
+            if (!cursor.moveToFirst()) 0L else cursor.getLong(0)
         }
     }
 

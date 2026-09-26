@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Iterable
 
 from engine.database import UnitOfWork
@@ -22,6 +23,7 @@ from engine.recognition.recognition_models import (
 )
 from engine.recognition.recognition_provider import RecognitionProvider
 from engine.recognition.recognition_statistics import RecognitionStatistics
+from engine.repositories.ai_execution_repository import AiExecutionRepository
 from engine.repositories.recognition_repository import RecognitionRepository
 
 
@@ -110,11 +112,14 @@ class RecognitionWorker:
 
                 cache_key = self._build_cache_key(resolved_path=resolved_path, image_id=image.id)
                 output = self.cache.get(cache_key)
+                execution_time: float | None = None
                 if output is not None:
                     self.statistics.increment_cache_hit()
                 else:
                     self.statistics.increment_cache_miss()
+                    execution_started = perf_counter()
                     output = self.provider.recognize(resolved_path)
+                    execution_time = perf_counter() - execution_started
                     self.cache.put(cache_key, output)
 
                 if output.series is None and not output.character_candidates and not output.characters:
@@ -165,6 +170,24 @@ class RecognitionWorker:
                     matching_seconds = 0.0
                     ranking_seconds = 0.0
                     unknown_result = False
+
+                repository.append_history(
+                    image=image,
+                    output=output,
+                    assignment=assignment if self.matcher is not None else None,
+                    execution_time=execution_time,
+                )
+                if execution_time is not None:
+                    AiExecutionRepository(session=session).append(
+                        task="recognition",
+                        model=output.model_name,
+                        model_version=output.model_version,
+                        runtime=output.provider_name,
+                        input_hash=AiExecutionRepository.hash_file(resolved_path),
+                        output_hash=None,
+                        duration=execution_time,
+                        status="completed",
+                    )
 
                 if checkpoint is not None:
                     checkpoint.add_processed(path)

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 import pytest
 
+from engine.config import settings
+from engine.database.database import database_manager
 from engine.knowledge_base import (
     KnowledgeBaseDatasetStatus,
     KnowledgeBaseEngine,
@@ -13,13 +16,22 @@ from engine.knowledge_base import (
     KnowledgeBaseService,
     KnowledgeBaseWorker,
 )
+from engine.knowledge_base.knowledge_base_exceptions import KnowledgeBaseImportError
 from engine.pipeline import PipelineJob, QueueType
+from engine.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from engine.repositories.review_repository import ReviewRepository
 from engine.review.review_models import ReviewDecisionType
 
 
 @pytest.fixture()
-def knowledge_base_env() -> None:
+def knowledge_base_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    database_manager._engine = None
+    database_manager._session_factory = None
+    database_manager._initialized = False
+    database_manager.__init__()
+    KnowledgeBaseRepository.reset_state()
     ReviewRepository.reset_state()
 
 
@@ -152,6 +164,58 @@ def test_dataset_creation_and_counts(knowledge_base_env: None) -> None:
     assert romaji and romaji[0].record_id == 1542
 
 
+def test_knowledge_base_graph_survives_engine_restart(knowledge_base_env: None) -> None:
+    first = _engine()
+    dataset = first.create_dataset(name="Persistent Canon", tags=["trusted"])
+    series = first.create_series(dataset_id=dataset.dataset_id, canonical_id=101, title="Persistent Series")
+    character = first.create_character(
+        dataset_id=dataset.dataset_id,
+        canonical_id=202,
+        series_id=series.canonical_id,
+        canonical_name="Persistent Character",
+        aliases=["Persisted Alias"],
+    )
+    first.repository.add_relationship(
+        character_id=character.canonical_id,
+        relation="appears_in",
+        target_kind=KnowledgeBaseRecordKind.SERIES,
+        target_id=series.canonical_id,
+        confidence=0.9,
+    )
+    reference = first.add_reference_image(
+        character_id=character.canonical_id,
+        image_id=303,
+        path="reference/persistent.png",
+        metadata={"source": "curated"},
+    )
+    sample = first.add_training_sample(
+        character_id=character.canonical_id,
+        image_id=reference.image_id,
+        approved=True,
+        reviewed_by="curator",
+        metadata={"review_id": 9},
+    )
+
+    restarted = _engine()
+    restored_dataset = restarted.repository.find_dataset(dataset.dataset_id)
+    restored_character = restarted.repository.find_character(character.canonical_id)
+    restored_reference = restarted.repository.find_reference_image(reference.image_id)
+    restored_sample = restarted.repository.find_training_sample(sample.sample_id)
+
+    assert restored_dataset is not None
+    assert restored_dataset.tags == ["trusted"]
+    assert restored_character is not None
+    assert restored_character.aliases == ["Persisted Alias"]
+    assert [(item.relation, item.target_kind, item.target_id) for item in restored_character.relationships] == [
+        ("appears_in", KnowledgeBaseRecordKind.SERIES, series.canonical_id)
+    ]
+    assert restored_reference is not None
+    assert restored_reference.metadata == {"source": "curated"}
+    assert restored_sample is not None
+    assert restored_sample.metadata == {"review_id": 9}
+    assert restarted.lookup_by_alias("persisted alias", dataset_id=dataset.dataset_id)[0].record_id == character.canonical_id
+
+
 def test_dataset_merge_moves_records(knowledge_base_env: None) -> None:
     engine = _engine()
     target = engine.create_dataset(name="Target", description="Primary dataset")
@@ -162,6 +226,8 @@ def test_dataset_merge_moves_records(knowledge_base_env: None) -> None:
 
     source_series = engine.create_series(dataset_id=source.dataset_id, canonical_id=2, title="Source Series")
     source_character = engine.create_character(dataset_id=source.dataset_id, canonical_id=20, series_id=source_series.canonical_id, canonical_name="Source Hero")
+    reference = engine.add_reference_image(character_id=source_character.canonical_id, image_id=30, path="reference/source.png")
+    sample = engine.add_training_sample(character_id=source_character.canonical_id, image_id=reference.image_id, approved=True)
 
     merged = engine.merge_datasets(target.dataset_id, source.dataset_id)
     assert merged.dataset_id == target.dataset_id
@@ -169,6 +235,8 @@ def test_dataset_merge_moves_records(knowledge_base_env: None) -> None:
     moved = engine.repository.find_character(source_character.canonical_id)
     assert moved is not None
     assert moved.dataset_id == target.dataset_id
+    assert engine.repository.find_reference_image(reference.image_id) is not None
+    assert engine.repository.find_training_sample(sample.sample_id) is not None
 
     counts = engine.counts(target.dataset_id)
     assert counts["series"] == 2
@@ -184,11 +252,57 @@ def test_json_import_export_roundtrip(knowledge_base_env: None) -> None:
     exported = engine.export_dataset(dataset.dataset_id, format=KnowledgeBaseImportFormat.JSON)
     assert isinstance(exported, str)
 
+    KnowledgeBaseRepository.reset_state()
     imported_engine = _engine()
     imported = imported_engine.import_dataset(exported, format=KnowledgeBaseImportFormat.JSON)
     assert imported.dataset_id == dataset.dataset_id
     assert imported_engine.counts(imported.dataset_id)["characters"] == 1
     assert imported_engine.lookup_by_character("Elizabeth")[0].record_id == 1542
+
+
+def test_json_array_root_imports_each_canonical_bundle(knowledge_base_env: None) -> None:
+    payload = [
+        {
+            "dataset": {"dataset_id": 1, "name": "First", "version": "1.0", "status": "active"},
+            "series": [],
+            "characters": [],
+            "reference_images": [],
+            "training_samples": [],
+            "format_version": 1,
+        },
+        {
+            "dataset": {"dataset_id": 2, "name": "Second", "version": "1.0", "status": "active"},
+            "series": [],
+            "characters": [],
+            "reference_images": [],
+            "training_samples": [],
+            "format_version": 1,
+        },
+    ]
+
+    imported = _engine().import_dataset(json.dumps(payload), format=KnowledgeBaseImportFormat.JSON)
+
+    assert isinstance(imported, list)
+    assert [dataset.dataset_id for dataset in imported] == [1, 2]
+
+
+def test_json_import_reports_precise_array_bundle_validation_errors(knowledge_base_env: None) -> None:
+    payload = [
+        {
+            "dataset": {"dataset_id": 1, "name": "Valid", "version": "1.0", "status": "active"},
+            "series": [],
+            "characters": [],
+            "reference_images": [],
+            "training_samples": [],
+        },
+        {
+            "dataset": {"dataset_id": 2, "name": "Invalid", "version": "1.0", "status": "active"},
+            "characters": {},
+        },
+    ]
+
+    with pytest.raises(KnowledgeBaseImportError, match=r"root\[1\]\.characters must be an array"):
+        _engine().import_dataset(json.dumps(payload), format=KnowledgeBaseImportFormat.JSON)
 
 
 def test_csv_import_export_roundtrip(knowledge_base_env: None) -> None:
@@ -200,6 +314,7 @@ def test_csv_import_export_roundtrip(knowledge_base_env: None) -> None:
     exported = engine.export_dataset(dataset.dataset_id, format=KnowledgeBaseImportFormat.CSV)
     assert isinstance(exported, str)
 
+    KnowledgeBaseRepository.reset_state()
     imported_engine = _engine()
     imported = imported_engine.import_dataset(exported, format=KnowledgeBaseImportFormat.CSV)
     assert imported.name == "Games"

@@ -180,6 +180,27 @@ def test_apply_rename_and_rollback(rename_env: None, tmp_path: Path) -> None:
     assert not target.exists()
 
 
+def test_rename_rollback_survives_engine_restart(rename_env: None, tmp_path: Path) -> None:
+    source = tmp_path / "restart-source.png"
+    source.write_bytes(b"z")
+    _register_image_with_metadata(source, series="Fate", characters=["Saber"])
+
+    result = RenameEngine().apply_rename(
+        [source],
+        rule=RenameRule(template="{series}_{character}"),
+    )
+    target = result.previews[0].target_path
+    assert target.exists()
+
+    rollback = RenameEngine().rollback_last_batch()
+
+    assert rollback is not None
+    assert rollback.rolled_back is True
+    assert source.exists()
+    assert not target.exists()
+    assert RenameEngine().rollback_last_batch() is None
+
+
 def test_dry_run_does_not_touch_files(rename_env: None, tmp_path: Path) -> None:
     source = tmp_path / "dryrun.jpg"
     source.write_bytes(b"x")

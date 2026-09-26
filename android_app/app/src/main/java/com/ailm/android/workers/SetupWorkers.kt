@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.ailm.android.runtime.StandaloneRuntime
-import com.ailm.android.startup.AppBootstrap
 
 class InitialSetupWorker(
     appContext: Context,
@@ -12,7 +11,6 @@ class InitialSetupWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         return runCatching {
-            AppBootstrap.initializeRuntime(applicationContext)
             StandaloneRuntime.detectAiHardwareProfile()
             StandaloneRuntime.validateLocalAiInfrastructure()
             StandaloneRuntime.resumeAiQueue()
@@ -28,12 +26,24 @@ class ModelDownloadWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        return runCatching {
-            AppBootstrap.initializeRuntime(applicationContext)
-            StandaloneRuntime.resumeAiQueue()
-            Result.success()
-        }.getOrElse {
-            Result.retry()
+        val installId = inputData.getString(INSTALL_ID_KEY)?.trim().orEmpty()
+        if (installId.isBlank()) {
+            return Result.failure()
         }
+        return runCatching {
+            val result = StandaloneRuntime.downloadAiModel(installId)
+            when {
+                result["ok"] == true -> Result.success()
+                result["retryable"] == true && runAttemptCount < MAX_RETRY_ATTEMPTS -> Result.retry()
+                else -> Result.failure()
+            }
+        }.getOrElse {
+            if (runAttemptCount < MAX_RETRY_ATTEMPTS) Result.retry() else Result.failure()
+        }
+    }
+
+    companion object {
+        const val INSTALL_ID_KEY = "install_id"
+        private const val MAX_RETRY_ATTEMPTS = 3
     }
 }

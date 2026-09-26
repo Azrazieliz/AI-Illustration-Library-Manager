@@ -38,7 +38,7 @@ class OrganizerEngine:
         self.rules = list(rules or [])
         self.logger = get_logger(self.__class__.__name__)
         self.statistics = OrganizerStatistics()
-        self._last_rollback_batch: RollbackBatch | None = None
+        self._last_rollback_batch = self.repository.get_last_rollback_batch()
 
     def preview_organize(
         self,
@@ -122,6 +122,7 @@ class OrganizerEngine:
                     for preview in finalized
                 ],
             )
+            self.repository.save_last_rollback_batch(self._last_rollback_batch)
 
             return OrganizationResult(
                 batch_id=batch_id,
@@ -170,6 +171,7 @@ class OrganizerEngine:
             raise OrganizerRollbackError(f"Failed to rollback organization batch {batch.batch_id}: {exc}") from exc
 
         self._last_rollback_batch = None
+        self.repository.clear_last_rollback_batch()
         previews.reverse()
         return OrganizationResult(
             batch_id=batch.batch_id,

@@ -12,8 +12,22 @@ enum class AiRuntimeType(val raw: String) {
 
     companion object {
         fun fromRaw(raw: String): AiRuntimeType {
-            val normalized = raw.trim().lowercase()
-            return entries.firstOrNull { it.raw == normalized } ?: CUSTOM
+            val normalized = raw.trim()
+                .lowercase(Locale.US)
+                .replace('-', '_')
+                .replace('.', '_')
+                .replace(' ', '_')
+                .replace(Regex("_+"), "_")
+            return when (normalized) {
+                ONNX.raw -> ONNX
+                LLAMA_CPP.raw, "llama_cpp", "llama", "llama_cpp_backend" -> LLAMA_CPP
+                "llama_cpp_backend", "llama_cpp_runtime", "llamacpp" -> LLAMA_CPP
+                TFLITE.raw, "tflite_lite", "tensorflow_lite" -> TFLITE
+                NCNN.raw -> NCNN
+                MNN.raw -> MNN
+                CUSTOM.raw -> CUSTOM
+                else -> CUSTOM
+            }
         }
     }
 }
@@ -29,19 +43,33 @@ object AiTaskTypes {
         "embedding_generation",
         "similarity_search",
         "prompt_generation",
+        "text_generation",
         "metadata_extraction",
         "duplicate_detection",
         "classification",
         "detection",
+        "face_detection",
+        "face_embedding",
+        "face_landmarks",
         "face_feature_extraction",
+        "landmark_2d",
+        "landmark_3d",
+        "gender_age",
         "knowledge_pack_execution",
+        "reasoning",
+        "normalization",
+        "translation",
+        "text_reranking",
+        "nsfw_classification",
+        "aesthetic_scoring",
+        "image_quality_scoring",
+        "vision_encoder",
     )
 
     val INFRASTRUCTURE_TASKS: Set<String> = setOf(
         "install_model",
         "verify_model",
         "remove_model",
-        "download_registration",
         "metadata_refresh",
         "runtime_probe",
         "health_check",
@@ -59,13 +87,34 @@ object AiTaskTypes {
         "embedding generation" to "embedding_generation",
         "similarity search" to "similarity_search",
         "prompt generation" to "prompt_generation",
+        "text generation" to "text_generation",
+        "text reranking" to "text_reranking",
+        "reranking" to "text_reranking",
         "metadata extraction" to "metadata_extraction",
         "duplicate detection" to "duplicate_detection",
         "image classification" to "classification",
         "object detection" to "detection",
         "face extraction" to "face_feature_extraction",
         "face feature extraction" to "face_feature_extraction",
+        "face detection" to "face_detection",
+        "face embedding" to "face_embedding",
+        "face landmarks" to "face_landmarks",
+        "landmark 2d" to "landmark_2d",
+        "landmark 3d" to "landmark_3d",
+        "gender age" to "gender_age",
         "knowledge pack execution" to "knowledge_pack_execution",
+        "nsfw classification" to "nsfw_classification",
+        "content safety" to "nsfw_classification",
+        "aesthetic scoring" to "aesthetic_scoring",
+        "aesthetic score" to "aesthetic_scoring",
+        "image quality ranking" to "image_quality_scoring",
+        "image quality scoring" to "image_quality_scoring",
+        "vision encoder" to "vision_encoder",
+        "quality ranking" to "image_quality_scoring",
+        "quality scoring" to "image_quality_scoring",
+        "best image ranking" to "image_quality_scoring",
+        "best_image_ranking" to "image_quality_scoring",
+        "aesthetic_predictor" to "aesthetic_scoring",
     )
 
     fun normalize(raw: String): String {
@@ -104,6 +153,11 @@ data class AiHardwareProfile(
     val threadCount: Int,
     val simdFeatures: List<String>,
     val abiList: List<String>,
+    val batterySaverEnabled: Boolean,
+    val charging: Boolean,
+    val thermalStatus: Int,
+    val deviceManufacturer: String,
+    val deviceModel: String,
     val capturedAtMs: Long,
 ) {
     fun toMap(): Map<String, Any> {
@@ -118,6 +172,11 @@ data class AiHardwareProfile(
             "thread_count" to threadCount,
             "simd_features" to simdFeatures,
             "abi_list" to abiList,
+            "battery_saver_enabled" to batterySaverEnabled,
+            "charging" to charging,
+            "thermal_status" to thermalStatus,
+            "device_manufacturer" to deviceManufacturer,
+            "device_model" to deviceModel,
             "captured_at_ms" to capturedAtMs,
         )
     }
@@ -149,6 +208,7 @@ data class AiModelDescriptor(
             "model_id" to modelId,
             "version" to version,
             "display_name" to displayName,
+            "name" to displayName,
             "size_bytes" to sizeBytes,
             "hash_sha256" to hashSha256,
             "supported_tasks" to supportedTasks,
@@ -158,6 +218,15 @@ data class AiModelDescriptor(
             "required_hardware" to requiredHardware,
             "compatibility" to compatibility,
             "metadata" to metadata,
+            "quantization" to (metadata["quantization"] ?: "unknown"),
+            "context_length" to (metadata["context_length"] ?: 0),
+            "embedding_dimension" to (metadata["embedding_dimension"] ?: 0),
+            "memory_requirement_bytes" to (metadata["memory_requirement_bytes"] ?: sizeBytes),
+            "preferred_backend" to (metadata["preferred_backend"] ?: requiredRuntime),
+            "supported_backends" to (metadata["supported_backends"] ?: supportedRuntimes),
+            "current_status" to (metadata["current_status"] ?: installState),
+            "hardware_compatibility" to (metadata["hardware_compatibility"] ?: compatibility),
+            "benchmark_results" to (metadata["benchmark_results"] ?: mapOf("status" to "not_benchmarked")),
             "source" to source,
             "source_uri" to sourceUri,
             "installed" to installed,

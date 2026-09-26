@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
+from threading import RLock
 
+from sqlalchemy import delete, or_, select
+
+from engine.database.models.knowledge_graph import KnowledgeGraphEdgeRecord, KnowledgeGraphNodeRecord
+from engine.database.session import session_scope
 from engine.knowledge_graph.knowledge_graph_exceptions import KnowledgeGraphBackendError
 from engine.knowledge_graph.knowledge_graph_models import EdgeType, GraphEdge, GraphNode, GraphPath, NodeType
 
@@ -176,6 +181,239 @@ class InMemoryKnowledgeGraphBackend(KnowledgeGraphBackend):
             if node.node_type == node_type and _normalize(node.label) == normalized:
                 return node
         return None
+
+
+class DurableKnowledgeGraphBackend(KnowledgeGraphBackend):
+    """SQLite-backed materialized graph for runtime traversal and recovery."""
+
+    _lock = RLock()
+
+    @classmethod
+    def reset_state(cls) -> None:
+        with cls._lock, session_scope() as session:
+            session.execute(delete(KnowledgeGraphEdgeRecord))
+            session.execute(delete(KnowledgeGraphNodeRecord))
+
+    def upsert_node(self, node: GraphNode) -> bool:
+        with self._lock, session_scope() as session:
+            row = self._get_node_row(session, node.id)
+            if row is None:
+                session.add(
+                    KnowledgeGraphNodeRecord(
+                        node_id=node.id,
+                        node_type=node.node_type.value,
+                        label=node.label,
+                        normalized_label=_normalize(node.label),
+                        metadata_payload=dict(node.metadata),
+                    )
+                )
+                return True
+
+            row.node_type = node.node_type.value
+            row.label = node.label
+            row.normalized_label = _normalize(node.label)
+            row.metadata_payload = dict(node.metadata)
+            return False
+
+    def upsert_edge(self, edge: GraphEdge) -> bool:
+        with self._lock, session_scope() as session:
+            if self._get_node_row(session, edge.source_id) is None or self._get_node_row(session, edge.target_id) is None:
+                raise KnowledgeGraphBackendError("Edge references unknown node")
+
+            row = session.scalar(
+                select(KnowledgeGraphEdgeRecord).where(
+                    KnowledgeGraphEdgeRecord.source_node_id == edge.source_id,
+                    KnowledgeGraphEdgeRecord.target_node_id == edge.target_id,
+                    KnowledgeGraphEdgeRecord.edge_type == edge.edge_type.value,
+                )
+            )
+            if row is None:
+                session.add(
+                    KnowledgeGraphEdgeRecord(
+                        source_node_id=edge.source_id,
+                        target_node_id=edge.target_id,
+                        edge_type=edge.edge_type.value,
+                        confidence=float(edge.confidence),
+                        metadata_payload=dict(edge.metadata),
+                    )
+                )
+                return True
+
+            row.confidence = max(float(row.confidence), float(edge.confidence))
+            row.metadata_payload = {**dict(row.metadata_payload or {}), **dict(edge.metadata)}
+            return False
+
+    def merge_nodes(self, primary_node_id: str, duplicate_node_id: str) -> None:
+        with self._lock, session_scope() as session:
+            primary = self._get_node_row(session, primary_node_id)
+            duplicate = self._get_node_row(session, duplicate_node_id)
+            if primary is None or duplicate is None:
+                raise KnowledgeGraphBackendError("Cannot merge missing nodes")
+            if primary_node_id == duplicate_node_id:
+                return
+
+            affected = list(
+                session.scalars(
+                    select(KnowledgeGraphEdgeRecord).where(
+                        or_(
+                            KnowledgeGraphEdgeRecord.source_node_id == duplicate_node_id,
+                            KnowledgeGraphEdgeRecord.target_node_id == duplicate_node_id,
+                        )
+                    )
+                )
+            )
+            rewired: dict[tuple[str, str, str], tuple[float, dict]] = {}
+            for row in affected:
+                source_node_id = primary_node_id if row.source_node_id == duplicate_node_id else row.source_node_id
+                target_node_id = primary_node_id if row.target_node_id == duplicate_node_id else row.target_node_id
+                if source_node_id == target_node_id:
+                    continue
+                key = (source_node_id, target_node_id, row.edge_type)
+                current = rewired.get(key)
+                payload = dict(row.metadata_payload or {})
+                if current is None:
+                    rewired[key] = (float(row.confidence), payload)
+                else:
+                    rewired[key] = (max(current[0], float(row.confidence)), {**current[1], **payload})
+
+            for row in affected:
+                session.delete(row)
+            session.flush()
+
+            for (source_node_id, target_node_id, edge_type), (confidence, metadata) in rewired.items():
+                existing = session.scalar(
+                    select(KnowledgeGraphEdgeRecord).where(
+                        KnowledgeGraphEdgeRecord.source_node_id == source_node_id,
+                        KnowledgeGraphEdgeRecord.target_node_id == target_node_id,
+                        KnowledgeGraphEdgeRecord.edge_type == edge_type,
+                    )
+                )
+                if existing is None:
+                    session.add(
+                        KnowledgeGraphEdgeRecord(
+                            source_node_id=source_node_id,
+                            target_node_id=target_node_id,
+                            edge_type=edge_type,
+                            confidence=confidence,
+                            metadata_payload=metadata,
+                        )
+                    )
+                else:
+                    existing.confidence = max(float(existing.confidence), confidence)
+                    existing.metadata_payload = {**dict(existing.metadata_payload or {}), **metadata}
+
+            session.delete(duplicate)
+
+    def neighbors(self, node_id: str, edge_type: EdgeType | None = None) -> list[GraphNode]:
+        with self._lock, session_scope() as session:
+            if self._get_node_row(session, node_id) is None:
+                return []
+            statement = select(KnowledgeGraphEdgeRecord).where(
+                or_(
+                    KnowledgeGraphEdgeRecord.source_node_id == node_id,
+                    KnowledgeGraphEdgeRecord.target_node_id == node_id,
+                )
+            ).order_by(KnowledgeGraphEdgeRecord.id)
+            if edge_type is not None:
+                statement = statement.where(KnowledgeGraphEdgeRecord.edge_type == edge_type.value)
+            neighbor_ids: list[str] = []
+            seen: set[str] = set()
+            for row in session.scalars(statement):
+                neighbor_id = row.target_node_id if row.source_node_id == node_id else row.source_node_id
+                if neighbor_id not in seen:
+                    seen.add(neighbor_id)
+                    neighbor_ids.append(neighbor_id)
+            if not neighbor_ids:
+                return []
+            rows = list(
+                session.scalars(
+                    select(KnowledgeGraphNodeRecord).where(KnowledgeGraphNodeRecord.node_id.in_(neighbor_ids))
+                )
+            )
+            by_id = {row.node_id: row for row in rows}
+            return [self._to_node(by_id[neighbor_id]) for neighbor_id in neighbor_ids if neighbor_id in by_id]
+
+    def traverse(self, start_node_id: str, max_depth: int = 1) -> list[str]:
+        with self._lock, session_scope() as session:
+            if self._get_node_row(session, start_node_id) is None:
+                return []
+            adjacency = self._adjacency(session)
+
+        visited = {start_node_id}
+        ordered = [start_node_id]
+        queue: deque[tuple[str, int]] = deque([(start_node_id, 0)])
+        while queue:
+            current, depth = queue.popleft()
+            if depth >= max_depth:
+                continue
+            for neighbor_id in adjacency.get(current, []):
+                if neighbor_id in visited:
+                    continue
+                visited.add(neighbor_id)
+                ordered.append(neighbor_id)
+                queue.append((neighbor_id, depth + 1))
+        return ordered
+
+    def shortest_path(self, start_node_id: str, end_node_id: str) -> GraphPath | None:
+        with self._lock, session_scope() as session:
+            if self._get_node_row(session, start_node_id) is None or self._get_node_row(session, end_node_id) is None:
+                return None
+            adjacency = self._adjacency(session)
+
+        queue: deque[str] = deque([start_node_id])
+        parent: dict[str, str | None] = {start_node_id: None}
+        while queue:
+            current = queue.popleft()
+            if current == end_node_id:
+                break
+            for neighbor_id in adjacency.get(current, []):
+                if neighbor_id in parent:
+                    continue
+                parent[neighbor_id] = current
+                queue.append(neighbor_id)
+
+        if end_node_id not in parent:
+            return None
+        path: list[str] = []
+        cursor: str | None = end_node_id
+        while cursor is not None:
+            path.append(cursor)
+            cursor = parent[cursor]
+        path.reverse()
+        return GraphPath(node_ids=path, edge_count=max(0, len(path) - 1))
+
+    def find_node_by_type_label(self, node_type: NodeType, label: str) -> GraphNode | None:
+        with self._lock, session_scope() as session:
+            row = session.scalar(
+                select(KnowledgeGraphNodeRecord)
+                .where(
+                    KnowledgeGraphNodeRecord.node_type == node_type.value,
+                    KnowledgeGraphNodeRecord.normalized_label == _normalize(label),
+                )
+                .order_by(KnowledgeGraphNodeRecord.id)
+            )
+            return None if row is None else self._to_node(row)
+
+    @staticmethod
+    def _get_node_row(session, node_id: str) -> KnowledgeGraphNodeRecord | None:
+        return session.scalar(select(KnowledgeGraphNodeRecord).where(KnowledgeGraphNodeRecord.node_id == node_id))
+
+    @staticmethod
+    def _to_node(row: KnowledgeGraphNodeRecord) -> GraphNode:
+        return GraphNode(
+            id=row.node_id,
+            node_type=NodeType(row.node_type),
+            label=row.label,
+            metadata=dict(row.metadata_payload or {}),
+        )
+
+    @staticmethod
+    def _adjacency(session) -> dict[str, list[str]]:
+        adjacency: dict[str, list[str]] = {}
+        for row in session.scalars(select(KnowledgeGraphEdgeRecord).order_by(KnowledgeGraphEdgeRecord.id)):
+            adjacency.setdefault(row.source_node_id, []).append(row.target_node_id)
+            adjacency.setdefault(row.target_node_id, []).append(row.source_node_id)
+        return adjacency
 
 
 def _normalize(value: str) -> str:

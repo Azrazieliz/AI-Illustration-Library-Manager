@@ -15,6 +15,9 @@ from engine.plugin_system import (
     PluginService,
     PluginWorker,
 )
+from engine.config import settings
+from engine.database.database import database_manager
+from engine.repositories.plugin_repository import InMemoryPluginRepository, PluginRepository
 
 
 def _write_plugin(root: Path, plugin_id: str, manifest: dict, module_source: str) -> Path:
@@ -32,7 +35,23 @@ def plugin_root(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def engine() -> PluginEngine:
-    return PluginEngine(app_version="0.1.0")
+    return PluginEngine(repository=InMemoryPluginRepository(), app_version="0.1.0")
+
+
+@pytest.fixture()
+def durable_plugin_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    original_engine = database_manager._engine
+    original_session_factory = database_manager._session_factory
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    database_manager._engine = None
+    database_manager._session_factory = None
+    PluginRepository.reset_state()
+    try:
+        yield
+    finally:
+        database_manager._engine = original_engine
+        database_manager._session_factory = original_session_factory
 
 
 def test_discovery_registration_loading_unloading(plugin_root: Path, engine: PluginEngine) -> None:
@@ -294,6 +313,38 @@ def read_config(payload, config, context):
     assert engine.statistics.health_checks >= 1
 
 
+def test_registration_and_configuration_survive_engine_restart(plugin_root: Path, durable_plugin_env) -> None:
+    _write_plugin(
+        plugin_root,
+        "persistent",
+        {
+            "plugin_id": "persistent",
+            "name": "Persistent Plugin",
+            "version": "1.0.0",
+            "permissions": ["settings:register", "commands:execute"],
+            "settings_schema": {"threshold": "number"},
+            "default_config": {"threshold": 0.4},
+            "commands": {"read_config": "read_config"},
+        },
+        """
+def read_config(payload, config, context):
+    return {"threshold": config.get("threshold")}
+""",
+    )
+
+    first = PluginEngine(app_version="0.1.0")
+    first.register(first.discover(plugin_root).discovered)
+    assert first.load_all()[0].success is True
+    assert first.update_config("persistent", {"threshold": 0.9}).success is True
+
+    second = PluginEngine(app_version="0.1.0")
+    runtime = second.repository.get_runtime("persistent")
+    assert runtime is not None
+    assert runtime.config == {"threshold": 0.9}
+    assert second.load_all()[0].success is True
+    assert second.execute_command("persistent", "read_config").payload == {"threshold": 0.9}
+
+
 def test_background_and_scheduled_tasks(plugin_root: Path, engine: PluginEngine) -> None:
     _write_plugin(
         plugin_root,
@@ -347,7 +398,7 @@ def ping(payload, config, context):
     )
 
     queue_manager = QueueManager()
-    engine = PluginEngine(app_version="0.1.0")
+    engine = PluginEngine(repository=InMemoryPluginRepository(), app_version="0.1.0")
     service = PluginService(queue_manager=queue_manager, engine=engine)
     worker = PluginWorker(queue_manager=queue_manager, service=service)
 

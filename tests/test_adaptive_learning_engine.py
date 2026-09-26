@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from time import monotonic, sleep
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,29 @@ from engine.adaptive_learning import (
     AdaptiveLearningWorker,
     AdaptivePersistenceCorruptionError,
 )
+from engine.config import settings
+from engine.database.database import database_manager
+from engine.repositories.adaptive_learning_repository import DurableAdaptiveLearningRepository
+
+
+@pytest.fixture(autouse=True)
+def adaptive_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    monkeypatch.setattr(settings, "log_directory", tmp_path / "logs")
+    monkeypatch.setattr(settings, "cache_directory", tmp_path / "cache")
+    monkeypatch.setattr(settings, "thumbnail_directory", tmp_path / "cache" / "thumbnails")
+    monkeypatch.setattr(settings, "embedding_directory", tmp_path / "cache" / "embeddings")
+    monkeypatch.setattr(settings, "knowledge_directory", tmp_path / "knowledge")
+    monkeypatch.setattr(settings, "models_directory", tmp_path / "models")
+    monkeypatch.setattr(settings, "datasets_directory", tmp_path / "datasets")
+    monkeypatch.setattr(settings, "max_background_workers", 2)
+
+    database_manager._engine = None
+    database_manager._session_factory = None
+    database_manager._initialized = False
+    database_manager.__init__()
+    DurableAdaptiveLearningRepository.reset_state()
 
 
 def _wait_for(condition, *, timeout: float = 2.0) -> None:
@@ -124,6 +148,41 @@ def test_rollback() -> None:
     assert rolled.success is True
     assert profile.accepted_matches == 1
     assert profile.rejected_matches == 0
+
+
+def test_profiles_uncertainty_and_rollback_survive_engine_restart() -> None:
+    first = AdaptiveLearningEngine()
+    first.ingest_evidence(
+        _evidence(
+            source=AdaptiveLearningSource.APPROVED_REVIEW,
+            character_id="char:restart",
+            series_id="series:restart",
+            confidence=0.91,
+            accepted=True,
+        )
+    )
+    first.ingest_evidence(
+        _evidence(
+            source=AdaptiveLearningSource.REJECTED_REVIEW,
+            character_id="char:restart",
+            series_id="series:restart",
+            confidence=0.15,
+            rejected=True,
+        )
+    )
+
+    restarted = AdaptiveLearningEngine()
+    profile = restarted.profile_for(canonical_character_id="char:restart", canonical_series_id="series:restart")
+    assert profile.accepted_matches == 1
+    assert profile.rejected_matches == 1
+    assert len(restarted.active_learning_queue()) == 2
+
+    assert restarted.rollback().success is True
+    recovered = AdaptiveLearningEngine()
+    profile = recovered.profile_for(canonical_character_id="char:restart", canonical_series_id="series:restart")
+    assert profile.accepted_matches == 1
+    assert profile.rejected_matches == 0
+    assert len(recovered.active_learning_queue()) == 1
 
 
 def test_checkpointing_cancellation_and_resume() -> None:

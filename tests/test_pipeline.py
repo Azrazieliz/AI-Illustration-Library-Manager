@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from engine.config import settings
+from engine.database.database import database_manager
 from engine.pipeline import PipelineJob, PipelineJobStatus, QueueManager, QueueType
 
 
-def test_enqueue_and_dequeue() -> None:
+@pytest.fixture()
+def pipeline_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "workspace", tmp_path)
+    monkeypatch.setattr(settings, "database_directory", Path("database"))
+    database_manager._engine = None
+    database_manager._session_factory = None
+    database_manager._initialized = False
+    database_manager.__init__()
+
+
+def test_enqueue_and_dequeue(pipeline_env: None) -> None:
     manager = QueueManager()
     job = PipelineJob(source_path="/tmp/image.jpg", queue_type=QueueType.DISCOVERY)
 
@@ -14,7 +30,7 @@ def test_enqueue_and_dequeue() -> None:
     assert dequeued.source_path == "/tmp/image.jpg"
 
 
-def test_priority_and_pause_resume() -> None:
+def test_priority_and_pause_resume(pipeline_env: None) -> None:
     manager = QueueManager()
     low = PipelineJob(source_path="low.jpg", queue_type=QueueType.DISCOVERY, priority=0)
     high = PipelineJob(source_path="high.jpg", queue_type=QueueType.DISCOVERY, priority=10)
@@ -30,7 +46,7 @@ def test_priority_and_pause_resume() -> None:
     assert dequeued.source_path == "high.jpg"
 
 
-def test_cancel_and_retry() -> None:
+def test_cancel_and_retry(pipeline_env: None) -> None:
     manager = QueueManager()
     job = PipelineJob(source_path="retry.jpg", queue_type=QueueType.DISCOVERY)
 
@@ -43,7 +59,7 @@ def test_cancel_and_retry() -> None:
     assert retried.status == PipelineJobStatus.PENDING
 
 
-def test_scanner_service_enqueues_discovery_jobs(tmp_path) -> None:
+def test_scanner_service_enqueues_discovery_jobs(pipeline_env: None, tmp_path) -> None:
     from pathlib import Path
 
     from engine.scanner.scanner_service import ScannerService
@@ -55,7 +71,7 @@ def test_scanner_service_enqueues_discovery_jobs(tmp_path) -> None:
     assert queued.source_path == str(tmp_path / "scan.jpg")
 
 
-def test_scanner_scan_enqueues_discovery_jobs(tmp_path) -> None:
+def test_scanner_scan_enqueues_discovery_jobs(pipeline_env: None, tmp_path) -> None:
     from engine.scanner.scanner_service import ScannerService
 
     service = ScannerService()
@@ -68,3 +84,25 @@ def test_scanner_scan_enqueues_discovery_jobs(tmp_path) -> None:
     queued = service.queue_manager.dequeue(QueueType.DISCOVERY)
     assert queued is not None
     assert queued.source_path == str(image_path)
+
+
+def test_recovers_unfinished_job_with_original_identity_and_payload(pipeline_env: None) -> None:
+    original = QueueManager()
+    job = PipelineJob(
+        source_path="pending.jpg",
+        queue_type=QueueType.SEARCH,
+        priority=4,
+        metadata={"stage": "knowledge_graph", "image_id": 42},
+        max_retries=3,
+    )
+    original.enqueue(QueueType.SEARCH, job)
+
+    recovered = QueueManager(recover_unfinished=True)
+    restored = recovered.dequeue(QueueType.SEARCH)
+
+    assert restored is not None
+    assert restored.id == job.id
+    assert restored.source_path == "pending.jpg"
+    assert restored.metadata == {"stage": "knowledge_graph", "image_id": 42}
+    assert restored.priority == 4
+    assert restored.max_retries == 3

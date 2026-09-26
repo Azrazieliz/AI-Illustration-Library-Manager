@@ -8,15 +8,15 @@ import pytest
 from engine.config import settings
 from engine.database.database import database_manager
 from engine.dataset import DatasetService
-from engine.embeddings import EmbeddingService
+from engine.embeddings import EmbeddingService, MockProvider
 from engine.export import ExportCheckpoint, ExportEngine, ExportFormatType, ExportOptions, ExportService
 from engine.knowledge_graph import KnowledgeGraphService
 from engine.pipeline import PipelineJob, QueueManager, QueueType
-from engine.recognition import RecognitionService
+from engine.recognition import MockRecognitionProvider, RecognitionService
 from engine.repositories.export_repository import ExportRepository
 from engine.repositories.image_repository import ImageRepository
 from engine.search import SearchService
-from engine.tagging import TaggingService
+from engine.tagging import RuleBasedTaggingBackend, TaggingEngine, TaggingService
 
 
 @pytest.fixture()
@@ -37,8 +37,7 @@ def export_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database_manager._initialized = False
     database_manager.__init__()
 
-    ExportRepository._manifest_store = {}
-    ExportRepository._provenance_store = {}
+    ExportRepository.reset_state()
 
 
 def _register_image(path: Path) -> int:
@@ -76,11 +75,14 @@ def _build_export_job(
 ) -> PipelineJob:
     _register_image(path)
 
-    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    embedding_service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
     embedding_job = PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
     assert embedding_service.process_embedding_job(embedding_job) is not None
 
-    recognition_service = RecognitionService(queue_manager=queue_manager)
+    recognition_service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     recognition_job = queue_manager.dequeue(QueueType.RECOGNITION)
     assert recognition_job is not None
     assert recognition_service.process_recognition_job(recognition_job) is not None
@@ -94,7 +96,10 @@ def _build_export_job(
     assert kg_service.process_knowledge_graph_job(kg_job) is not None
 
     tagging_job = _dequeue_search_job(queue_manager, expected_stage="tagging")
-    tagging_service = TaggingService(queue_manager=queue_manager)
+    tagging_service = TaggingService(
+        queue_manager=queue_manager,
+        engine=TaggingEngine(backend=RuleBasedTaggingBackend()),
+    )
     assert tagging_service.process_tagging_job(tagging_job) is not None
 
     dataset_job = _dequeue_search_job(queue_manager, expected_stage="dataset")
@@ -289,6 +294,19 @@ def test_repository_persistence(export_env: None, tmp_path: Path) -> None:
     provenance = repo.get_export_provenance(format_type=ExportFormatType.FLUX, image_id=result.image_id)
     assert manifest != {}
     assert len(provenance) > 0
+
+
+def test_completed_export_is_detected_after_engine_restart(export_env: None, tmp_path: Path) -> None:
+    queue_manager = QueueManager()
+    path = tmp_path / "restart__persist.jpg"
+    path.write_bytes(b"fake")
+    job = _build_export_job(queue_manager, path)
+
+    first = ExportService(queue_manager=queue_manager).process_export_job(job)
+    restarted = ExportService(queue_manager=QueueManager()).process_export_job(job)
+
+    assert first is not None
+    assert restarted is None
 
 
 def test_thread_safety(export_env: None, tmp_path: Path) -> None:

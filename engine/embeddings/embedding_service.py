@@ -5,6 +5,7 @@ from pathlib import Path
 from engine.embeddings.embedding_engine import EmbeddingEngine
 from engine.embeddings.embedding_models import EmbeddingCheckpoint, EmbeddingResult
 from engine.embeddings.embedding_provider import EmbeddingProvider, get_provider
+from engine.config import settings
 from engine.pipeline import PipelineJob, QueueManager, QueueType
 
 
@@ -22,17 +23,23 @@ class EmbeddingService:
         queue_manager: QueueManager | None = None,
         engine: EmbeddingEngine | None = None,
         provider: EmbeddingProvider | None = None,
+        publish_recognition: bool = True,
     ) -> None:
         self.queue_manager = queue_manager or QueueManager()
 
         if engine is None:
             if provider is None:
-                provider = get_provider(provider_type="mock", dimensions=512)
-            provider.initialize()
+                provider = get_provider(
+                    provider_type=settings.embedding_provider,
+                    model_name=settings.embedding_model_name,
+                    device=settings.embedding_device,
+                )
             engine = EmbeddingEngine(provider=provider, callback=self._handle_event)
 
         self.engine = engine
         self.provider = provider or engine.provider
+        self.publish_recognition = publish_recognition
+        self._initialized = False
 
     # ------------------------------------------------------------------ #
     # Pipeline integration                                                 #
@@ -53,9 +60,10 @@ class EmbeddingService:
         if not job.source_path:
             return None
 
+        self._ensure_provider_initialized()
         path = Path(job.source_path)
         result = self.engine.process_path(path, checkpoint=checkpoint)
-        if result is not None:
+        if result is not None and self.publish_recognition:
             self._publish_recognition_job(job, result)
         return result
 
@@ -95,5 +103,9 @@ class EmbeddingService:
 
     def _handle_event(self, event: object) -> None:
         """Handle events from the engine."""
-        # Events can be logged or dispatched to an event bus here
-        pass
+        return None
+
+    def _ensure_provider_initialized(self) -> None:
+        if not self._initialized:
+            self.provider.initialize()
+            self._initialized = True

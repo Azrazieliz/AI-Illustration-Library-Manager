@@ -13,8 +13,8 @@ from engine.repositories.base_repository import BaseRepository
 from engine.repositories.dataset_repository import DatasetRepository
 
 
-class CollectionRepository(BaseRepository[Image]):
-    """Thread-safe repository for collection hierarchy and image membership."""
+class InMemoryCollectionRepository(BaseRepository[Image]):
+    """Explicit in-memory adapter retained for isolated tests and injected experiments."""
 
     _collections: dict[int, CollectionRecord] = {}
     _next_id: int = 1
@@ -408,3 +408,6 @@ class CollectionRepository(BaseRepository[Image]):
             f"{key}:{collection.metadata[key]}" for key in sorted(collection.metadata.keys())
         )
         return f"{collection.kind.value}:{collection.name.strip().lower()}:{image_signature}:{metadata_signature}"
+
+
+from engine.repositories.collection_repository_durable import DurableCollectionRepository as CollectionRepository

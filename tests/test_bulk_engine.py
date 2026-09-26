@@ -113,6 +113,23 @@ def test_rollback(bulk_env: None, tmp_path: Path) -> None:
     assert moved_path is not None and not moved_path.exists()
 
 
+def test_batch_and_rollback_records_survive_engine_restart(bulk_env: None, tmp_path: Path) -> None:
+    image_id = _register_image(tmp_path / "source" / "persistent.png")
+    destination = tmp_path / "persistent-destination"
+    first = _make_engine()
+    applied = first.move_images([image_id], destination)
+
+    second = _make_engine()
+    restored_batch = second.repository.get_batch(applied.batch_id)
+
+    assert restored_batch is not None
+    assert restored_batch.status is BulkBatchStatus.COMPLETED
+    assert len(restored_batch.rollback_records) == 1
+    rollback = second.rollback_last_batch()
+    assert rollback is not None
+    assert (tmp_path / "source" / "persistent.png").exists()
+
+
 def test_dry_run(bulk_env: None, tmp_path: Path) -> None:
     image_id = _register_image(tmp_path / "source" / "dry.png")
     destination = tmp_path / "dry-run"
@@ -286,3 +303,26 @@ def test_review_approval_and_rejection(bulk_env: None, tmp_path: Path) -> None:
     assert reject_result.succeeded == 1
     assert review_repo.get_review_item(approve.review_id).status.value == "approved"
     assert review_repo.get_review_item(reject.review_id).status.value == "rejected"
+
+
+def test_review_rollback_restores_durable_queue_state(bulk_env: None, tmp_path: Path) -> None:
+    review_repo = ReviewRepository()
+    review = review_repo.create_review_item(
+        image_id=1,
+        source_path=tmp_path / "review-rollback.png",
+        operation_type="rename",
+        confidence=0.8,
+        proposed_value="After",
+        current_value="Before",
+    )
+    first = _make_engine()
+    applied = first.approve_reviews([review.review_id], reviewer="alice", reason="approved")
+    assert applied.succeeded == 1
+
+    restored = _make_engine().rollback_last_batch()
+
+    assert restored is not None
+    updated = review_repo.get_review_item(review.review_id)
+    assert updated is not None
+    assert updated.status.value == "pending"
+    assert updated.current_value == "Before"

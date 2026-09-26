@@ -66,13 +66,18 @@ class KnowledgeBaseService:
             payload = metadata.get("payload")
             if payload is None and job.source_path:
                 payload = Path(job.source_path).read_text(encoding="utf-8")
-            dataset = self.engine.import_dataset(payload, format=format_value, merge=bool(metadata.get("merge", False)))
+            imported = self.engine.import_dataset(payload, format=format_value, merge=bool(metadata.get("merge", False)))
+            datasets = imported if isinstance(imported, list) else [imported]
             return KnowledgeBaseOperationResult(
                 action=KnowledgeBaseTaskType.IMPORT,
                 success=True,
                 message="Imported knowledge-base dataset.",
-                dataset_id=dataset.dataset_id,
-                payload={"dataset": dataset.name},
+                dataset_id=datasets[0].dataset_id,
+                payload={
+                    "datasets": [dataset.name for dataset in datasets],
+                    "dataset_ids": [dataset.dataset_id for dataset in datasets],
+                },
+                processed=len(datasets),
             )
         if action == "export":
             dataset_id = int(metadata["dataset_id"])

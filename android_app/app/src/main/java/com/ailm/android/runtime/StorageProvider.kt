@@ -23,7 +23,7 @@ interface StorageProvider {
     fun listChildren(folderUri: String): List<StorageNode>
     fun openInputStream(uri: String): InputStream?
     fun exists(uri: String): Boolean
-    fun rename(uri: String, newName: String): StorageWriteResult
+    fun rename(uri: String, newName: String, parentUri: String = ""): StorageWriteResult
     fun createFolder(parentUri: String, folderName: String): StorageWriteResult
     fun delete(uri: String): StorageWriteResult
     fun copy(sourceUri: String, targetFolderUri: String, preferredName: String? = null): StorageWriteResult

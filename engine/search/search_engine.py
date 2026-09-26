@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Callable, Iterable
+
+import numpy as np
 
 from engine.logging import get_logger
 from engine.search.search_events import SearchCompleted, SearchFailed, SearchIndexed, SearchSkipped, SearchStarted
@@ -32,7 +33,7 @@ class SearchEngine:
         max_workers: int = 4,
     ) -> None:
         self.repository = repository or SearchRepository()
-        self.index = index or SearchIndex()
+        self.index = index or SearchIndex(repository=self.repository)
         self.callback = callback
         self.max_workers = max_workers
         self.logger = get_logger(self.__class__.__name__)
@@ -180,23 +181,17 @@ class SearchEngine:
             return None
 
     def _load_vector(self, vector_path: str) -> list[float]:
-        """Load vector from storage path.
-
-        Current embedding worker stores placeholder paths only, so this method
-        deterministically reconstructs a stable mock vector from the path.
-        """
+        """Load one persisted embedding artifact for an explicit query vector."""
+        path = Path(vector_path)
+        if not path.is_file():
+            raise SearchIndexingError(f"Embedding vector artifact does not exist: {path}")
         try:
-            payload = json.dumps({"vector_path": vector_path})
-            seed = payload.encode("utf-8")
-            vector: list[float] = []
-            # Build a deterministic 128-d vector from bytes.
-            while len(vector) < 128:
-                for value in seed:
-                    vector.append(float(value) / 255.0)
-                    if len(vector) >= 128:
-                        break
-            return vector
-        except Exception as e:
+            vector = np.load(path, allow_pickle=False)
+            values = np.asarray(vector, dtype=np.float32).reshape(-1)
+            if values.size == 0 or not np.isfinite(values).all():
+                raise ValueError("vector is empty or contains non-finite values")
+            return values.tolist()
+        except (OSError, ValueError) as e:
             raise SearchIndexingError(f"Could not load vector: {e}") from e
 
     def _emit(self, event: object) -> None:

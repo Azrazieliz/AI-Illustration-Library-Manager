@@ -17,16 +17,16 @@ from engine.collections import (
 from engine.config import settings
 from engine.database.database import database_manager
 from engine.dataset import DatasetService
-from engine.embeddings import EmbeddingService
+from engine.embeddings import EmbeddingService, MockProvider
 from engine.export import ExportService
 from engine.knowledge_graph import KnowledgeGraphService
 from engine.pipeline import PipelineJob, QueueManager, QueueType
-from engine.recognition import RecognitionService
+from engine.recognition import MockRecognitionProvider, RecognitionService
 from engine.repositories.collection_repository import CollectionRepository
 from engine.repositories.export_repository import ExportRepository
 from engine.repositories.image_repository import ImageRepository
 from engine.search import SearchService
-from engine.tagging import TaggingService
+from engine.tagging import RuleBasedTaggingBackend, TaggingEngine, TaggingService
 
 
 @pytest.fixture()
@@ -47,8 +47,7 @@ def collection_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database_manager._initialized = False
     database_manager.__init__()
 
-    ExportRepository._manifest_store = {}
-    ExportRepository._provenance_store = {}
+    ExportRepository.reset_state()
     CollectionRepository.reset_state()
 
 
@@ -87,11 +86,14 @@ def _build_collection_job(
 ) -> PipelineJob:
     _register_image(path)
 
-    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    embedding_service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
     embedding_job = PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
     assert embedding_service.process_embedding_job(embedding_job) is not None
 
-    recognition_service = RecognitionService(queue_manager=queue_manager)
+    recognition_service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     recognition_job = queue_manager.dequeue(QueueType.RECOGNITION)
     assert recognition_job is not None
     assert recognition_service.process_recognition_job(recognition_job) is not None
@@ -105,7 +107,10 @@ def _build_collection_job(
     assert kg_service.process_knowledge_graph_job(kg_job) is not None
 
     tagging_job = _dequeue_search_job(queue_manager, expected_stage="tagging")
-    tagging_service = TaggingService(queue_manager=queue_manager)
+    tagging_service = TaggingService(
+        queue_manager=queue_manager,
+        engine=TaggingEngine(backend=RuleBasedTaggingBackend()),
+    )
     assert tagging_service.process_tagging_job(tagging_job) is not None
 
     dataset_job = _dequeue_search_job(queue_manager, expected_stage="dataset")
@@ -196,6 +201,24 @@ def test_nested_collections_hierarchy(collection_env: None) -> None:
     assert len(tree[0].children) == 1
     assert tree[0].children[0].name == "Child"
     assert len(tree[0].children[0].children) == 1
+
+
+def test_collection_hierarchy_and_membership_survive_service_restart(collection_env: None, tmp_path: Path) -> None:
+    image_id = _register_image(tmp_path / "restart" / "collection.png")
+    first_service = CollectionService()
+    root = first_service.create_collection(name="Persistent Root")
+    child = first_service.create_collection(name="Persistent Child", parent_id=root.collection_id)
+    assert first_service.engine.add_image(child.collection_id, image_id).changed is True
+
+    restarted_service = CollectionService()
+    tree = restarted_service.hierarchy()
+    summary = restarted_service.summary(child.collection_id)
+
+    assert [item.name for item in tree] == ["Persistent Root"]
+    assert tree[0].children[0].name == "Persistent Child"
+    assert summary is not None
+    assert summary.parent_id == root.collection_id
+    assert summary.image_count == 1
 
 
 def test_collection_metadata_statistics_thumbnail(collection_env: None, tmp_path: Path) -> None:

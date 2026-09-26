@@ -14,8 +14,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +36,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -61,14 +67,23 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
+import com.ailm.android.R
+import com.ailm.android.runtime.FolderUriUtils
+import com.ailm.android.ui.components.AsterionEmptyState
+import com.ailm.android.ui.components.AsterionProgressCard
+import com.ailm.android.ui.components.AsterionStatusNotice
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -126,6 +141,62 @@ fun ScreenScaffold(
         }
     }
 
+    var selectedModelDocument by remember { mutableStateOf<Uri?>(null) }
+    var selectedModelPackageTree by remember { mutableStateOf<Uri?>(null) }
+    var selectedFusionDocument by remember { mutableStateOf<Uri?>(null) }
+    var selectedKnowledgeDocument by remember { mutableStateOf<Uri?>(null) }
+    var selectedKnowledgePackDocuments by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var replacingKnowledgePackName by remember { mutableStateOf("") }
+
+    val modelDocumentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            selectedModelDocument = uri
+            selectedModelPackageTree = null
+        }
+    }
+
+    val modelPackagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null && persistAndVerifyTreePermission(context, uri)) {
+            selectedModelPackageTree = uri
+            selectedModelDocument = null
+        }
+    }
+
+    val fusionDocumentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            selectedFusionDocument = uri
+        }
+    }
+
+    val knowledgeDocumentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            selectedKnowledgeDocument = uri
+        }
+    }
+
+    val knowledgePackDocumentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        selectedKnowledgePackDocuments = uris
+    }
+
+    val knowledgePackReplacementPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null && replacingKnowledgePackName.isNotBlank()) {
+            appViewModel.replaceKnowledgePackDocument(replacingKnowledgePackName, uri)
+        }
+        replacingKnowledgePackName = ""
+    }
+
     LaunchedEffect(Unit) {
         val persistedUri = prefs.getString(PREF_LIBRARY_TREE_URI, null).orEmpty()
         val restoredUri = if (persistedUri.isNotBlank() && hasPersistedTreePermission(context, persistedUri)) {
@@ -144,12 +215,25 @@ fun ScreenScaffold(
 
     val chooseFolder: () -> Unit = { folderPickerLauncher.launch(null) }
     val addFolderToManager: () -> Unit = { folderManagerAddLauncher.launch(null) }
+    val chooseModelDocument: () -> Unit = {
+        modelDocumentPickerLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+    }
+    val chooseFusionDocument: () -> Unit = {
+        fusionDocumentPickerLauncher.launch(arrayOf("application/json", "text/*"))
+    }
+    val chooseKnowledgeDocument: () -> Unit = {
+        knowledgeDocumentPickerLauncher.launch(arrayOf("application/json", "text/*"))
+    }
+    val chooseKnowledgePacks: () -> Unit = {
+        knowledgePackDocumentPickerLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/*"))
+    }
+    val chooseKnowledgePackReplacement: (String) -> Unit = { filename ->
+        replacingKnowledgePackName = filename
+        knowledgePackReplacementPickerLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/*"))
+    }
 
     when (destination) {
-        AppDestination.Splash -> SplashScreen(
-            state = state,
-            onNavigate = onNavigate,
-        )
+        AppDestination.Splash -> NativeSplashScreen()
 
         AppDestination.FirstLaunchWizard -> FirstLaunchScreen(
             state = state,
@@ -164,7 +248,7 @@ fun ScreenScaffold(
 
         AppDestination.Dashboard -> DashboardScreen(
             state = state,
-            onRefresh = appViewModel::refreshDashboard,
+            onRefresh = appViewModel::rescanEnabledFolders,
             onStartScan = appViewModel::startScan,
             onPauseScan = appViewModel::pauseScan,
             onResumeScan = appViewModel::resumeScan,
@@ -178,16 +262,14 @@ fun ScreenScaffold(
             onSearchByImageId = appViewModel::searchByImageId,
             onAdvancedSearch = appViewModel::runAdvancedSearch,
             onClearResults = appViewModel::clearSearchResults,
-            onPreviewFileOperations = appViewModel::previewFileOperations,
             onExecuteFileOperations = appViewModel::executeFileOperations,
             onExecuteFileOperationSequence = appViewModel::executeFileOperationSequence,
             onUndoFileOperations = appViewModel::undoLastFileOperations,
-            onOpenImage = {
-                appViewModel.selectImage(it)
+            onOpenImage = { item, visibleList ->
+                appViewModel.setActiveViewerContext(visibleList)
+                appViewModel.selectImage(item)
                 onNavigate(AppDestination.ImageViewer)
             },
-            onSetFavorite = appViewModel::setImageFavorite,
-            onSetRating = appViewModel::setImageRating,
             onNavigate = onNavigate,
         )
 
@@ -207,19 +289,20 @@ fun ScreenScaffold(
         AppDestination.ImageViewer -> ImageViewerScreen(
             state = state,
             imageUrl = appViewModel.selectedImageUrl(),
-            onSetFavorite = appViewModel::setImageFavorite,
-            onSetRating = appViewModel::setImageRating,
             onSetTags = appViewModel::setImageTags,
+            onSelectImage = appViewModel::selectImage,
             onNavigate = onNavigate,
         )
 
-        AppDestination.RecognitionResults -> DataOverviewScreen(
-            title = "Recognition Results",
-            lines = listOf(
-                "Review queue items: ${state.reviewQueue.size}",
-                "Knowledge packs: ${state.knowledgePacks.size}",
-                "Downloads tracked: ${state.downloads.size}",
-            ),
+        AppDestination.RecognitionResults -> RecognitionWorkbenchScreen(
+            state = state,
+            onRefreshAi = appViewModel::refreshLocalAiState,
+            onDetectHardware = appViewModel::detectAiHardwareProfile,
+            onValidateInfrastructure = appViewModel::validateLocalAiInfrastructure,
+            onRunPipeline = appViewModel::runSelectedImageAiPipeline,
+            onRunMultiStagePipeline = appViewModel::runSelectedImageMultiStagePipeline,
+            onRunBatchPipeline = { taskType -> appViewModel.runBatchAiPipelineForVisibleImages(taskType) },
+            onEnqueueTask = appViewModel::enqueueSelectedImageAiTask,
             onNavigate = onNavigate,
         )
 
@@ -240,12 +323,12 @@ fun ScreenScaffold(
             onAdvancedSearch = appViewModel::runAdvancedSearch,
             onSemanticSearch = appViewModel::runSemanticSearch,
             onClearResults = appViewModel::clearSearchResults,
-            onOpenImage = {
-                appViewModel.selectImage(it)
+            onOpenImage = { item ->
+                // For search screens, the visible list is `state.searchResults` already
+                appViewModel.setActiveViewerContext(state.searchResults.ifEmpty { state.images })
+                appViewModel.selectImage(item)
                 onNavigate(AppDestination.ImageViewer)
             },
-            onSetFavorite = appViewModel::setImageFavorite,
-            onSetRating = appViewModel::setImageRating,
             onNavigate = onNavigate,
         )
 
@@ -258,12 +341,11 @@ fun ScreenScaffold(
             onAdvancedSearch = appViewModel::runAdvancedSearch,
             onSemanticSearch = appViewModel::runSemanticSearch,
             onClearResults = appViewModel::clearSearchResults,
-            onOpenImage = {
-                appViewModel.selectImage(it)
+            onOpenImage = { item ->
+                appViewModel.setActiveViewerContext(state.searchResults.ifEmpty { state.images })
+                appViewModel.selectImage(item)
                 onNavigate(AppDestination.ImageViewer)
             },
-            onSetFavorite = appViewModel::setImageFavorite,
-            onSetRating = appViewModel::setImageRating,
             onNavigate = onNavigate,
         )
 
@@ -276,36 +358,61 @@ fun ScreenScaffold(
             onAdvancedSearch = appViewModel::runAdvancedSearch,
             onSemanticSearch = appViewModel::runSemanticSearch,
             onClearResults = appViewModel::clearSearchResults,
-            onOpenImage = {
-                appViewModel.selectImage(it)
+            onOpenImage = { item ->
+                appViewModel.setActiveViewerContext(state.searchResults.ifEmpty { state.images })
+                appViewModel.selectImage(item)
                 onNavigate(AppDestination.ImageViewer)
             },
-            onSetFavorite = appViewModel::setImageFavorite,
-            onSetRating = appViewModel::setImageRating,
             onNavigate = onNavigate,
         )
 
-        AppDestination.CharacterPage -> DataOverviewScreen(
-            title = "Character Page",
-            lines = state.tags.take(25).ifEmpty { listOf("No tags available yet.") },
+        AppDestination.CharacterPage -> AiTaskFilterScreen(
+            title = "Character Recognition",
+            taskTypeFilter = "character_recognition",
+            tasks = state.aiTasks,
             onNavigate = onNavigate,
         )
 
-        AppDestination.SeriesPage -> DataOverviewScreen(
-            title = "Series Page",
-            lines = state.collections.take(25).map { it["name"]?.toString().orEmpty().ifBlank { it.toString() } }
-                .ifEmpty { listOf("No collection metadata available yet.") },
+        AppDestination.SeriesPage -> AiTaskFilterScreen(
+            title = "Series Recognition",
+            taskTypeFilter = "series_recognition",
+            tasks = state.aiTasks,
             onNavigate = onNavigate,
         )
 
-        AppDestination.Collections -> MapListScreen(
-            title = "Collections",
-            items = state.collections,
+        AppDestination.Collections -> CollectionsScreen(
+            collections = state.collections,
+            onOpenCollection = { folderUri ->
+                if (folderUri.isNotBlank()) {
+                    appViewModel.runAdvancedSearch(
+                        mapOf(
+                            "collection" to folderUri,
+                            "sort_by" to "date_added",
+                            "sort_direction" to "desc",
+                            "page" to 1,
+                            "page_size" to 0,
+                        ),
+                    )
+                    onNavigate(AppDestination.Search)
+                }
+            },
             onNavigate = onNavigate,
         )
 
         AppDestination.Tags -> TagScreen(
             tags = state.tags,
+            onSearchTag = { tag ->
+                appViewModel.runAdvancedSearch(
+                    mapOf(
+                        "tags" to listOf(tag),
+                        "sort_by" to "date_added",
+                        "sort_direction" to "desc",
+                        "page" to 1,
+                        "page_size" to 0,
+                    ),
+                )
+                onNavigate(AppDestination.Search)
+            },
             onNavigate = onNavigate,
         )
 
@@ -318,9 +425,22 @@ fun ScreenScaffold(
             onNavigate = onNavigate,
         )
 
-        AppDestination.KnowledgePacks -> MapListScreen(
-            title = "Knowledge Packs",
-            items = state.knowledgePacks,
+        AppDestination.KnowledgePacks -> KnowledgePackManagerScreen(
+            state = state,
+            selectedPackNames = selectedKnowledgePackDocuments.map { uri -> uri.lastPathSegment.orEmpty() },
+            onChoosePacks = chooseKnowledgePacks,
+            onImportPacks = { appViewModel.importKnowledgePackDocuments(selectedKnowledgePackDocuments) },
+            onPreviewPack = appViewModel::previewKnowledgePack,
+            onReplacePack = chooseKnowledgePackReplacement,
+            onRemovePack = appViewModel::removeKnowledgePack,
+            onNavigate = onNavigate,
+        )
+
+        AppDestination.FusionDatabase -> FusionDatabaseScreen(
+            state = state,
+            onRefresh = appViewModel::refreshFusionManagement,
+            onExport = appViewModel::exportFusionManagement,
+            onRebuild = appViewModel::rebuildFusionManagement,
             onNavigate = onNavigate,
         )
 
@@ -330,22 +450,92 @@ fun ScreenScaffold(
             onNavigate = onNavigate,
         )
 
-        AppDestination.Automation -> DataOverviewScreen(
-            title = "Automation",
-            lines = listOf(
-                "Scan status: ${state.scanStatus}",
-                "Scan progress: ${state.scanProgress.toInt()}%",
-                "Discovered images in current scan: ${state.scanDiscoveredImages}",
-            ),
+        AppDestination.Automation -> AiAutomationScreen(
+            state = state,
+            onRefreshAi = appViewModel::refreshLocalAiState,
+            onPauseQueue = appViewModel::pauseAiQueue,
+            onResumeQueue = appViewModel::resumeAiQueue,
+            onTaskAction = appViewModel::controlAiTask,
             onNavigate = onNavigate,
         )
 
-        AppDestination.PluginManager -> DataOverviewScreen(
-            title = "Plugin Manager",
-            lines = listOf(
-                "Plugins are surfaced by the standalone runtime.",
-                "Standalone runtime is active for Android.",
-            ),
+        AppDestination.PluginManager -> AiModelManagerScreen(
+            state = state,
+            onRefreshAi = appViewModel::refreshLocalAiState,
+            onDetectHardware = appViewModel::detectAiHardwareProfile,
+            onValidateInfrastructure = appViewModel::validateLocalAiInfrastructure,
+            onDetectModelUpdates = appViewModel::detectAiModelUpdates,
+            onPruneCache = appViewModel::pruneAiCache,
+            onVerifyModel = appViewModel::verifyInstalledAiModel,
+            onRemoveModel = appViewModel::removeInstalledAiModel,
+            onUpdateAiSetting = appViewModel::updateAiSetting,
+            onRegisterAvailableModel = appViewModel::registerAvailableAiModel,
+            selectedModelDocumentName = selectedModelDocument?.lastPathSegment
+                ?: selectedModelPackageTree?.lastPathSegment.orEmpty(),
+            onChooseModelDocument = chooseModelDocument,
+            onChooseModelPackageDirectory = { modelPackagePickerLauncher.launch(null) },
+            onImportModelDocument = { form ->
+                selectedModelDocument?.let { uri ->
+                    appViewModel.importLocalAiModelDocument(context, uri, form)
+                } ?: selectedModelPackageTree?.let { uri ->
+                    appViewModel.importLocalAiModelPackageTree(context, uri, form)
+                }
+            },
+            onRegisterModelDownload = appViewModel::registerAiModelDownload,
+            onSetActiveModel = appViewModel::setActiveAiModel,
+            onClearActiveModel = appViewModel::clearActiveAiModel,
+            selectedKnowledgeDocumentName = selectedKnowledgeDocument?.lastPathSegment.orEmpty(),
+            onChooseKnowledgeDocument = chooseKnowledgeDocument,
+            onPreviewKnowledgeDocument = { form ->
+                selectedKnowledgeDocument?.let { uri ->
+                    appViewModel.previewKnowledgePackDocument(context, uri, form)
+                }
+            },
+            onValidateKnowledgeDocument = { form ->
+                selectedKnowledgeDocument?.let { uri ->
+                    appViewModel.validateKnowledgePackDocument(context, uri, form)
+                }
+            },
+            onImportKnowledgeDocument = { form ->
+                selectedKnowledgeDocument?.let { uri -> appViewModel.importKnowledgePackDocuments(listOf(uri)) }
+            },
+            selectedFusionDocumentName = selectedFusionDocument?.lastPathSegment.orEmpty(),
+            onChooseFusionDocument = chooseFusionDocument,
+            onPreviewFusionDocument = { format, replaceExisting ->
+                selectedFusionDocument?.let { uri ->
+                    appViewModel.previewExternalImportDocument(
+                        context,
+                        uri,
+                        mapOf(
+                            "source_type" to if (format == "workbook_compat") "workbook_compat" else "json",
+                            "replace_existing" to replaceExisting.toString(),
+                        ),
+                    )
+                }
+            },
+            onValidateFusionDocument = { format, replaceExisting ->
+                selectedFusionDocument?.let { uri ->
+                    appViewModel.validateExternalImportDocument(
+                        context,
+                        uri,
+                        mapOf(
+                            "source_type" to if (format == "workbook_compat") "workbook_compat" else "json",
+                            "replace_existing" to replaceExisting.toString(),
+                        ),
+                    )
+                }
+            },
+            onImportFusionDocument = { format, replaceExisting ->
+                selectedFusionDocument?.let { uri ->
+                    appViewModel.importFusionDatabaseDocument(context, uri, format, replaceExisting)
+                }
+            },
+            onExportFusionSnapshot = appViewModel::exportFusionDatabaseSnapshot,
+            onValidateFusionDatabase = appViewModel::validateFusionDatabase,
+            onRebuildFusionDatabase = appViewModel::rebuildFusionManagement,
+            onRemoveKnowledgePack = appViewModel::removeKnowledgePack,
+            onRollbackImport = appViewModel::rollbackExternalImport,
+            onCancelImport = appViewModel::cancelExternalImport,
             onNavigate = onNavigate,
         )
 
@@ -358,12 +548,12 @@ fun ScreenScaffold(
             onNavigate = onNavigate,
         )
 
-        AppDestination.Logs -> DataOverviewScreen(
-            title = "Logs",
-            lines = listOf(
-                "Runtime errors are shown on Dashboard.",
-                "Current error: ${state.errorMessage ?: "none"}",
-            ),
+        AppDestination.Logs -> RuntimeLogsScreen(
+            state = state,
+            onRefresh = {
+                appViewModel.refreshDashboard()
+                appViewModel.refreshLocalAiState()
+            },
             onNavigate = onNavigate,
         )
 
@@ -388,15 +578,7 @@ fun ScreenScaffold(
             onNavigate = onNavigate,
         )
 
-        AppDestination.About -> DataOverviewScreen(
-            title = "About",
-            lines = listOf(
-                "AI Illustration Library Manager",
-                "Android standalone runtime edition",
-                "Version 2.0.0",
-            ),
-            onNavigate = onNavigate,
-        )
+        AppDestination.About -> AsterionAboutScreen(onNavigate)
     }
 }
 
@@ -439,32 +621,6 @@ private fun hasPersistedTreePermission(context: Context, uriText: String): Boole
 }
 
 @Composable
-private fun SplashScreen(
-    state: AppUiState,
-    onNavigate: (AppDestination) -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("AI Illustration Library Manager", style = MaterialTheme.typography.headlineMedium)
-        Text("Backend status: ${state.health["status"] ?: state.health["healthy"] ?: "unknown"}")
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = { onNavigate(AppDestination.FirstLaunchWizard) }) {
-                Text("First Launch Setup")
-            }
-            Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
-                Text("Open Dashboard")
-            }
-        }
-    }
-}
-
-@Composable
 private fun FirstLaunchScreen(
     state: AppUiState,
     onChooseFolder: () -> Unit,
@@ -492,9 +648,9 @@ private fun FirstLaunchScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Current library folder URI:")
+                Text("Current library folder:")
                 Text(
-                    text = state.selectedLibraryUri.ifBlank { "No folder selected yet." },
+                    text = state.selectedLibraryUri.displayFolderLabel("No folder selected yet."),
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -569,8 +725,6 @@ private fun DashboardScreen(
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         state.images.take(4).forEach { image ->
                             val title = image["filename"]?.toString().orEmpty().ifBlank { "Untitled image" }
-                            val favorite = image.favoriteFlag()
-                            val rating = image.ratingValue()
                             val thumb = image["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() }
                                 ?: image["file_url"]?.toString()?.takeIf { it.isNotBlank() }
 
@@ -595,17 +749,7 @@ private fun DashboardScreen(
                                     }
                                     Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
                                         Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        Text(
-                                            buildString {
-                                                if (favorite) append("Fav")
-                                                if (rating > 0) {
-                                                    if (isNotEmpty()) append(" • ")
-                                                    append("★$rating")
-                                                }
-                                                if (isEmpty()) append("—")
-                                            },
-                                            style = MaterialTheme.typography.bodySmall,
-                                        )
+                                        Text("—", style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
                             }
@@ -628,7 +772,7 @@ private fun DashboardScreen(
                 Text("Library Browser", style = MaterialTheme.typography.titleMedium)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Button(onClick = onRefresh) {
-                        Text("Refresh")
+                        Text("Refresh Folders")
                     }
                     Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) {
                         Text("Open Library")
@@ -640,14 +784,31 @@ private fun DashboardScreen(
             }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             AppDestination.entries
-                .filter { it != AppDestination.Splash }
-                .take(8)
+                .filter {
+                    it !in setOf(
+                        AppDestination.Dashboard,
+                        AppDestination.Splash,
+                        AppDestination.FirstLaunchWizard,
+                    )
+                }
                 .forEach { destination ->
                     AssistChip(onClick = { onNavigate(destination) }, label = { Text(destination.title) })
                 }
         }
+    }
+}
+
+@Composable
+private fun NativeSplashScreen() {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Image(
+            painter = painterResource(R.drawable.asterioncore_splash),
+            contentDescription = null,
+            modifier = Modifier.fillMaxWidth(),
+            contentScale = ContentScale.Fit,
+        )
     }
 }
 
@@ -667,15 +828,16 @@ private fun FolderBrowserScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Folder Browser", style = MaterialTheme.typography.headlineMedium)
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Selected folder URI")
+                Text("Selected folder")
                 Text(
-                    text = state.selectedLibraryUri.ifBlank { "No SAF folder selected." },
+                    text = state.selectedLibraryUri.displayFolderLabel("No SAF folder selected."),
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -722,7 +884,7 @@ private fun FolderBrowserScreen(
                                     modifier = Modifier.padding(10.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    Text(folderUri.ifBlank { "(empty uri)" }, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    Text(folderUri.displayFolderLabel("(no folder)"), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text("Enabled: $enabled | Last status: ${lastStatus.ifBlank { "n/a" }} | Last count: ${lastCount.ifBlank { "0" }}")
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Button(onClick = { onSetFolderEnabled(folderUri, !enabled) }, enabled = folderUri.isNotBlank()) {
@@ -755,20 +917,18 @@ private fun FolderBrowserScreen(
 }
 
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
+@Suppress("EXPERIMENTAL_API_USAGE")
 private fun LibraryBrowserScreen(
     state: AppUiState,
     onSearchByFilename: (String) -> Unit,
     onSearchByImageId: (String) -> Unit,
     onAdvancedSearch: (Map<String, Any>) -> Unit,
     onClearResults: () -> Unit,
-    onPreviewFileOperations: (Map<String, Any>) -> Unit,
     onExecuteFileOperations: (Map<String, Any>) -> Unit,
     onExecuteFileOperationSequence: (List<Map<String, Any>>) -> Unit,
     onUndoFileOperations: () -> Unit,
-    onOpenImage: (Map<String, Any>) -> Unit,
-    onSetFavorite: (Int, Boolean) -> Unit,
-    onSetRating: (Int, Int) -> Unit,
+    onOpenImage: (Map<String, Any>, List<Map<String, Any>>) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -779,8 +939,6 @@ private fun LibraryBrowserScreen(
     var showSearch by rememberSaveable { mutableStateOf(true) }
     var showSort by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
-    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
-    var minRatingText by rememberSaveable { mutableStateOf("") }
     var tagsQuery by rememberSaveable { mutableStateOf("") }
     var minWidthText by rememberSaveable { mutableStateOf("") }
     var minHeightText by rememberSaveable { mutableStateOf("") }
@@ -817,8 +975,6 @@ private fun LibraryBrowserScreen(
         fullTextQuery,
         sortBy,
         sortDirection,
-        favoritesOnly,
-        minRatingText,
         tagsQuery,
         minWidthText,
         minHeightText,
@@ -840,14 +996,12 @@ private fun LibraryBrowserScreen(
             "full_text" to fullTextQuery,
             "sort_by" to sortBy,
             "sort_direction" to sortDirection,
-            "favorites_only" to favoritesOnly,
             "include_hidden" to includeHidden,
             "missing_only" to missingOnly,
             "include_inactive" to missingOnly,
             "page" to 1,
             "page_size" to 0,
         )
-        minRatingText.toIntOrNull()?.let { payload["min_rating"] = it }
         minWidthText.toIntOrNull()?.let { payload["min_width"] = it }
         minHeightText.toIntOrNull()?.let { payload["min_height"] = it }
         if (formatQuery.isNotBlank()) payload["file_format"] = formatQuery
@@ -865,23 +1019,34 @@ private fun LibraryBrowserScreen(
     val totalCount = if (state.totalResults > 0 || images.isEmpty()) state.totalResults else images.size
     val allFolders = state.libraryFolders.mapNotNull { it["folder_uri"]?.toString() }.distinct()
     val selectedFolderImages = if (selectedFolderUri.isBlank()) emptyList() else state.images.filter { it.folderUriValue() == selectedFolderUri }
+    val visibleList = if (selectedFolderUri.isBlank()) images else selectedFolderImages
     val selectedFolderImageIds = selectedFolderImages.mapNotNull { it.imageId() }.toSet()
+    val visibleImageIds = (if (selectedFolderUri.isBlank()) images else selectedFolderImages).mapNotNull { it.imageId() }.toSet()
+    val selectedImageFromViewerId = state.selectedImage?.imageId()
+    val selectedImageIdsForDirectOps = if (selectedImageIds.isNotEmpty()) {
+        selectedImageIds
+    } else {
+        selectedImageFromViewerId?.let { setOf(it) } ?: emptySet()
+    }
+    val selectedIdsForMoveCopy = when {
+        selectedImageIds.isNotEmpty() -> selectedImageIds
+        selectedFolderUri.isNotBlank() -> selectedFolderImageIds
+        else -> selectedImageIdsForDirectOps
+    }
 
     val selectedOperationKind = when {
-        selectedImageIds.isNotEmpty() -> "images"
+        selectedImageIdsForDirectOps.isNotEmpty() -> "images"
         selectedFolderUri.isNotBlank() -> "folder"
         else -> "none"
     }
 
     val canCreateFolder = allFolders.isNotEmpty()
-    val canRename = selectedImageIds.size == 1 || selectedFolderUri.isNotBlank() || selectedImageIds.size > 1
-    val canMove = selectedImageIds.isNotEmpty() || selectedFolderImageIds.isNotEmpty()
-    val canCopy = selectedImageIds.isNotEmpty() || selectedFolderImageIds.isNotEmpty()
-    val canDelete = selectedImageIds.isNotEmpty() || selectedFolderUri.isNotBlank()
+    val canRename = selectedImageIdsForDirectOps.isNotEmpty() || selectedFolderUri.isNotBlank()
+    val canMove = selectedIdsForMoveCopy.isNotEmpty()
+    val canCopy = selectedIdsForMoveCopy.isNotEmpty()
+    val canDelete = selectedImageIdsForDirectOps.isNotEmpty() || selectedFolderUri.isNotBlank()
 
     val activeFilterChips = buildList {
-        if (favoritesOnly) add("favorites")
-        if (minRatingText.isNotBlank()) add("rating>=${minRatingText}")
         if (tagsQuery.isNotBlank()) add("tags")
         if (minWidthText.isNotBlank() || minHeightText.isNotBlank()) add("resolution")
         if (formatQuery.isNotBlank()) add("format")
@@ -913,7 +1078,7 @@ private fun LibraryBrowserScreen(
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("File Manager", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "Selection: ${if (selectedOperationKind == "images") "${selectedImageIds.size} image(s)" else if (selectedOperationKind == "folder") "folder selected" else "none"}",
+                        "Selection: ${if (selectedOperationKind == "images") "${selectedImageIdsForDirectOps.size} image(s)" else if (selectedOperationKind == "folder") "folder selected" else "none"}",
                         style = MaterialTheme.typography.bodySmall,
                     )
 
@@ -935,8 +1100,8 @@ private fun LibraryBrowserScreen(
                         Button(
                             onClick = {
                                 when {
-                                    selectedImageIds.size > 1 -> showBatchRenameDialog = true
-                                    selectedImageIds.size == 1 -> {
+                                    selectedImageIdsForDirectOps.size > 1 -> showBatchRenameDialog = true
+                                    selectedImageIdsForDirectOps.size == 1 -> {
                                         renameImageName = ""
                                         showRenameImageDialog = true
                                     }
@@ -959,6 +1124,18 @@ private fun LibraryBrowserScreen(
                                 }
                             },
                         ) { Text(if (selectionMode) "Batch Select: ON" else "Batch Select") }
+                        AssistChip(
+                            onClick = { selectedImageIds = visibleImageIds },
+                            label = { Text("Select Visible") },
+                        )
+                        AssistChip(
+                            onClick = { selectedImageIds = emptySet() },
+                            label = { Text("Deselect All") },
+                        )
+                        AssistChip(
+                            onClick = { selectedImageIds = visibleImageIds - selectedImageIds },
+                            label = { Text("Invert Selection") },
+                        )
                         Button(onClick = onUndoFileOperations, enabled = state.fileOperationUndoAvailable && !state.fileOperationRunning) { Text("Undo Last") }
                     }
 
@@ -1005,12 +1182,10 @@ private fun LibraryBrowserScreen(
                     imageIdQuery = ""
                     fullTextQuery = ""
                     tagsQuery = ""
-                    minRatingText = ""
                     minWidthText = ""
                     minHeightText = ""
                     formatQuery = ""
                     folderQuery = ""
-                    favoritesOnly = false
                     includeHidden = false
                     missingOnly = false
                     orientationQuery = "any"
@@ -1045,8 +1220,6 @@ private fun LibraryBrowserScreen(
                             "date_modified" to "Date Modified",
                             "resolution" to "Resolution",
                             "size" to "File Size",
-                            "rating" to "Rating",
-                            "favorites" to "Favorites First",
                             "random" to "Random",
                         )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1077,12 +1250,10 @@ private fun LibraryBrowserScreen(
                     Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("Filters", style = MaterialTheme.typography.titleSmall)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AssistChip(onClick = { favoritesOnly = !favoritesOnly }, label = { Text(if (favoritesOnly) "Favorites:on" else "Favorites") })
                             AssistChip(onClick = { includeHidden = !includeHidden }, label = { Text(if (includeHidden) "Hidden:on" else "Hidden") })
                             AssistChip(onClick = { missingOnly = !missingOnly }, label = { Text(if (missingOnly) "Missing:on" else "Missing") })
                         }
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(value = minRatingText, onValueChange = { minRatingText = it }, singleLine = true, label = { Text("Min rating") })
                             OutlinedTextField(value = tagsQuery, onValueChange = { tagsQuery = it }, singleLine = true, label = { Text("Tags") })
                             OutlinedTextField(value = minWidthText, onValueChange = { minWidthText = it }, singleLine = true, label = { Text("Min width") })
                             OutlinedTextField(value = minHeightText, onValueChange = { minHeightText = it }, singleLine = true, label = { Text("Min height") })
@@ -1118,15 +1289,14 @@ private fun LibraryBrowserScreen(
 
         if (images.isEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text("No images match the current search and filters.", modifier = Modifier.padding(12.dp))
-                }
+                AsterionEmptyState(
+                    title = "No matching images",
+                    detail = "Adjust the active filters, clear the search, or scan a library folder to add images.",
+                )
             }
         } else {
-            items(items = images, key = { item -> "${item["image_id"] ?: 0}:${item["path"] ?: item.hashCode()}" }) { item ->
+            items(items = visibleList, key = { item -> item.imageId() ?: item["uri"].toString() }) { item ->
                 val title = item["filename"]?.toString().orEmpty().ifBlank { "Untitled image" }
-                val favorite = item.favoriteFlag()
-                val rating = item.ratingValue()
                 val imageId = item.imageId()
                 val isSelected = imageId != null && selectedImageIds.contains(imageId)
                 val thumbnailUrl = item["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() } ?: item["file_url"]?.toString()?.takeIf { it.isNotBlank() }
@@ -1137,11 +1307,11 @@ private fun LibraryBrowserScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .combinedClickable(
-                            onClick = {
+                                onClick = {
                                 if (selectionMode && imageId != null) {
                                     selectedImageIds = if (isSelected) selectedImageIds - imageId else selectedImageIds + imageId
                                 } else {
-                                    onOpenImage(item)
+                                    onOpenImage(item, visibleList)
                                 }
                             },
                             onLongClick = {
@@ -1180,12 +1350,6 @@ private fun LibraryBrowserScreen(
                             buildString {
                                 if (isSelected) {
                                     append("Selected")
-                                    append(" • ")
-                                }
-                                if (favorite) append("Fav")
-                                if (rating > 0) {
-                                    if (isNotEmpty()) append(" • ")
-                                    append("★$rating")
                                 }
                                 if (isEmpty()) append("—")
                             },
@@ -1255,13 +1419,21 @@ private fun LibraryBrowserScreen(
     }
 
     if (showRenameImageDialog) {
-        val imageId = selectedImageIds.firstOrNull()
+        val imageId = selectedImageIdsForDirectOps.firstOrNull()
+        val sourceFilename = state.images.firstOrNull { it.imageId() == imageId }
+            ?.get("filename")
+            ?.toString()
+            .orEmpty()
+        val sourceExtension = sourceFilename.substringAfterLast('.', "")
         AlertDialog(
             onDismissRequest = { showRenameImageDialog = false },
             title = { Text("Rename File") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Image ID: ${imageId ?: 0}")
+                    if (sourceExtension.isNotBlank()) {
+                        Text("The .$sourceExtension extension is preserved automatically.", style = MaterialTheme.typography.bodySmall)
+                    }
                     OutlinedTextField(value = renameImageName, onValueChange = { renameImageName = it }, singleLine = true, label = { Text("New name") })
                 }
             },
@@ -1291,7 +1463,7 @@ private fun LibraryBrowserScreen(
             title = { Text("Batch Rename") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Selected images: ${selectedImageIds.size}")
+                    Text("Selected images: ${selectedImageIdsForDirectOps.size}")
                     OutlinedTextField(value = renamePattern, onValueChange = { renamePattern = it }, singleLine = true, label = { Text("Pattern (use {n})") })
                 }
             },
@@ -1301,14 +1473,14 @@ private fun LibraryBrowserScreen(
                         onExecuteFileOperations(
                             mapOf(
                                 "action" to "batch_rename_images",
-                                "image_ids" to selectedImageIds.joinToString(","),
+                                "image_ids" to selectedImageIdsForDirectOps.joinToString(","),
                                 "pattern" to renamePattern.trim(),
                                 "conflict_mode" to conflictMode,
                             ),
                         )
                         showBatchRenameDialog = false
                     },
-                    enabled = selectedImageIds.isNotEmpty() && renamePattern.isNotBlank(),
+                    enabled = selectedImageIdsForDirectOps.isNotEmpty() && renamePattern.isNotBlank(),
                 ) { Text("Rename") }
             },
             dismissButton = { TextButton(onClick = { showBatchRenameDialog = false }) { Text("Cancel") } },
@@ -1346,7 +1518,7 @@ private fun LibraryBrowserScreen(
     }
 
     if (showMoveDialog) {
-        val selectedIds = if (selectedImageIds.isNotEmpty()) selectedImageIds else selectedFolderImageIds
+        val selectedIds = selectedIdsForMoveCopy
         AlertDialog(
             onDismissRequest = { showMoveDialog = false },
             title = { Text(if (selectedImageIds.isNotEmpty()) "Move Images" else "Move Folder") },
@@ -1387,7 +1559,7 @@ private fun LibraryBrowserScreen(
                 TextButton(
                     onClick = {
                         val movePayload = mapOf(
-                            "action" to if (selectedImageIds.size > 1) "batch_move" else "move_images",
+                            "action" to if (selectedIds.size > 1) "batch_move" else "move_images",
                             "image_ids" to selectedIds.joinToString(","),
                             "target_folder_uri" to selectedTargetFolderUri,
                             "conflict_mode" to conflictMode,
@@ -1416,7 +1588,7 @@ private fun LibraryBrowserScreen(
     }
 
     if (showCopyDialog) {
-        val selectedIds = if (selectedImageIds.isNotEmpty()) selectedImageIds else selectedFolderImageIds
+        val selectedIds = selectedIdsForMoveCopy
         AlertDialog(
             onDismissRequest = { showCopyDialog = false },
             title = { Text(if (selectedImageIds.isNotEmpty()) "Copy Images" else "Copy Folder") },
@@ -1446,7 +1618,7 @@ private fun LibraryBrowserScreen(
                     onClick = {
                         onExecuteFileOperations(
                             mapOf(
-                                "action" to if (selectedImageIds.size > 1) "batch_copy" else "copy_images",
+                                "action" to if (selectedIds.size > 1) "batch_copy" else "copy_images",
                                 "image_ids" to selectedIds.joinToString(","),
                                 "target_folder_uri" to selectedTargetFolderUri,
                                 "conflict_mode" to conflictMode,
@@ -1467,8 +1639,8 @@ private fun LibraryBrowserScreen(
             title = { Text("Delete") },
             text = {
                 Text(
-                    if (selectedImageIds.isNotEmpty()) {
-                        "Delete ${selectedImageIds.size} selected image(s)?"
+                    if (selectedImageIdsForDirectOps.isNotEmpty()) {
+                        "Delete ${selectedImageIdsForDirectOps.size} selected image(s)?"
                     } else {
                         "Delete selected folder?"
                     },
@@ -1477,11 +1649,11 @@ private fun LibraryBrowserScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (selectedImageIds.isNotEmpty()) {
+                        if (selectedImageIdsForDirectOps.isNotEmpty()) {
                             onExecuteFileOperations(
                                 mapOf(
-                                    "action" to if (selectedImageIds.size > 1) "batch_delete" else "delete_images",
-                                    "image_ids" to selectedImageIds.joinToString(","),
+                                    "action" to if (selectedImageIdsForDirectOps.size > 1) "batch_delete" else "delete_images",
+                                    "image_ids" to selectedImageIdsForDirectOps.joinToString(","),
                                     "conflict_mode" to conflictMode,
                                 ),
                             )
@@ -1496,7 +1668,7 @@ private fun LibraryBrowserScreen(
                         }
                         showDeleteDialog = false
                     },
-                    enabled = selectedImageIds.isNotEmpty() || selectedFolderUri.isNotBlank(),
+                    enabled = selectedImageIdsForDirectOps.isNotEmpty() || selectedFolderUri.isNotBlank(),
                 ) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") } },
@@ -1522,13 +1694,20 @@ private fun LibraryBrowserScreen(
 private fun ImageViewerScreen(
     state: AppUiState,
     imageUrl: String?,
-    onSetFavorite: (Int, Boolean) -> Unit,
-    onSetRating: (Int, Int) -> Unit,
     onSetTags: (Int, String) -> Unit,
+    onSelectImage: (Map<String, Any>) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
     var tagsText by rememberSaveable { mutableStateOf("") }
     var showMetadata by rememberSaveable { mutableStateOf(true) }
+    var imageScale by rememberSaveable { mutableStateOf(1f) }
+    var imageOffset by remember { mutableStateOf(Offset.Zero) }
+    var imageContentScale by rememberSaveable { mutableStateOf("fit") }
+    var swipeAccumLocal by remember { mutableStateOf(0f) }
+    val transformState = rememberTransformableState { zoomChange, panChange, _ ->
+        imageScale = (imageScale * zoomChange).coerceIn(1f, 4f)
+        imageOffset = if (imageScale > 1f) imageOffset + panChange else Offset.Zero
+    }
 
     val selected = state.selectedImage
     val selectedId = selected?.imageId()
@@ -1552,71 +1731,129 @@ private fun ImageViewerScreen(
         Text("Image Viewer", style = MaterialTheme.typography.headlineMedium)
 
         if (selected == null) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text("No image selected. Open an item from Library Browser.", modifier = Modifier.padding(12.dp))
-            }
+            AsterionEmptyState(
+                title = "No image selected",
+                detail = "Open an image from Library Browser to inspect it, edit tags, and review metadata.",
+            )
         } else {
             val title = selected["filename"]?.toString().orEmpty().ifBlank { "Untitled image" }
             val imageId = selected.imageId()
-            val favorite = selected.favoriteFlag()
-            val rating = selected.ratingValue()
             val metadata = selected["metadata"] as? Map<*, *> ?: emptyMap<String, Any>()
             val tags = when (val nested = metadata["tags"]) {
                 is List<*> -> nested.mapNotNull { it?.toString()?.trim() }.filter { it.isNotBlank() }
                 is String -> nested.split('|').map { it.trim() }.filter { it.isNotBlank() }
                 else -> emptyList()
             }
-            LaunchedEffect(selectedId, favorite, rating, tags.joinToString("|")) {
+            LaunchedEffect(selectedId, tags.joinToString("|")) {
                 Log.d(
                     UI_TRACE_TAG,
-                    "Compose recomposition: imageId=$imageId displayedFavorite=$favorite displayedRating=$rating displayedTags=${tags.joinToString("|")}",
+                    "Compose recomposition: imageId=$imageId displayedTags=${tags.joinToString("|")}",
                 )
+            }
+
+            // Determine source ordering: prefer explicit activeViewerContext when set,
+            // otherwise prefer searchResults, then fall back to full images.
+            val sourceRows = when {
+                state.activeViewerContext.isNotEmpty() -> state.activeViewerContext
+                state.searchResults.isNotEmpty() -> state.searchResults
+                else -> state.images
+            }
+            // Helper to resolve current index within the sourceRows
+            fun findCurrentIndex(): Int {
+                val id = selected?.imageId() ?: return -1
+                return sourceRows.indexOfFirst { it.imageId() == id }
             }
 
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (!imageUrl.isNullOrBlank()) {
-                        ImageTile(
-                            model = imageUrl,
-                            contentDescription = title,
+
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(320.dp),
-                            contentScale = ContentScale.Fit,
-                        )
-                    }
-                    Text(title, style = MaterialTheme.typography.titleMedium)
-
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = {
-                            if (imageId != null) {
-                                Log.d(UI_TRACE_TAG, "UI click favorite: imageId=$imageId currentFavorite=$favorite nextFavorite=${!favorite}")
-                                onSetFavorite(imageId, !favorite)
-                            }
-                        }, enabled = imageId != null) {
-                            Text(if (favorite) "Unfavorite" else "Favorite")
-                        }
-                        Button(onClick = { showMetadata = !showMetadata }) {
-                            Text(if (showMetadata) "Hide Metadata" else "Show Metadata")
-                        }
-                    }
-
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(0, 1, 2, 3, 4, 5).forEach { candidate ->
-                            AssistChip(
-                                onClick = {
-                                    if (imageId != null) {
-                                        Log.d(UI_TRACE_TAG, "UI click rating: imageId=$imageId currentRating=$rating nextRating=$candidate")
-                                        onSetRating(imageId, candidate)
+                                .height(320.dp)
+                        ) {
+                            ImageTile(
+                                model = imageUrl,
+                                contentDescription = title,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer(
+                                        scaleX = imageScale,
+                                        scaleY = imageScale,
+                                        translationX = imageOffset.x,
+                                        translationY = imageOffset.y,
+                                    )
+                                    .pointerInput(selectedId) {
+                                        detectTapGestures(
+                                            onDoubleTap = {
+                                                imageScale = if (imageScale > 1f) 1f else 2f
+                                                imageOffset = Offset.Zero
+                                            },
+                                        )
                                     }
-                                },
-                                label = {
-                                    val stars = if (candidate == 0) "0" else "★".repeat(candidate)
-                                    Text(if (candidate == rating) "[$stars]" else stars)
-                                },
+                                    .transformable(transformState),
+                                contentScale = if (imageContentScale == "fill") ContentScale.Crop else ContentScale.Fit,
                             )
                         }
                     }
+
+                    Text(title, style = MaterialTheme.typography.titleMedium)
+
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { showMetadata = !showMetadata }) {
+                            Text(if (showMetadata) "Hide Metadata" else "Show Metadata")
+                        }
+                        AssistChip(onClick = {
+                            imageScale = 1f
+                            imageOffset = Offset.Zero
+                            imageContentScale = "fit"
+                        }, label = { Text("Fit") })
+                        AssistChip(onClick = {
+                            imageScale = 1f
+                            imageOffset = Offset.Zero
+                            imageContentScale = "fill"
+                        }, label = { Text("Fill") })
+                        AssistChip(onClick = {
+                            imageScale = 1f
+                            imageOffset = Offset.Zero
+                        }, label = { Text("100%") })
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .pointerInput(selectedId, imageScale) {
+                                detectHorizontalDragGestures(
+                                    onHorizontalDrag = { _, dragAmount ->
+                                        if (imageScale == 1f) {
+                                            swipeAccumLocal += dragAmount
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        if (imageScale == 1f) {
+                                            val threshold = 120f
+                                            val idx = findCurrentIndex()
+                                            when {
+                                                swipeAccumLocal > threshold && idx > 0 -> {
+                                                    val prev = sourceRows[idx - 1]
+                                                    onSelectImage(prev)
+                                                }
+                                                swipeAccumLocal < -threshold && idx >= 0 && idx < sourceRows.size - 1 -> {
+                                                    val next = sourceRows[idx + 1]
+                                                    onSelectImage(next)
+                                                }
+                                            }
+                                        }
+                                        swipeAccumLocal = 0f
+                                    },
+                                    onDragCancel = {
+                                        swipeAccumLocal = 0f
+                                    },
+                                )
+                            },
+                    )
 
                     OutlinedTextField(
                         value = tagsText,
@@ -1632,6 +1869,12 @@ private fun ImageViewerScreen(
                         }
                     }, enabled = imageId != null) {
                         Text("Save Tags")
+                    }
+                    state.lastActionMessage?.let { message ->
+                        Text(message, style = MaterialTheme.typography.bodySmall)
+                    }
+                    state.errorMessage?.let { message ->
+                        Text("Error: $message", style = MaterialTheme.typography.bodySmall)
                     }
 
                     if (showMetadata) {
@@ -1663,45 +1906,48 @@ private fun ReviewQueueScreen(
     onUndo: (String) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
+    var currentIndex by rememberSaveable { mutableStateOf(0) }
+    val boundedIndex = currentIndex.coerceIn(0, (items.size - 1).coerceAtLeast(0))
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Review Queue", style = MaterialTheme.typography.headlineMedium)
-        Text("Approve | Reject | Undo")
+        Text("Resolve items in sequence, or apply an action to the remaining queue.", style = MaterialTheme.typography.bodyMedium)
 
         if (items.isEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text("No review items available in local runtime.", modifier = Modifier.padding(12.dp))
-            }
+            AsterionEmptyState(
+                title = "Review queue is clear",
+                detail = "New low-confidence recognition and automation results will appear here for confirmation.",
+            )
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(items) { item ->
-                    val id = item["id"]?.toString()
-                        ?: item["item_id"]?.toString()
-                        ?: item["path"]?.toString()
-                        ?: item.hashCode().toString()
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            item.entries.take(8).forEach { entry ->
-                                Text("${entry.key}: ${entry.value}")
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { onApprove(id) }) {
-                                    Text("Approve")
-                                }
-                                Button(onClick = { onReject(id) }) {
-                                    Text("Reject")
-                                }
-                                Button(onClick = { onUndo(id) }) {
-                                    Text("Undo")
-                                }
-                            }
-                        }
+            val item = items[boundedIndex]
+            val id = item["id"]?.toString()
+                ?: item["item_id"]?.toString()
+                ?: item["path"]?.toString()
+                ?: item.hashCode().toString()
+            Text("Item ${boundedIndex + 1} of ${items.size}", style = MaterialTheme.typography.labelLarge)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item.entries.take(10).forEach { entry ->
+                        Text("${entry.key}: ${entry.value}", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { onApprove(id); currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }) { Text("Accept") }
+                        Button(onClick = { onReject(id); currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }) { Text("Reject") }
+                        Button(onClick = { onUndo(id) }) { Text("Undo") }
                     }
                 }
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = { currentIndex = (boundedIndex - 1).coerceAtLeast(0) }, label = { Text("Previous") })
+                AssistChip(onClick = { currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }, label = { Text("Next") })
+                AssistChip(onClick = { currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }, label = { Text("Next unresolved") })
+                Button(onClick = { items.drop(boundedIndex).forEach { row -> onApprove(row.reviewItemId()) } }) { Text("Accept Remaining") }
+                Button(onClick = { items.drop(boundedIndex).forEach { row -> onReject(row.reviewItemId()) } }) { Text("Reject Remaining") }
             }
         }
 
@@ -1717,6 +1963,1132 @@ private fun ReviewQueueScreen(
 }
 
 @Composable
+private fun RecognitionWorkbenchScreen(
+    state: AppUiState,
+    onRefreshAi: () -> Unit,
+    onDetectHardware: () -> Unit,
+    onValidateInfrastructure: () -> Unit,
+    onRunPipeline: (String, String) -> Unit,
+    onRunMultiStagePipeline: (String) -> Unit,
+    onRunBatchPipeline: (String) -> Unit,
+    onEnqueueTask: (String) -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    var promptHint by rememberSaveable { mutableStateOf("") }
+    var selectedTaskType by rememberSaveable { mutableStateOf("ocr") }
+
+    val selected = state.selectedImage
+    val selectedId = selected?.imageId()
+    val selectedName = selected?.get("filename")?.toString().orEmpty().ifBlank { "No image selected" }
+    val selectedThumb = selected?.get("thumbnail_url")?.toString()?.takeIf { it.isNotBlank() }
+        ?: selected?.get("file_url")?.toString()?.takeIf { it.isNotBlank() }
+
+    val queuePending = state.aiOverview["queue_pending"]?.toString().orEmpty().ifBlank { "0" }
+    val queueRunning = state.aiOverview["queue_running"]?.toString().orEmpty().ifBlank { "0" }
+    val queueFailed = state.aiOverview["queue_failed"]?.toString().orEmpty().ifBlank { "0" }
+    val activeModelId = state.aiSettings["active_model_id"]?.toString().orEmpty()
+    val activeModelVersion = state.aiSettings["active_model_version"]?.toString().orEmpty()
+    val activeModel = state.aiInstalledModels.firstOrNull { model ->
+        model["model_id"]?.toString() == activeModelId &&
+            (activeModelVersion.isBlank() || model["version"]?.toString() == activeModelVersion)
+    }
+
+    val pipelineTasks = listOf(
+        "ocr" to "OCR",
+        "captioning" to "Caption",
+        "character_recognition" to "Character",
+        "series_recognition" to "Series",
+        "artist_recognition" to "Artist",
+        "tag_prediction" to "Tag Prediction",
+        "metadata_extraction" to "Metadata",
+        "prompt_generation" to "Prompt",
+        "embedding_generation" to "Embedding",
+        "duplicate_detection" to "Duplicates",
+        "classification" to "Classification",
+        "detection" to "Detection",
+        "face_feature_extraction" to "Face Features",
+        "knowledge_pack_execution" to "Knowledge Pack",
+        "similarity_search" to "Similarity",
+    )
+    val backendTasks = state.aiBackends
+        .flatMap { backend -> (backend["supported_tasks"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList() }
+        .map { it.trim().lowercase() }
+        .toSet()
+    val activeModelTasks = (activeModel?.get("supported_tasks") as? List<*>)
+        ?.mapNotNull { it?.toString()?.trim()?.lowercase() }
+        ?.toSet()
+        ?: emptySet()
+    val availableTasks = pipelineTasks.filter { (taskType, _) ->
+        (backendTasks.isEmpty() || taskType in backendTasks) &&
+            (activeModelTasks.isEmpty() || taskType in activeModelTasks)
+    }
+    val selectedTaskAvailable = availableTasks.any { it.first == selectedTaskType }
+    val activeModelLabel = when {
+        activeModel != null -> "${activeModel["display_name"] ?: activeModelId}@${activeModel["version"] ?: activeModelVersion}"
+        activeModelId.isNotBlank() -> "$activeModelId${if (activeModelVersion.isBlank()) "" else "@$activeModelVersion"}"
+        else -> "No compatible native model selected"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Recognition Results", style = MaterialTheme.typography.headlineMedium)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Local AI Runtime", style = MaterialTheme.typography.titleMedium)
+                Text("Active model: $activeModelLabel")
+                Text("Pending $queuePending   Running $queueRunning   Failed $queueFailed")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onRefreshAi) { Text("Refresh AI") }
+                    Button(onClick = onDetectHardware) { Text("Detect Hardware") }
+                    Button(onClick = onValidateInfrastructure) { Text("Validate Runtime") }
+                    Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Manage Models") }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Backend Status", style = MaterialTheme.typography.titleMedium)
+                if (state.aiBackends.isEmpty()) {
+                    Text("No Local AI backend is registered. Install or activate a compatible runtime before running tasks.")
+                } else {
+                    state.aiBackends.forEach { backend ->
+                        val taskList = (backend["supported_tasks"] as? List<*>)?.joinToString() ?: "none"
+                        Text("${backend["runtime_id"] ?: "runtime"}: $taskList", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Selected Image", style = MaterialTheme.typography.titleMedium)
+                if (selected == null || selectedId == null) {
+                    Text("Open an image from Library Browser or Search before running AI pipelines.")
+                } else {
+                    if (!selectedThumb.isNullOrBlank()) {
+                        ImageTile(
+                            model = selectedThumb,
+                            contentDescription = selectedName,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(220.dp),
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
+                    Text("Image #$selectedId")
+                    Text(selectedName)
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) { Text("Open Library") }
+                    Button(onClick = { onNavigate(AppDestination.ImageViewer) }, enabled = selectedId != null) { Text("Open Viewer") }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Run AI Task", style = MaterialTheme.typography.titleMedium)
+                Text("1. Select image  2. Select task  3. Confirm active model  4. Run", style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = promptHint,
+                    onValueChange = { promptHint = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Prompt/Context hint (optional)") },
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    availableTasks.forEach { (taskType, label) ->
+                        AssistChip(
+                            onClick = { selectedTaskType = taskType },
+                            label = { Text(if (selectedTaskType == taskType) "Selected: $label" else label) },
+                        )
+                    }
+                }
+                if (availableTasks.isEmpty()) {
+                    Text("No task is compatible with the active model and registered backends.", style = MaterialTheme.typography.bodySmall)
+                }
+                Button(
+                    onClick = { onRunPipeline(selectedTaskType, promptHint) },
+                    enabled = selectedId != null && selectedTaskAvailable,
+                ) {
+                    Text("Run Selected Task")
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Queue", style = MaterialTheme.typography.titleMedium)
+                Text("Queue the selected task for the selected image; progress appears in Automation.", style = MaterialTheme.typography.bodySmall)
+                Button(onClick = { onEnqueueTask(selectedTaskType) }, enabled = selectedId != null && selectedTaskAvailable) {
+                    Text("Queue Selected Task")
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Latest AI Result", style = MaterialTheme.typography.titleMedium)
+                if (state.aiLastPipelineResult.isEmpty()) {
+                    Text("No pipeline result yet.")
+                } else {
+                    state.aiLastPipelineResult.entries.take(20).forEach { (key, value) ->
+                        Text("$key: $value", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+        }
+
+        if (state.lastActionMessage != null) {
+            Text(state.lastActionMessage)
+        }
+        if (state.errorMessage != null) {
+            Text("Error: ${state.errorMessage}")
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Models") }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
+private fun AiTaskFilterScreen(
+    title: String,
+    taskTypeFilter: String,
+    tasks: List<Map<String, Any>>,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    val normalized = taskTypeFilter.trim().lowercase()
+    val filtered = tasks.filter {
+        it["task_type"]?.toString()?.trim()?.lowercase() == normalized
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(title, style = MaterialTheme.typography.headlineMedium)
+        Text("Matching tasks: ${filtered.size}")
+
+        if (filtered.isEmpty()) {
+            AsterionEmptyState(
+                title = "No matching tasks",
+                detail = "Tasks for $taskTypeFilter will appear here when they are available.",
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 4.dp),
+            ) {
+                items(filtered) { task ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Task: ${task["task_id"] ?: "n/a"}")
+                            Text("Status: ${task["status"] ?: "unknown"} | Progress: ${task["progress"] ?: 0.0}")
+                            Text("Model: ${task["model_id"] ?: "(auto)"} ${task["version"] ?: ""}")
+                            val error = task["error_message"]?.toString().orEmpty()
+                            if (error.isNotBlank()) {
+                                Text("Error: $error", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
+            Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
+private fun AiAutomationScreen(
+    state: AppUiState,
+    onRefreshAi: () -> Unit,
+    onPauseQueue: () -> Unit,
+    onResumeQueue: () -> Unit,
+    onTaskAction: (String, String) -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    val pending = state.aiOverview["queue_pending"]?.toString().orEmpty().ifBlank { "0" }
+    val running = state.aiOverview["queue_running"]?.toString().orEmpty().ifBlank { "0" }
+    val paused = state.aiOverview["queue_paused"]?.toString().orEmpty().ifBlank { "0" }
+    val failed = state.aiOverview["queue_failed"]?.toString().orEmpty().ifBlank { "0" }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Automation", style = MaterialTheme.typography.headlineMedium)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("AI Queue", style = MaterialTheme.typography.titleMedium)
+                Text("Pending $pending   Running $running   Paused $paused   Failed $failed")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onRefreshAi) { Text("Refresh") }
+                    Button(onClick = onPauseQueue, enabled = pending != "0" || running != "0") { Text("Pause Queue") }
+                    Button(onClick = onResumeQueue, enabled = paused != "0") { Text("Resume Queue") }
+                }
+            }
+        }
+
+        state.knowledgeAutomationStatus?.let { status ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Knowledge Status", style = MaterialTheme.typography.titleMedium)
+                    status.lines().forEach { Text(it) }
+                }
+            }
+        }
+
+        Text("Tasks", style = MaterialTheme.typography.titleMedium)
+        if (state.aiTasks.isEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text("No AI tasks queued yet.", modifier = Modifier.padding(12.dp))
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(state.aiTasks) { task ->
+                    val taskId = task["task_id"]?.toString().orEmpty()
+                    val status = task["status"]?.toString().orEmpty().ifBlank { "unknown" }
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("${task["task_type"] ?: "task"} • $taskId")
+                            Text("Status: $status | Progress: ${task["progress"] ?: 0.0}")
+                            Text("Model: ${task["model_id"] ?: "(auto)"} ${task["version"] ?: ""}")
+                            val error = task["error_message"]?.toString().orEmpty()
+                            if (error.isNotBlank()) {
+                                Text("Error: $error", style = MaterialTheme.typography.bodySmall)
+                            }
+
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { onTaskAction(taskId, "pause") }, enabled = taskId.isNotBlank() && status in setOf("pending", "running")) { Text("Pause") }
+                                Button(onClick = { onTaskAction(taskId, "resume") }, enabled = taskId.isNotBlank() && status == "paused") { Text("Resume") }
+                                Button(onClick = { onTaskAction(taskId, "retry") }, enabled = taskId.isNotBlank() && status == "failed") { Text("Retry") }
+                                Button(onClick = { onTaskAction(taskId, "cancel") }, enabled = taskId.isNotBlank() && status in setOf("pending", "running", "paused")) { Text("Cancel") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (state.lastActionMessage != null) {
+            Text(state.lastActionMessage)
+        }
+        if (state.errorMessage != null) {
+            Text("Error: ${state.errorMessage}")
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
+            Button(onClick = { onNavigate(AppDestination.Logs) }) { Text("Logs") }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
+private fun AiModelManagerScreen(
+    state: AppUiState,
+    onRefreshAi: () -> Unit,
+    onDetectHardware: () -> Unit,
+    onValidateInfrastructure: () -> Unit,
+    onDetectModelUpdates: () -> Unit,
+    onPruneCache: () -> Unit,
+    onVerifyModel: (String, String) -> Unit,
+    onRemoveModel: (String, String) -> Unit,
+    onUpdateAiSetting: (String, String) -> Unit,
+    onRegisterAvailableModel: (Map<String, String>) -> Unit,
+    selectedModelDocumentName: String,
+    onChooseModelDocument: () -> Unit,
+    onChooseModelPackageDirectory: () -> Unit,
+    onImportModelDocument: (Map<String, String>) -> Unit,
+    onRegisterModelDownload: (Map<String, String>) -> Unit,
+    onSetActiveModel: (String, String, String) -> Unit,
+    onClearActiveModel: (String) -> Unit,
+    selectedKnowledgeDocumentName: String,
+    onChooseKnowledgeDocument: () -> Unit,
+    onPreviewKnowledgeDocument: (Map<String, String>) -> Unit,
+    onValidateKnowledgeDocument: (Map<String, String>) -> Unit,
+    onImportKnowledgeDocument: (Map<String, String>) -> Unit,
+    selectedFusionDocumentName: String,
+    onChooseFusionDocument: () -> Unit,
+    onPreviewFusionDocument: (String, Boolean) -> Unit,
+    onValidateFusionDocument: (String, Boolean) -> Unit,
+    onImportFusionDocument: (String, Boolean) -> Unit,
+    onExportFusionSnapshot: (String, Boolean) -> Unit,
+    onValidateFusionDatabase: () -> Unit,
+    onRebuildFusionDatabase: () -> Unit,
+    onRemoveKnowledgePack: (String) -> Unit,
+    onRollbackImport: (String) -> Unit,
+    onCancelImport: (String) -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    var previewedModelKey by rememberSaveable { mutableStateOf("") }
+    var modelImportMessage by rememberSaveable { mutableStateOf("") }
+    var taskPickerKey by rememberSaveable { mutableStateOf("") }
+
+    var fusionFormat by rememberSaveable { mutableStateOf("json") }
+    var fusionReplaceExisting by rememberSaveable { mutableStateOf(false) }
+    var fusionPrettyExport by rememberSaveable { mutableStateOf(true) }
+
+    val hasSelectedModelDocument = selectedModelDocumentName.isNotBlank()
+    val hasSelectedKnowledgeDocument = selectedKnowledgeDocumentName.isNotBlank()
+    val hasSelectedFusionDocument = selectedFusionDocumentName.isNotBlank()
+    val latestImportId = state.aiLastPipelineResult["import_id"]?.toString().orEmpty()
+    val importControlId = latestImportId
+    val importStatus = state.aiLastPipelineResult["status"]?.toString()?.lowercase().orEmpty()
+    val canRollbackImport = importControlId.isNotBlank()
+    val canCancelImport = importControlId.isNotBlank() && importStatus in setOf("queued", "running", "in_progress")
+    val selectedModelId = selectedModelDocumentName
+        .substringBeforeLast('.')
+        .lowercase()
+        .replace(Regex("[^a-z0-9._-]+"), "_")
+        .trim('_', '-', '.')
+        .ifBlank { "local_model" }
+    val selectedModelDisplayName = selectedModelDocumentName.substringBeforeLast('.').ifBlank { selectedModelId }
+
+    val activeGlobalModelId = state.aiSettings["active_model_id"]?.toString().orEmpty()
+    val activeGlobalModelVersion = state.aiSettings["active_model_version"]?.toString().orEmpty()
+    val taskCapabilities = state.aiInstalledModels
+        .flatMap { model -> (model["supported_tasks"] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) } ?: emptyList() }
+        .distinct()
+        .sorted()
+    val selectedModelAlreadyInstalled = state.aiInstalledModels.any { model ->
+        model["model_id"]?.toString() == selectedModelId &&
+            model["version"]?.toString() == "1.0.0"
+    }
+    val modelImportForm = mapOf(
+        "model_id" to selectedModelId,
+        "version" to "1.0.0",
+        "display_name" to selectedModelDisplayName,
+        "required_runtime" to "",
+        "supported_tasks" to "",
+        "supported_runtimes" to "",
+        "dependencies" to "",
+        "source" to "local_import",
+    )
+
+    val importForm = emptyMap<String, String>()
+    val fusionStatus = state.lastMaintenanceResult.takeIf { it["kind"]?.toString() == "fusion_management" } ?: emptyMap()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Local AI Model and Resource Manager", style = MaterialTheme.typography.headlineMedium)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Import Model", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (hasSelectedModelDocument) "Selected package: $selectedModelDocumentName" else "Choose a model package, archive, or model file.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onChooseModelDocument) {
+                        Text("Browse Package File")
+                    }
+                    Button(onClick = onChooseModelPackageDirectory) {
+                        Text("Browse Package Folder")
+                    }
+                    Button(
+                        onClick = {
+                            if (selectedModelAlreadyInstalled) {
+                                modelImportMessage = "Model already installed"
+                            } else {
+                                modelImportMessage = ""
+                                onImportModelDocument(modelImportForm)
+                            }
+                        },
+                        enabled = hasSelectedModelDocument,
+                    ) {
+                        Text("Import Model")
+                    }
+                }
+                if (modelImportMessage.isNotBlank()) {
+                    Text(modelImportMessage, style = MaterialTheme.typography.bodySmall)
+                }
+
+                // Surface the most recent import control ID and status next to the import controls
+                if (importControlId.isNotBlank()) {
+                    when (importStatus) {
+                        "queued", "running", "in_progress" -> {
+                            AsterionProgressCard(
+                                title = "Import in progress",
+                                progress = 0.5f,
+                                detail = "Import ID: $importControlId",
+                            )
+                        }
+                        "succeeded" -> {
+                            AsterionStatusNotice("Import succeeded (id: $importControlId)")
+                        }
+                        "failed" -> {
+                            val importRun = state.aiInstallRuns.firstOrNull { run -> run["install_id"]?.toString() == importControlId }
+                            val runError = importRun?.get("error_message")?.toString().orEmpty()
+                            if (runError.isNotBlank()) {
+                                AsterionStatusNotice("Import failed: $runError", isError = true)
+                                val details = importRun?.get("details")
+                                if (details != null) {
+                                    Text(details.toString(), style = MaterialTheme.typography.bodySmall)
+                                }
+                            } else {
+                                AsterionStatusNotice("Import failed (id: $importControlId)", isError = true)
+                            }
+                        }
+                        else -> {
+                            AsterionStatusNotice("Import status: ${if (importStatus.isBlank()) "unknown" else importStatus} (id: $importControlId)")
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("Installed Models", style = MaterialTheme.typography.titleMedium)
+        if (state.aiInstalledModels.isEmpty()) {
+            Text("Imported models will appear here.")
+        } else {
+            state.aiInstalledModels.take(40).forEach { model ->
+                val listedId = model["model_id"]?.toString().orEmpty()
+                val listedVersion = model["version"]?.toString().orEmpty()
+                val modelKey = "$listedId@$listedVersion"
+                val verificationRun = state.aiInstallRuns
+                    .filter { run ->
+                        run["action"]?.toString() == "verify" &&
+                            run["model_id"]?.toString() == listedId &&
+                            run["version"]?.toString() == listedVersion
+                    }
+                    .maxByOrNull { run -> run["created_at_ms"].asLongNullable() ?: 0L }
+                val verificationLabel = when (verificationRun?.get("status")?.toString()?.lowercase()) {
+                    "succeeded" -> "Verified"
+                    "failed" -> "Verification failed"
+                    else -> "Not verified"
+                }
+                val isActive = listedId == activeGlobalModelId &&
+                    (activeGlobalModelVersion.isBlank() || activeGlobalModelVersion == listedVersion)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateContentSize()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("${model["display_name"] ?: listedId} (${listedVersion.ifBlank { "n/a" }})")
+                        Text("Status: $verificationLabel | State: ${if (isActive) "Active" else "Ready"}")
+                        Text("Size: ${humanBytes(model["size_bytes"].asLongNullable() ?: 0L)}", style = MaterialTheme.typography.bodySmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { previewedModelKey = if (previewedModelKey == modelKey) "" else modelKey }) {
+                                Text(if (previewedModelKey == modelKey) "Hide Preview" else "Preview")
+                            }
+                            Button(onClick = { onVerifyModel(listedId, listedVersion) }, enabled = listedId.isNotBlank() && listedVersion.isNotBlank()) {
+                                Text("Verify")
+                            }
+                            Button(onClick = { onRemoveModel(listedId, listedVersion) }, enabled = listedId.isNotBlank()) {
+                                Text("Uninstall")
+                            }
+                            Button(onClick = { onSetActiveModel(listedId, listedVersion, "") }, enabled = listedId.isNotBlank() && !isActive) {
+                                Text(if (isActive) "Active" else "Activate")
+                            }
+                        }
+                        AnimatedVisibility(visible = previewedModelKey == modelKey) {
+                            Text("Installed locally and ready to use.", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("AI Tasks", style = MaterialTheme.typography.titleMedium)
+        if (taskCapabilities.isEmpty()) {
+            Text("Task assignments will appear when installed models report capabilities.")
+        } else {
+            taskCapabilities.forEach { taskType ->
+                val candidates = state.aiInstalledModels.filter { model ->
+                    (model["supported_tasks"] as? List<*>)
+                        ?.any { it?.toString()?.trim() == taskType }
+                        ?: false
+                }
+                val selectedId = state.aiSettings["active_model_id.$taskType"]?.toString().orEmpty()
+                val selectedVersion = state.aiSettings["active_model_version.$taskType"]?.toString().orEmpty()
+                val selected = candidates.firstOrNull { model ->
+                    model["model_id"]?.toString() == selectedId &&
+                        (selectedVersion.isBlank() || model["version"]?.toString() == selectedVersion)
+                }
+                val assigned = selected ?: candidates.singleOrNull()
+                val assignedName = assigned?.get("display_name")?.toString()
+                    ?.ifBlank { assigned["model_id"]?.toString().orEmpty() }
+                    ?: "No compatible installed model"
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(taskType.replace('_', ' ').replaceFirstChar { it.uppercase() })
+                            Text(assignedName, style = MaterialTheme.typography.bodySmall)
+                            if (candidates.size == 1) {
+                                Text("Automatically assigned", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        if (candidates.size > 1) {
+                            Box {
+                                Button(onClick = { taskPickerKey = taskType }) { Text("Change") }
+                                DropdownMenu(
+                                    expanded = taskPickerKey == taskType,
+                                    onDismissRequest = { taskPickerKey = "" },
+                                ) {
+                                    candidates.forEach { candidate ->
+                                        val candidateId = candidate["model_id"]?.toString().orEmpty()
+                                        val candidateVersion = candidate["version"]?.toString().orEmpty()
+                                        val candidateName = candidate["display_name"]?.toString().orEmpty().ifBlank { candidateId }
+                                        DropdownMenuItem(
+                                            text = { Text(candidateName) },
+                                            onClick = {
+                                                taskPickerKey = ""
+                                                onSetActiveModel(candidateId, candidateVersion, taskType)
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("AI Runtime", style = MaterialTheme.typography.titleMedium)
+                Text("Status: Ready")
+                Text("Configuration: Automatic")
+                Text("Installed Models: ${state.aiInstalledModels.size}")
+                Text(
+                    "Capabilities Available: ${taskCapabilities.joinToString(", ") { it.replace('_', ' ').replaceFirstChar { letter -> letter.uppercase() } }}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Knowledge Management", style = MaterialTheme.typography.titleMedium)
+                Text("Knowledge packs are installed and managed here without affecting Fusion database maintenance.", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    if (hasSelectedKnowledgeDocument) "Selected knowledge JSON: $selectedKnowledgeDocumentName" else "Select a knowledge JSON file to enable validation and installation.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onChooseKnowledgeDocument) { Text("Browse Knowledge JSON") }
+                    Button(onClick = { onPreviewKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Preview Knowledge Pack") }
+                    Button(onClick = { onValidateKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Validate Knowledge Pack") }
+                    Button(onClick = { onImportKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Install Knowledge Pack") }
+                }
+
+                Text("Installed knowledge packs", style = MaterialTheme.typography.titleSmall)
+                if (state.knowledgePacks.isEmpty()) {
+                    Text("No installed knowledge packs found.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    state.knowledgePacks.take(6).forEach { pack ->
+                        val packName = pack["name"]?.toString().orEmpty()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(packName.ifBlank { "Unnamed pack"}, style = MaterialTheme.typography.bodySmall)
+                            Button(onClick = { onRemoveKnowledgePack(packName) }, enabled = packName.isNotBlank()) {
+                                Text("Delete Installed Knowledge Pack")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Fusion Database", style = MaterialTheme.typography.titleMedium)
+                Text("Fusion rebuild, validation, export, and rollback actions are maintained here.", style = MaterialTheme.typography.bodySmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onRebuildFusionDatabase) { Text("Rebuild Fusion Database") }
+                    Button(onClick = onValidateFusionDatabase) { Text("Validate Fusion Database") }
+                    Button(onClick = { onExportFusionSnapshot(fusionFormat, fusionPrettyExport) }) { Text("Export Fusion Database") }
+                    Button(onClick = { onRollbackImport(importControlId) }, enabled = canRollbackImport) {
+                        Text("Rollback Fusion Import")
+                    }
+                }
+                Text("Status: ${fusionStatus["database_status"] ?: "Loading"}", style = MaterialTheme.typography.bodySmall)
+                Text("Health: ${fusionStatus["database_health"] ?: "Loading"}", style = MaterialTheme.typography.bodySmall)
+                Text("Rebuild Required: ${if (fusionStatus["rebuild_required"] == true) "Yes" else "No"}", style = MaterialTheme.typography.bodySmall)
+                Text("Validation Status: ${if (fusionStatus["database_health"] == null) "Pending" else "Available"}", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+
+        Text("Installed Databases and Knowledge Packs", style = MaterialTheme.typography.titleMedium)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Knowledge packs: ${state.knowledgePacks.size} | Downloads: ${state.downloads.size}")
+                Text(
+                    "Fusion database health is available through Validate Fusion DB. Rollback removes imported database content when an import ID is available.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+
+                if (state.knowledgePacks.isEmpty()) {
+                    Text("No installed knowledge pack artifacts found.")
+                } else {
+                    state.knowledgePacks.take(10).forEach { item ->
+                        Text(
+                            "KP ${item["name"] ?: "unknown"} • ${humanBytes(item["size_bytes"].asLongNullable() ?: 0L)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
+                if (state.downloads.isEmpty()) {
+                    Text("No local download artifacts found.")
+                } else {
+                    state.downloads.take(10).forEach { item ->
+                        Text(
+                            "DL ${item["name"] ?: "unknown"} • ${humanBytes(item["size_bytes"].asLongNullable() ?: 0L)}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+        }
+
+        Text("Install and Import Runs", style = MaterialTheme.typography.titleMedium)
+        if (state.aiInstallRuns.isEmpty()) {
+            Text("No install runs recorded yet.")
+        } else {
+            state.aiInstallRuns.take(20).forEach { run ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val action = run["action"]?.toString().orEmpty()
+                        val modelId = run["model_id"]?.toString().orEmpty()
+                        val version = run["version"]?.toString().orEmpty()
+                        val status = run["status"]?.toString().orEmpty().replaceFirstChar { it.uppercase() }
+                        val retry = run["retry_count"] ?: 0
+                        Text(if (modelId.isNotBlank()) "$action $modelId@$version" else action)
+                        Text("Status: $status • Retries: $retry")
+                        val error = run["error_message"]?.toString().orEmpty()
+                        if (error.isNotBlank()) {
+                            AsterionStatusNotice("$error", isError = true)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (state.lastActionMessage != null) {
+            Text(state.lastActionMessage)
+        }
+        if (state.errorMessage != null) {
+            Text("Error: ${state.errorMessage}")
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
+            Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
+private fun KnowledgePackManagerScreen(
+    state: AppUiState,
+    selectedPackNames: List<String>,
+    onChoosePacks: () -> Unit,
+    onImportPacks: () -> Unit,
+    onPreviewPack: (String) -> Unit,
+    onReplacePack: (String) -> Unit,
+    onRemovePack: (String) -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    val preview = state.aiLastPipelineResult.takeIf {
+        it["kind"]?.toString() == "knowledge_pack_preview"
+    }?.get("pack") as? Map<*, *>
+    val previewedPackName = preview?.get("name")?.toString().orEmpty()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Knowledge Management", style = MaterialTheme.typography.headlineMedium)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Knowledge Pack Actions", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    when (selectedPackNames.size) {
+                        0 -> "Choose one or more pack files to import."
+                        1 -> "Selected: ${selectedPackNames.first()}"
+                        else -> "Selected: ${selectedPackNames.size} packs"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onChoosePacks) { Text("Browse Packs") }
+                    Button(onClick = onImportPacks, enabled = selectedPackNames.isNotEmpty()) { Text("Import Selected") }
+                }
+                // If a recent knowledge-pack import was performed, surface failures/summaries inline here
+                val kpImport = state.aiLastPipelineResult.takeIf { it["kind"]?.toString() == "knowledge_pack_import" }
+                kpImport?.let { result ->
+                    val results = (result["results"] as? List<*>)?.mapNotNull { it as? Map<*, *> } ?: emptyList()
+                    val failed = results.filter { row -> (row["ok"] as? Boolean) != true }
+                    val succeeded = results.count { row -> (row["ok"] as? Boolean) == true }
+                    if (results.isNotEmpty()) {
+                        Text("Import summary: $succeeded succeeded, ${failed.size} failed", style = MaterialTheme.typography.bodySmall)
+                        failed.forEach { row ->
+                            val name = row["filename"]?.toString() ?: row["name"]?.toString() ?: "(unknown)"
+                            val message = row["message"]?.toString().orEmpty()
+                            AsterionStatusNotice("$name: ${if (message.isNotBlank()) message else "Import failed."}", isError = true)
+                        }
+                    }
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Installed Knowledge Packs", style = MaterialTheme.typography.titleMedium)
+                if (state.knowledgePacks.isEmpty()) {
+                    Text("Imported Knowledge Packs will appear here.")
+                } else {
+                    state.knowledgePacks.forEach { pack ->
+                        val name = pack["name"]?.toString().orEmpty()
+                        val version = pack["version"]?.toString().orEmpty().ifBlank { "Unversioned" }
+                        val status = pack["status"]?.toString().orEmpty().ifBlank { "Installed" }
+                        val previewVisible = previewedPackName == name
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .animateContentSize()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(name.ifBlank { "Unnamed Knowledge Pack" })
+                                Text("Version: $version | Status: $status")
+                                Text("Size: ${humanBytes(pack["size_bytes"].asLongNullable() ?: 0L)}", style = MaterialTheme.typography.bodySmall)
+                                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Button(onClick = { onPreviewPack(name) }, enabled = name.isNotBlank()) { Text("Preview") }
+                                    Button(onClick = { onReplacePack(name) }, enabled = name.isNotBlank()) { Text("Replace") }
+                                    Button(onClick = { onRemovePack(name) }, enabled = name.isNotBlank()) { Text("Remove") }
+                                }
+                                AnimatedVisibility(visible = previewVisible) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                        Text("Read-only Summary", style = MaterialTheme.typography.titleSmall)
+                                        val metadata = preview?.get("metadata") as? Map<*, *>
+                                        Text("Pack Name: ${preview?.get("pack_name") ?: name}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Version: ${preview?.get("version") ?: version}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Author: ${metadata?.get("author") ?: "Unknown"}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Creation Date: ${metadata?.get("creation_date") ?: "Unknown"}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Knowledge Type: ${metadata?.get("knowledge_type") ?: "Unknown"}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Entries: ${metadata?.get("entries") ?: 0}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Supported Categories: ${(metadata?.get("supported_categories") as? List<*>)?.joinToString().orEmpty().ifBlank { "None" }}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Dependencies: ${(metadata?.get("dependencies") as? List<*>)?.joinToString().orEmpty().ifBlank { "None" }}", style = MaterialTheme.typography.bodySmall)
+                                        Text("Description: ${metadata?.get("description")?.toString().orEmpty().ifBlank { "None" }}", style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        state.lastActionMessage?.let { message ->
+            AsterionStatusNotice(message)
+        }
+        state.errorMessage?.let { message ->
+            AsterionStatusNotice(message, isError = true)
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
+private fun FusionDatabaseScreen(
+    state: AppUiState,
+    onRefresh: () -> Unit,
+    onExport: () -> Unit,
+    onRebuild: () -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    LaunchedEffect(Unit) { onRefresh() }
+    val status = state.lastMaintenanceResult.takeIf {
+        it["kind"]?.toString() == "fusion_management"
+    } ?: emptyMap()
+    val validation = status["validation"] as? Map<*, *>
+    val logicalCounts = status["logical_table_counts"] as? Map<*, *>
+    val automationTasks = state.aiTasks
+    val runningTask = automationTasks.firstOrNull { task -> task["status"]?.toString() == "running" }
+    val lastTask = automationTasks.maxByOrNull { task -> task["updated_at_ms"].asLongNullable() ?: 0L }
+    val lastSuccessfulTask = automationTasks
+        .filter { task -> task["status"]?.toString() == "succeeded" }
+        .maxByOrNull { task -> task["finished_at_ms"].asLongNullable() ?: 0L }
+    val pendingTasks = automationTasks.count { task -> task["status"]?.toString() in setOf("pending", "paused") }
+    val completedTasks = automationTasks.count { task -> task["status"]?.toString() == "succeeded" }
+    val failedTasks = automationTasks.filter { task -> task["status"]?.toString() == "failed" }
+    val knowledgeChanged = state.knowledgeAutomationStatus?.contains("Knowledge changed", ignoreCase = true) == true
+    val automationEnabled = state.aiOverview["queue_paused"]?.toString() != "true"
+    val fusionNeedsRebuild = status["rebuild_required"] == true || knowledgeChanged
+    val fusionHealthy = status["database_health"]?.toString() == "Healthy" && !fusionNeedsRebuild
+    val automationStatus = when {
+        runningTask != null -> "Running"
+        failedTasks.isNotEmpty() -> "Needs attention"
+        else -> "Idle"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Fusion Management", style = MaterialTheme.typography.headlineMedium)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Fusion Status", style = MaterialTheme.typography.titleMedium)
+                Text("Fusion Version: ${status["fusion_version"] ?: "Loading"}")
+                Text("Database Status: ${status["database_status"] ?: "Loading"}")
+                Text("Knowledge Packs: ${if (state.knowledgePacks.isEmpty()) "None installed" else "Healthy (${state.knowledgePacks.size} loaded)"}")
+                Text("Fusion Database: ${status["database_health"] ?: "Loading"}")
+                Text("Automation: $automationStatus")
+                Text("Search Index: ${status["search_index_status"] ?: "Loading"}")
+                Text("SQLite Health: ${status["sqlite_health"] ?: "Loading"}")
+                Text("Last Build: ${formatFusionTimestamp(status["last_build_ms"].asLongNullable() ?: 0L)}")
+                Text("Last Optimization: ${formatFusionTimestamp(status["last_optimization_ms"].asLongNullable() ?: 0L)}")
+                Text("Last Export: ${formatFusionTimestamp(status["exported_at_ms"].asLongNullable() ?: 0L)}")
+                Text("Rebuild Required: ${if (fusionNeedsRebuild) "Yes" else "No"}")
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Fusion Statistics", style = MaterialTheme.typography.titleMedium)
+                Text("Knowledge Packs Loaded: ${state.knowledgePacks.size}")
+                Text("Fusion Entries: ${status["fusion_entries"] ?: "Loading"}")
+                Text("Search Index: ${status["search_index_status"] ?: "Loading"}")
+                Text("Embedding Index: ${status["embedding_index_status"] ?: "Loading"}")
+                Text("Cache: ${status["cache_status"] ?: "Loading"}")
+                if (!logicalCounts.isNullOrEmpty()) {
+                    Text("Logical Tables: ${logicalCounts.size}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Automation Status", style = MaterialTheme.typography.titleMedium)
+                Text("Automation Enabled: ${if (automationEnabled) "Yes" else "No"}")
+                Text("Automation Idle: ${if (automationStatus == "Idle") "Yes" else "No"}")
+                Text("Knowledge Changed: ${if (knowledgeChanged) "Yes" else "No"}")
+                Text("Fusion Needs Rebuild: ${if (fusionNeedsRebuild) "Yes" else "No"}")
+                Text("Fusion Healthy: ${if (fusionHealthy) "Yes" else "No"}")
+                Text("Last Automation: ${formatFusionTimestamp(lastTask?.get("updated_at_ms").asLongNullable() ?: 0L)}")
+                Text("Last Rebuild: ${formatFusionTimestamp(status["last_build_ms"].asLongNullable() ?: 0L)}")
+                Text("Pending Tasks: $pendingTasks")
+                Text("Completed Tasks: $completedTasks")
+                Text("Failed Tasks: ${failedTasks.size}")
+                if (failedTasks.isNotEmpty()) {
+                    Text("Last Error: ${failedTasks.first()["error_message"] ?: "Task failed"}", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text("Last Error: None", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text("Health", style = MaterialTheme.typography.titleMedium)
+                Text("Database Integrity: ${status["database_integrity"] ?: "Loading"}")
+                Text("Index Integrity: ${status["index_integrity"] ?: "Loading"}")
+                Text("FTS Integrity: ${status["fts_integrity"] ?: "Loading"}")
+                Text("Missing References: ${status["missing_references"] ?: "Loading"}")
+                Text("Orphan Entries: ${status["orphan_entries"] ?: "Loading"}")
+                Text("Corrupted Records: ${status["corrupted_records"] ?: "Loading"}")
+                Text("Automation Consistency: ${if (failedTasks.isEmpty()) "Consistent" else "Needs attention"}")
+                Text("Knowledge Consistency: ${status["knowledge_consistency"] ?: "Loading"}")
+            }
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onRefresh) { Text("Refresh Status") }
+            Button(onClick = onExport) { Text("Export") }
+            Button(onClick = onRebuild) { Text("Rebuild") }
+        }
+        if (status["logical_content_preserved"] == false) {
+            Text("Rebuild aborted because logical Fusion row counts changed. No rebuild changes were committed.")
+        }
+        state.lastActionMessage?.let { message -> AsterionStatusNotice(message) }
+        state.errorMessage?.let { message -> AsterionStatusNotice(message, isError = true) }
+        Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+    }
+}
+
+private fun formatFusionTimestamp(value: Long): String {
+    return if (value <= 0L) "Never" else SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(value))
+}
+
+@Composable
+private fun RuntimeLogsScreen(
+    state: AppUiState,
+    onRefresh: () -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Logs", style = MaterialTheme.typography.headlineMedium)
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onRefresh) { Text("Refresh") }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (state.errorMessage != null) {
+                    AsterionStatusNotice(state.errorMessage, isError = true)
+                } else {
+                    Text("Current error: none")
+                }
+                if (state.lastActionMessage != null) {
+                    AsterionStatusNotice(state.lastActionMessage)
+                } else {
+                    Text("Last action: n/a")
+                }
+                Text("Scan status: ${state.scanStatus} (${state.scanProgress.toInt()}%)")
+            }
+        }
+
+        Text("Recent Scan Runs", style = MaterialTheme.typography.titleMedium)
+        if (state.scanRuns.isEmpty()) {
+            Text("No scan runs recorded.")
+        } else {
+            state.scanRuns.take(30).forEach { run ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("scan_id=${run["scan_id"]} status=${run["status"]}")
+                        Text("folder=${run["folder_uri"]?.toString().orEmpty().displayFolderLabel("(no folder)")}")
+                        Text("discovered=${run["discovered_count"]} skipped=${run["skipped_count"]}")
+                        val error = run["error_message"]?.toString().orEmpty()
+                        if (error.isNotBlank()) {
+                            Text("error=$error", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("AI Install Runs", style = MaterialTheme.typography.titleMedium)
+        if (state.aiInstallRuns.isEmpty()) {
+            Text("No AI install runs recorded.")
+        } else {
+            state.aiInstallRuns.take(30).forEach { row ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        val action = row["action"]?.toString().orEmpty()
+                        val modelId = row["model_id"]?.toString().orEmpty()
+                        val version = row["version"]?.toString().orEmpty()
+                        val status = row["status"]?.toString().orEmpty().replaceFirstChar { it.uppercase() }
+                        val retry = row["retry_count"] ?: 0
+                        Text(if (modelId.isNotBlank()) "$action $modelId@$version" else action)
+                        Text("Status: $status • Retries: $retry")
+                        val error = row["error_message"]?.toString().orEmpty()
+                        if (error.isNotBlank()) {
+                            AsterionStatusNotice(error, isError = true)
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("AI Execution Sessions", style = MaterialTheme.typography.titleMedium)
+        if (state.aiExecutionSessions.isEmpty()) {
+            Text("No AI sessions recorded.")
+        } else {
+            state.aiExecutionSessions.take(40).forEach { row ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("session=${row["session_id"]}")
+                        Text("task=${row["task_type"]} status=${row["status"]} progress=${row["progress"]}")
+                        Text("backend=${row["backend_id"]} runtime=${row["runtime_id"]}")
+                        val error = row["error_message"]?.toString().orEmpty()
+                        if (error.isNotBlank()) {
+                            Text("error=$error", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
+
+        Text("Runtime Health", style = MaterialTheme.typography.titleMedium)
+        if (state.aiRuntimeHealthSnapshots.isEmpty()) {
+            Text("No runtime health snapshots recorded.")
+        } else {
+            state.aiRuntimeHealthSnapshots.take(40).forEach { row ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("runtime=${row["runtime_id"]} backend=${row["backend_id"]}")
+                        Text("status=${row["status"]} healthy=${row["healthy"]} latency_ms=${row["latency_ms"]}")
+                        Text("captured_at=${row["captured_at_ms"]}")
+                    }
+                }
+            }
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Plugin Manager") }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        }
+    }
+}
+
+@Composable
 private fun SearchScreen(
     title: String,
     state: AppUiState,
@@ -1727,8 +3099,6 @@ private fun SearchScreen(
     onSemanticSearch: (String) -> Unit,
     onClearResults: () -> Unit,
     onOpenImage: (Map<String, Any>) -> Unit,
-    onSetFavorite: (Int, Boolean) -> Unit,
-    onSetRating: (Int, Int) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -1738,19 +3108,19 @@ private fun SearchScreen(
     var tagsCsv by rememberSaveable { mutableStateOf("") }
     var taxonomyKey by rememberSaveable { mutableStateOf("") }
     var taxonomyValue by rememberSaveable { mutableStateOf("") }
-    var minRatingText by rememberSaveable { mutableStateOf("") }
-    var maxRatingText by rememberSaveable { mutableStateOf("") }
     var includeInactive by rememberSaveable { mutableStateOf(false) }
-    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
     var sortBy by rememberSaveable { mutableStateOf("import_order") }
     var sortDirection by rememberSaveable { mutableStateOf("desc") }
     var sortMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var recentQueries by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var savedQueries by rememberSaveable { mutableStateOf(emptyList<String>()) }
 
     val results = state.searchResults.ifEmpty { state.images }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -1764,12 +3134,48 @@ private fun SearchScreen(
             label = { Text("Search bar") },
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onSearchByFilename(query) }) {
-                Text("Search by filename")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                val normalized = query.trim()
+                if (normalized.isNotBlank()) {
+                    recentQueries = (listOf(normalized) + recentQueries.filterNot { it.equals(normalized, ignoreCase = true) }).take(8)
+                    onSearchByFilename(normalized)
+                }
+            }, enabled = query.isNotBlank()) {
+                Text("Search")
             }
             Button(onClick = onClearResults) {
                 Text("Reset")
+            }
+            AssistChip(onClick = { query = "" }, label = { Text("Clear field") })
+            AssistChip(onClick = {
+                val normalized = query.trim()
+                if (normalized.isNotBlank() && normalized !in savedQueries) {
+                    savedQueries = (savedQueries + normalized).take(8)
+                }
+            }, label = { Text("Save search") })
+        }
+
+        if (recentQueries.isNotEmpty() || savedQueries.isNotEmpty()) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (recentQueries.isNotEmpty()) {
+                        Text("Recent searches", style = MaterialTheme.typography.titleSmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            recentQueries.forEach { recent ->
+                                AssistChip(onClick = { query = recent }, label = { Text(recent, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                            }
+                        }
+                    }
+                    if (savedQueries.isNotEmpty()) {
+                        Text("Saved searches", style = MaterialTheme.typography.titleSmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            savedQueries.forEach { saved ->
+                                AssistChip(onClick = { query = saved }, label = { Text(saved, maxLines = 1, overflow = TextOverflow.Ellipsis) })
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -1832,7 +3238,7 @@ private fun SearchScreen(
                     singleLine = true,
                     label = { Text("Tags (comma or | separated)") },
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = taxonomyKey,
                         onValueChange = { taxonomyKey = it },
@@ -1849,39 +3255,18 @@ private fun SearchScreen(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = minRatingText,
-                        onValueChange = { minRatingText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Min rating") },
-                    )
-                    OutlinedTextField(
-                        value = maxRatingText,
-                        onValueChange = { maxRatingText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Max rating") },
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AssistChip(
-                        onClick = { favoritesOnly = !favoritesOnly },
-                        label = { Text(if (favoritesOnly) "Favorites only: on" else "Favorites only: off") },
-                    )
                     AssistChip(
                         onClick = { includeInactive = !includeInactive },
                         label = { Text(if (includeInactive) "Include inactive: on" else "Include inactive: off") },
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         val payload = mutableMapOf<String, Any>(
                             "query" to query,
                             "sort_by" to sortBy,
                             "sort_direction" to sortDirection,
-                            "favorites_only" to favoritesOnly,
                             "include_inactive" to includeInactive,
                             "page" to 1,
                             "page_size" to 0,
@@ -1894,11 +3279,6 @@ private fun SearchScreen(
                             .map { it.trim() }
                             .filter { it.isNotBlank() }
                         if (tags.isNotEmpty()) payload["tags"] = tags
-
-                        val minRating = minRatingText.toIntOrNull()
-                        val maxRating = maxRatingText.toIntOrNull()
-                        if (minRating != null) payload["min_rating"] = minRating
-                        if (maxRating != null) payload["max_rating"] = maxRating
 
                         if (taxonomyKey.isNotBlank() && taxonomyValue.isNotBlank()) {
                             payload["taxonomy_filters"] = mapOf(taxonomyKey.trim() to taxonomyValue.trim())
@@ -1922,15 +3302,28 @@ private fun SearchScreen(
             }
         }
 
-        Text("Results: ${results.size}")
+        Text("Results: ${results.size} | Sort: $sortBy ${sortDirection.uppercase()}", style = MaterialTheme.typography.labelLarge)
         if (state.lastActionMessage != null) {
-            Text(state.lastActionMessage)
+            AsterionStatusNotice(state.lastActionMessage)
         }
         if (state.errorMessage != null) {
-            Text("Error: ${state.errorMessage}")
+            AsterionStatusNotice(message = state.errorMessage, isError = true)
         }
 
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.loading) {
+            AsterionProgressCard("Searching library", 0.35f, "Applying filters and preparing results.")
+        }
+
+        if (results.isEmpty()) {
+            AsterionEmptyState(
+                title = "No search results",
+                detail = "Try a broader term, clear a filter, or scan a library folder first.",
+            )
+        } else LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 4.dp),
+        ) {
             items(results) { item ->
                 val caption = item["filename"]?.toString().orEmpty().ifBlank { item["path"]?.toString().orEmpty() }
                 Card(
@@ -1942,26 +3335,7 @@ private fun SearchScreen(
                         Text(caption.ifBlank { "Untitled" })
                         Text(item["path"]?.toString().orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis)
                         val imageId = item.imageId()
-                        val favorite = item.favoriteFlag()
-                        val rating = item.ratingValue()
-                        Text("ID: ${imageId ?: "n/a"} | Favorite: $favorite | Rating: $rating")
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = {
-                                if (imageId != null) {
-                                    onSetFavorite(imageId, !favorite)
-                                }
-                            }, enabled = imageId != null) {
-                                Text(if (favorite) "Unfavorite" else "Favorite")
-                            }
-                            Button(onClick = {
-                                if (imageId != null) {
-                                    val next = if (rating >= 5) 0 else rating + 1
-                                    onSetRating(imageId, next)
-                                }
-                            }, enabled = imageId != null) {
-                                Text("Rate +1")
-                            }
-                        }
+                        Text("ID: ${imageId ?: "n/a"}")
                     }
                 }
             }
@@ -2003,6 +3377,7 @@ private fun SettingsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -2017,9 +3392,9 @@ private fun SettingsScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Runtime mode: Android standalone")
-                Text("Library URI:")
+                Text("Library folder:")
                 Text(
-                    text = state.selectedLibraryUri.ifBlank { "No folder selected." },
+                    text = state.selectedLibraryUri.displayFolderLabel("No folder selected."),
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -2043,13 +3418,16 @@ private fun SettingsScreen(
                 if (state.libraryFolders.isEmpty()) {
                     Text("No folders in manager.")
                 } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    LazyColumn(
+                        modifier = Modifier.heightIn(max = 320.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         items(state.libraryFolders) { folder ->
                             val folderUri = folder["folder_uri"]?.toString().orEmpty()
                             val enabled = folder["enabled"] as? Boolean ?: false
                             Card(modifier = Modifier.fillMaxWidth()) {
                                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text(folderUri, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                    Text(folderUri.displayFolderLabel("(no folder)"), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text("Enabled: $enabled")
                                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                         Button(onClick = { onSetFolderEnabled(folderUri, !enabled) }) {
@@ -2178,8 +3556,6 @@ private fun StatisticsScreen(
                 Text("Health: ${state.health["status"] ?: state.health["healthy"] ?: "unknown"}")
                 Text("Total images: ${state.stats["total_images"] ?: state.images.size}")
                 Text("Total folders: ${state.stats["total_folders"] ?: state.libraryFolders.size}")
-                Text("Favorites: ${state.stats["total_favorites"] ?: 0}")
-                Text("Average rating: ${state.stats["avg_rating"] ?: 0.0}")
                 Text("Tagged images: ${imageStats.taggedImages}")
                 Text("Average resolution: ${imageStats.avgResolution}")
                 Text("Storage used: ${imageStats.storageUsedMb} MB")
@@ -2197,12 +3573,16 @@ private fun StatisticsScreen(
         if (state.scanRuns.isEmpty()) {
             Text("No scan runs yet.")
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 4.dp),
+            ) {
                 items(state.scanRuns) { run ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("scan_id: ${run["scan_id"]}")
-                            Text("folder_uri: ${run["folder_uri"]}")
+                            Text("folder: ${run["folder_uri"]?.toString().orEmpty().displayFolderLabel("(no folder)")}")
                             Text("status: ${run["status"]}")
                             Text("discovered_count: ${run["discovered_count"]} | skipped_count: ${run["skipped_count"]}")
                             Text("started_at_ms: ${run["started_at_ms"]}")
@@ -2217,11 +3597,14 @@ private fun StatisticsScreen(
             }
         }
 
-        MapListScreen(
-            title = "Raw statistics",
-            items = listOf(state.stats),
-            onNavigate = onNavigate,
-        )
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Library statistics", style = MaterialTheme.typography.titleMedium)
+                state.stats.entries.take(10).forEach { entry ->
+                    Text("${entry.key}: ${entry.value}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
     }
 }
 
@@ -2333,14 +3716,6 @@ private fun sortComparator(sortBy: String, sortDirection: String): Comparator<Ma
             }
         }
 
-        fun cmpBool(left: Boolean, right: Boolean): Int {
-            return when {
-                left == right -> 0
-                left -> 1 * direction
-                else -> -1 * direction
-            }
-        }
-
         val result = when (sortBy) {
             "filename" -> a["filename"]?.toString().orEmpty().compareTo(b["filename"]?.toString().orEmpty()) * direction
             "date_added" -> cmpLong(a["date_indexed_ms"].asLongNullable(), b["date_indexed_ms"].asLongNullable())
@@ -2353,8 +3728,6 @@ private fun sortComparator(sortBy: String, sortDirection: String): Comparator<Ma
                 val bArea = ((bMeta?.get("width").asIntNullable() ?: 0) * (bMeta?.get("height").asIntNullable() ?: 0)).toLong()
                 cmpLong(aArea, bArea)
             }
-            "rating" -> cmpInt(a.ratingValue(), b.ratingValue())
-            "favorites" -> cmpBool(a.favoriteFlag(), b.favoriteFlag())
             "random" -> if (Math.random() < 0.5) -1 else 1
             else -> 0
         }
@@ -2369,7 +3742,7 @@ private fun sortComparator(sortBy: String, sortDirection: String): Comparator<Ma
 
 private fun Any?.asIntNullable(): Int? = when (this) {
     is Number -> this.toInt()
-    is String -> this.toIntOrNull()
+    is String -> this.toIntOrNull() ?: this.toDoubleOrNull()?.takeIf { it % 1.0 == 0.0 }?.toInt()
     else -> null
 }
 
@@ -2400,17 +3773,16 @@ private fun ScanControlsCard(
     onResumeScan: () -> Unit,
     onCancelScan: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Scan status: ${state.scanStatus}")
-            Text("Discovered images: ${state.scanDiscoveredImages}")
-            LinearProgressIndicator(
-                progress = (state.scanProgress / 100.0).toFloat().coerceIn(0f, 1f),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text("Progress: ${state.scanProgress.toInt()}%")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AsterionProgressCard(
+            title = "Library scan",
+            progress = (state.scanProgress / 100.0).toFloat(),
+            detail = "Stage: ${state.scanStatus.replace('_', ' ')} | Processed: ${state.scanDiscoveredImages} images | ${state.scanProgress.toInt()}% complete",
+        )
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onStartScan, enabled = state.selectedLibraryUri.isNotBlank()) {
                     Text("Start")
                 }
@@ -2426,6 +3798,7 @@ private fun ScanControlsCard(
                 ) {
                     Text("Cancel")
                 }
+            }
             }
         }
     }
@@ -2450,14 +3823,16 @@ private fun MapListScreen(
         }
 
         if (items.isEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "No data available in local runtime.",
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
+            AsterionEmptyState(
+                title = "Nothing to show yet",
+                detail = "Add a library folder or run a scan to begin.",
+            )
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 4.dp),
+            ) {
                 items(items) { item ->
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -2483,8 +3858,66 @@ private fun MapListScreen(
 }
 
 @Composable
+private fun CollectionsScreen(
+    collections: List<Map<String, Any>>,
+    onOpenCollection: (String) -> Unit,
+    onNavigate: (AppDestination) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Collections", style = MaterialTheme.typography.headlineMedium)
+
+        if (collections.isEmpty()) {
+            AsterionEmptyState(
+                title = "No collections yet",
+                detail = "Collections will appear after you organize or scan your library.",
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 4.dp),
+            ) {
+                items(collections) { collection ->
+                    val metadata = collection["metadata"] as? Map<*, *>
+                    val folderUri = metadata?.get("folder_uri")?.toString().orEmpty()
+                    val name = collection["name"]?.toString().orEmpty().ifBlank { folderLabelFromUri(folderUri) }
+                    val imageCount = collection["image_count"]?.toString().orEmpty().ifBlank { "0" }
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(name)
+                            Text("Images: $imageCount", style = MaterialTheme.typography.bodySmall)
+                            if (folderUri.isNotBlank()) {
+                                Text(folderUri, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Button(onClick = { onOpenCollection(folderUri) }) {
+                                    Text("Open In Search")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { onNavigate(AppDestination.Search) }) {
+                Text("Search")
+            }
+            Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
+                Text("Dashboard")
+            }
+        }
+    }
+}
+
+@Composable
 private fun TagScreen(
     tags: List<String>,
+    onSearchTag: (String) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
     Column(
@@ -2496,20 +3929,33 @@ private fun TagScreen(
         Text("Tags", style = MaterialTheme.typography.headlineMedium)
 
         if (tags.isEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text(
-                    text = "No tags available in local runtime.",
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
+            AsterionEmptyState(
+                title = "No tags yet",
+                detail = "Tags will appear after images are scanned or updated.",
+            )
         } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 4.dp),
+            ) {
                 items(tags) { tag ->
                     Card(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = tag,
-                            modifier = Modifier.padding(12.dp),
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = tag,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Button(onClick = { onSearchTag(tag) }) {
+                                Text("Search")
+                            }
+                        }
                     }
                 }
             }
@@ -2528,37 +3974,41 @@ private fun TagScreen(
 }
 
 @Composable
-private fun DataOverviewScreen(
-    title: String,
-    lines: List<String>,
-    onNavigate: (AppDestination) -> Unit,
-) {
+private fun AsterionAboutScreen(onNavigate: (AppDestination) -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineMedium)
-
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(lines) { line ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = line,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
+        Spacer(modifier = Modifier.height(24.dp))
+        Image(
+            painter = painterResource(R.drawable.asterioncore_logo),
+            contentDescription = "AsterionCore logo",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(260.dp),
+            contentScale = ContentScale.Fit,
+        )
+        Text("AsterionCore", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            "Illustration intelligence, organized.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("Android standalone edition", style = MaterialTheme.typography.titleMedium)
+                Text("Version 2.0.0", style = MaterialTheme.typography.bodyMedium)
             }
         }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
-                Text("Dashboard")
-            }
-            Button(onClick = { onNavigate(AppDestination.Settings) }) {
-                Text("Settings")
-            }
+        Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
+            Text("Open Dashboard")
         }
     }
 }
@@ -2643,6 +4093,15 @@ private fun FileManagerScreen(
         else -> null
     }
 
+    val isCompactLayout = LocalConfiguration.current.screenWidthDp < 840
+    val panelRowModifier = if (isCompactLayout) {
+        Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+    } else {
+        Modifier.fillMaxWidth()
+    }
+
     fun buildPayload(): Map<String, Any> {
         val payload = mutableMapOf<String, Any>(
             "action" to action,
@@ -2668,11 +4127,17 @@ private fun FileManagerScreen(
 
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+                .weight(1f)
+                .then(panelRowModifier),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Card(modifier = Modifier.weight(0.26f).fillMaxHeight()) {
+            Card(
+                modifier = if (isCompactLayout) {
+                    Modifier.width(280.dp).fillMaxHeight()
+                } else {
+                    Modifier.weight(0.26f).fillMaxHeight()
+                },
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -2720,7 +4185,13 @@ private fun FileManagerScreen(
                 }
             }
 
-            Card(modifier = Modifier.weight(0.44f).fillMaxHeight()) {
+            Card(
+                modifier = if (isCompactLayout) {
+                    Modifier.width(420.dp).fillMaxHeight()
+                } else {
+                    Modifier.weight(0.44f).fillMaxHeight()
+                },
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -2755,7 +4226,7 @@ private fun FileManagerScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             contentPadding = PaddingValues(bottom = 8.dp),
                         ) {
-                            items(shownImages) { item ->
+                            items(items = shownImages, key = { item -> item.imageId() ?: item["uri"].toString() }) { item ->
                                 val id = item.imageId()
                                 val selected = id != null && selectedImageIds.contains(id)
                                 val title = item["filename"]?.toString().orEmpty().ifBlank { "Image" }
@@ -2801,7 +4272,13 @@ private fun FileManagerScreen(
                 }
             }
 
-            Card(modifier = Modifier.weight(0.30f).fillMaxHeight()) {
+            Card(
+                modifier = if (isCompactLayout) {
+                    Modifier.width(300.dp).fillMaxHeight()
+                } else {
+                    Modifier.weight(0.30f).fillMaxHeight()
+                },
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -2936,7 +4413,7 @@ private fun FileManagerScreen(
                     }
 
                     LinearProgressIndicator(
-                        progress = state.fileOperationProgress.toFloat().coerceIn(0f, 1f),
+                        progress = { state.fileOperationProgress.toFloat().coerceIn(0f, 1f) },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text("${(state.fileOperationProgress * 100.0).toInt()}%")
@@ -2990,13 +4467,19 @@ private fun FileManagerScreen(
 }
 
 private fun Map<String, Any>.imageId(): Int? {
-    val raw = this["image_id"]
-    return when (raw) {
-        is Number -> raw.toInt()
-        is String -> raw.toIntOrNull()
-        else -> null
+    val primary = this["image_id"].asIntNullable() ?: this["id"].asIntNullable()
+    if (primary != null && primary > 0) {
+        return primary
     }
+    val metadata = this["metadata"] as? Map<*, *> ?: return null
+    val nested = metadata["image_id"].asIntNullable() ?: metadata["id"].asIntNullable()
+    return nested?.takeIf { it > 0 }
 }
+
+private fun Map<String, Any>.reviewItemId(): String = this["id"]?.toString()
+    ?: this["item_id"]?.toString()
+    ?: this["path"]?.toString()
+    ?: hashCode().toString()
 
 private fun Map<String, Any>.folderUriValue(): String {
     val raw = this["folder_uri"]?.toString().orEmpty()
@@ -3007,51 +4490,10 @@ private fun Map<String, Any>.folderUriValue(): String {
 }
 
 private fun folderLabelFromUri(uri: String): String {
-    if (uri.isBlank()) {
-        return "(none)"
-    }
-    val normalized = uri.trimEnd('/')
-    val segment = normalized.substringAfterLast('/')
-    if (segment.isNotBlank()) {
-        return segment
-    }
-    return normalized
+    return uri.displayFolderLabel("(none)")
 }
 
-private fun Map<String, Any>.favoriteFlag(): Boolean {
-    val top = this["favorite"]
-    if (top is Boolean) {
-        return top
-    }
-    if (top is Number) {
-        return top.toInt() != 0
-    }
-    val metadata = this["metadata"] as? Map<*, *> ?: return false
-    val nested = metadata["favorite"]
-    return when (nested) {
-        is Boolean -> nested
-        is Number -> nested.toInt() != 0
-        is String -> nested.equals("true", ignoreCase = true) || nested == "1"
-        else -> false
-    }
-}
-
-private fun Map<String, Any>.ratingValue(): Int {
-    val top = this["rating"]
-    if (top is Number) {
-        return top.toInt()
-    }
-    if (top is String) {
-        return top.toIntOrNull() ?: 0
-    }
-    val metadata = this["metadata"] as? Map<*, *> ?: return 0
-    val nested = metadata["rating"]
-    return when (nested) {
-        is Number -> nested.toInt()
-        is String -> nested.toIntOrNull() ?: 0
-        else -> 0
-    }
-}
+private fun String.displayFolderLabel(emptyLabel: String): String = FolderUriUtils.displayName(this).ifBlank { emptyLabel }
 
 private fun metadataRows(selected: Map<String, Any>): List<String> {
     val lines = mutableListOf<String>()
@@ -3073,8 +4515,6 @@ private fun metadataRows(selected: Map<String, Any>): List<String> {
     lines += "Modified date: ${formatTimestamp(metadata["modified_at_ms"] ?: metadata["last_modified_ms"])}"
     lines += "Indexed date: ${formatTimestamp(metadata["date_indexed_ms"])}"
     lines += "Folder: ${displayFolderName(metadata)}"
-    lines += "Favorite: ${if (selected.favoriteFlag()) "yes" else "no"}"
-    lines += "Rating: ${selected.ratingValue()}"
     lines += "Tags: ${tags.joinToString(separator = ", ") { it }.ifBlank { "none" }}"
     return lines
 }
@@ -3084,14 +4524,7 @@ private fun displayFolderName(metadata: Map<*, *>): String {
         ?: metadata["folder_uri"]?.toString()
         ?: metadata["scan_source"]?.toString()
         ?: return "n/a"
-    val decoded = Uri.decode(raw).trim()
-    val segment = decoded
-        .substringAfterLast('/')
-        .substringAfterLast(':')
-        .substringBefore('?')
-        .substringBefore('#')
-        .trim()
-    return segment.ifBlank { "n/a" }
+    return raw.displayFolderLabel("n/a")
 }
 
 private fun formatTimestamp(value: Any?): String {

@@ -1,11 +1,16 @@
 package com.ailm.android.ui.viewmodel
 
+import android.content.Context
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ailm.android.runtime.StandaloneRuntime
+import com.ailm.android.runtime.ai.LocalAiJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,6 +18,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.File
 
 data class AppUiState(
     val loading: Boolean = false,
@@ -28,6 +35,22 @@ data class AppUiState(
     val knowledgePacks: List<Map<String, Any>> = emptyList(),
     val reviewQueue: List<Map<String, Any>> = emptyList(),
     val tags: List<String> = emptyList(),
+    val aiOverview: Map<String, Any> = emptyMap(),
+    val aiExecutionChain: Map<String, Any> = emptyMap(),
+    val aiHardwareProfile: Map<String, Any> = emptyMap(),
+    val aiBackends: List<Map<String, Any>> = emptyList(),
+    val aiSettings: Map<String, Any> = emptyMap(),
+    val aiAvailableModels: List<Map<String, Any>> = emptyList(),
+    val aiInstalledModels: List<Map<String, Any>> = emptyList(),
+    val aiTasks: List<Map<String, Any>> = emptyList(),
+    val aiInstallRuns: List<Map<String, Any>> = emptyList(),
+    val aiExecutionSessions: List<Map<String, Any>> = emptyList(),
+    val aiRuntimeHealthSnapshots: List<Map<String, Any>> = emptyList(),
+    val aiPlugins: List<Map<String, Any>> = emptyList(),
+    val aiCapabilities: List<Map<String, Any>> = emptyList(),
+    val aiCacheEntries: List<Map<String, Any>> = emptyList(),
+    val aiLastPipelineResult: Map<String, Any> = emptyMap(),
+    val knowledgeAutomationStatus: String? = null,
     val settingsValues: Map<String, String> = emptyMap(),
     val lastMaintenanceResult: Map<String, Any> = emptyMap(),
     val lastActionMessage: String? = null,
@@ -36,6 +59,7 @@ data class AppUiState(
     val scanProgress: Double = 0.0,
     val scanDiscoveredImages: Int = 0,
     val selectedImage: Map<String, Any>? = null,
+    val activeViewerContext: List<Map<String, Any>> = emptyList(),
     val fileOperationPreview: List<Map<String, Any>> = emptyList(),
     val fileOperationResults: List<Map<String, Any>> = emptyList(),
     val fileOperationProgress: Double = 0.0,
@@ -47,6 +71,23 @@ data class AppUiState(
 
 private const val VM_TRACE_TAG = "AilmTraceVM"
 private const val FILE_OP_TIMING_TAG = "AilmFileOpTiming"
+
+private data class LocalAiSnapshot(
+    val overview: Map<String, Any>,
+    val executionChain: Map<String, Any>,
+    val hardwareProfile: Map<String, Any>,
+    val backends: List<Map<String, Any>>,
+    val settings: Map<String, Any>,
+    val availableModels: List<Map<String, Any>>,
+    val installedModels: List<Map<String, Any>>,
+    val tasks: List<Map<String, Any>>,
+    val installRuns: List<Map<String, Any>>,
+    val executionSessions: List<Map<String, Any>>,
+    val runtimeHealthSnapshots: List<Map<String, Any>>,
+    val plugins: List<Map<String, Any>>,
+    val capabilities: List<Map<String, Any>>,
+    val cacheEntries: List<Map<String, Any>>,
+)
 
 class AppViewModel : ViewModel() {
 
@@ -91,16 +132,28 @@ class AppViewModel : ViewModel() {
                 val knowledgePacks = StandaloneRuntime.listKnowledgePacks()
                 val reviewQueue = StandaloneRuntime.getReviewQueue()
                 val tags = StandaloneRuntime.getTags()
+                val ai = collectLocalAiSnapshot(previous)
 
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
+                    val selectedImageId = current.selectedImage?.resolvedImageIdOrZero() ?: 0
+                    val refreshedSearchResults = reconcileSearchResults(
+                        currentImages = current.images,
+                        currentSearchResults = current.searchResults,
+                        refreshedImages = images,
+                    )
+                    val refreshedSelectedImage = if (selectedImageId > 0) {
+                        images.firstOrNull { row -> row.resolvedImageIdOrZero() == selectedImageId } ?: current.selectedImage
+                    } else {
+                        current.selectedImage
+                    }
                     _uiState.value = AppUiState(
                         loading = false,
                         health = health,
                         stats = stats,
                         images = images,
-                        searchResults = if (current.searchResults.isEmpty()) images else current.searchResults,
-                        totalResults = if (current.searchResults.isEmpty()) images.size else current.totalResults,
+                        searchResults = refreshedSearchResults,
+                        totalResults = refreshedSearchResults.size,
                         collections = collections,
                         libraryFolders = folders,
                         scanRuns = scanRuns,
@@ -108,6 +161,22 @@ class AppViewModel : ViewModel() {
                         knowledgePacks = knowledgePacks,
                         reviewQueue = reviewQueue,
                         tags = tags,
+                        aiOverview = ai.overview,
+                        aiExecutionChain = ai.executionChain,
+                        aiHardwareProfile = ai.hardwareProfile,
+                        aiBackends = ai.backends,
+                        aiSettings = ai.settings,
+                        aiAvailableModels = ai.availableModels,
+                        aiInstalledModels = ai.installedModels,
+                        aiTasks = ai.tasks,
+                        aiInstallRuns = ai.installRuns,
+                        aiExecutionSessions = ai.executionSessions,
+                        aiRuntimeHealthSnapshots = ai.runtimeHealthSnapshots,
+                        aiPlugins = ai.plugins,
+                        aiCapabilities = ai.capabilities,
+                        aiCacheEntries = ai.cacheEntries,
+                        aiLastPipelineResult = current.aiLastPipelineResult,
+                        knowledgeAutomationStatus = current.knowledgeAutomationStatus,
                         settingsValues = current.settingsValues,
                         lastMaintenanceResult = current.lastMaintenanceResult,
                         lastActionMessage = current.lastActionMessage,
@@ -115,7 +184,7 @@ class AppViewModel : ViewModel() {
                         scanStatus = current.scanStatus,
                         scanProgress = current.scanProgress,
                         scanDiscoveredImages = current.scanDiscoveredImages,
-                        selectedImage = current.selectedImage,
+                        selectedImage = refreshedSelectedImage,
                         fileOperationPreview = current.fileOperationPreview,
                         fileOperationResults = current.fileOperationResults,
                         fileOperationProgress = current.fileOperationProgress,
@@ -336,110 +405,44 @@ class AppViewModel : ViewModel() {
 
     fun rescanFolder(folderUri: String) {
         runIoAction {
-            StandaloneRuntime.rescanFolder(folderUri)
+            val result = StandaloneRuntime.rescanFolder(folderUri)
+            val ok = result["ok"].asBooleanOrFalse()
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
-                    scanStatus = "running",
-                    lastActionMessage = "Folder rescan started.",
+                    lastActionMessage = if (ok) {
+                        "Folder refresh completed."
+                    } else {
+                        result["message"]?.toString() ?: "Folder refresh failed."
+                    },
                 )
             }
-            refreshScanStatus()
-            ensureScanPolling()
+            refreshDashboard()
         }
     }
 
     fun rescanEnabledFolders() {
         runIoAction {
             val runs = StandaloneRuntime.rescanEnabledFolders()
+            val succeeded = runs.count { it["ok"].asBooleanOrFalse() }
+            val failed = runs.size - succeeded
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
-                    scanStatus = if (runs.isNotEmpty()) "running" else _uiState.value.scanStatus,
-                    lastActionMessage = "Requested rescan for ${runs.size} enabled folder(s).",
+                    lastActionMessage = if (failed == 0) {
+                        "Refreshed $succeeded enabled folder(s)."
+                    } else {
+                        "Refreshed $succeeded folder(s); $failed failed."
+                    },
                 )
             }
-            refreshScanStatus()
-            ensureScanPolling()
-        }
-    }
-
-    fun setImageFavorite(imageId: Int, favorite: Boolean) {
-        Log.d(VM_TRACE_TAG, "ViewModel receives favorite: imageId=$imageId nextFavorite=$favorite")
-        runIoAction {
-            val ok = StandaloneRuntime.setImageFavorite(imageId, favorite)
-            Log.d(VM_TRACE_TAG, "ViewModel favorite runtime result: imageId=$imageId ok=$ok")
-            var updatedImage: Map<String, Any>? = null
-            withContext(Dispatchers.Main) {
-                if (ok) {
-                    updatedImage = updateImageState(imageId) { image ->
-                        val metadata = (image["metadata"] as? Map<*, *>)
-                            ?.mapNotNull { (key, value) -> (key as? String)?.let { it to value } }
-                            ?.toMap()
-                            ?.toMutableMap()
-                            ?: mutableMapOf()
-                        metadata["favorite"] = favorite
-                        image.toMutableMap().apply {
-                            this["favorite"] = favorite
-                            this["metadata"] = metadata
-                        }
-                    }
-                    Log.d(VM_TRACE_TAG, "ViewModel favorite state staged: imageId=$imageId updatedImage=${imageSummary(updatedImage)}")
-                } else {
-                    val currentSelectedId = _uiState.value.selectedImage?.get("image_id")
-                    Log.d(
-                        VM_TRACE_TAG,
-                        "Favorite update failed: requestedImageId=$imageId currentUISelectedImageId=$currentSelectedId selectedImage=${imageSummary(_uiState.value.selectedImage)}",
-                    )
-                }
-                _uiState.value = _uiState.value.copy(lastActionMessage = if (ok) {
-                    if (favorite) "Marked favorite." else "Favorite removed."
-                } else {
-                    "Favorite update failed."
-                })
-            }
-            if (ok) {
-                refreshImageInState(imageId, updatedImage)
-            }
-        }
-    }
-
-    fun setImageRating(imageId: Int, rating: Int) {
-        Log.d(VM_TRACE_TAG, "ViewModel receives rating: imageId=$imageId requestedRating=$rating")
-        runIoAction {
-            val bounded = rating.coerceIn(0, 5)
-            val ok = StandaloneRuntime.setImageRating(imageId, bounded)
-            Log.d(VM_TRACE_TAG, "ViewModel rating runtime result: imageId=$imageId boundedRating=$bounded ok=$ok")
-            var updatedImage: Map<String, Any>? = null
-            withContext(Dispatchers.Main) {
-                if (ok) {
-                    updatedImage = updateImageState(imageId) { image ->
-                        val metadata = (image["metadata"] as? Map<*, *>)
-                            ?.mapNotNull { (key, value) -> (key as? String)?.let { it to value } }
-                            ?.toMap()
-                            ?.toMutableMap()
-                            ?: mutableMapOf()
-                        metadata["rating"] = bounded
-                        image.toMutableMap().apply {
-                            this["rating"] = bounded
-                            this["metadata"] = metadata
-                        }
-                    }
-                    Log.d(VM_TRACE_TAG, "ViewModel rating state staged: imageId=$imageId updatedImage=${imageSummary(updatedImage)}")
-                } else {
-                    val currentSelectedId = _uiState.value.selectedImage?.get("image_id")
-                    Log.d(
-                        VM_TRACE_TAG,
-                        "Rating update failed: requestedImageId=$imageId currentUISelectedImageId=$currentSelectedId selectedImage=${imageSummary(_uiState.value.selectedImage)}",
-                    )
-                }
-                _uiState.value = _uiState.value.copy(lastActionMessage = if (ok) "Rating set to $bounded." else "Rating update failed.")
-            }
-            if (ok) {
-                refreshImageInState(imageId, updatedImage)
-            }
+            refreshDashboard()
         }
     }
 
     fun setImageTags(imageId: Int, tagsCsv: String) {
+        if (imageId <= 0) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Invalid image selection for tag update.")
+            return
+        }
         val tags = tagsCsv
             .split(',', '|')
             .map { it.trim().replace(Regex("\\s+"), " ") }
@@ -475,10 +478,7 @@ class AppViewModel : ViewModel() {
             }
             if (ok) {
                 refreshImageInState(imageId, updatedImage)
-                val latestTags = StandaloneRuntime.getTags()
-                withContext(Dispatchers.Main) {
-                    _uiState.value = _uiState.value.copy(tags = latestTags)
-                }
+                refreshOperationSummaries(includeTags = true)
             }
         }
     }
@@ -579,8 +579,906 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    fun refreshLocalAiState() {
+        runIoAction {
+            refreshLocalAiStateInternal(clearError = true)
+        }
+    }
+
+    fun detectAiHardwareProfile() {
+        runIoAction {
+            val profile = StandaloneRuntime.detectAiHardwareProfile()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiHardwareProfile = profile,
+                    lastActionMessage = "AI hardware profile refreshed.",
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun validateLocalAiInfrastructure() {
+        runIoAction {
+            val result = StandaloneRuntime.validateLocalAiInfrastructure()
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Local AI infrastructure is healthy."
+                    } else {
+                        "Local AI infrastructure validation failed."
+                    },
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun pauseAiQueue() {
+        runIoAction {
+            val ok = StandaloneRuntime.pauseAiQueue()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = if (ok) "AI queue paused." else "Failed to pause AI queue.",
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun resumeAiQueue() {
+        runIoAction {
+            val ok = StandaloneRuntime.resumeAiQueue()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = if (ok) "AI queue resumed." else "Failed to resume AI queue.",
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun updateAiSetting(settingKey: String, settingValue: String) {
+        val rawKey = settingKey.trim()
+        if (rawKey.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "AI setting key is required.")
+            return
+        }
+        val key = normalizeAiSettingKey(rawKey)
+        val value = parseAiSettingValue(key, settingValue)
+
+        runIoAction {
+            val updated = StandaloneRuntime.updateAiSettings(mapOf(key to value))
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiSettings = updated,
+                    lastActionMessage = "AI setting updated: $key",
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun detectAiModelUpdates() {
+        runIoAction {
+            val updates = StandaloneRuntime.detectAiModelUpdates()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = mapOf(
+                        "ok" to true,
+                        "updates" to updates,
+                        "count" to updates.size,
+                    ),
+                    lastActionMessage = "Detected ${updates.size} AI model update candidate(s).",
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun pruneAiCache() {
+        runIoAction {
+            val result = StandaloneRuntime.pruneAiCache()
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) "AI cache pruned." else "AI cache prune returned errors.",
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun verifyInstalledAiModel(modelId: String, version: String) {
+        val normalizedModelId = modelId.trim()
+        val normalizedVersion = version.trim()
+        if (normalizedModelId.isBlank() || normalizedVersion.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id and version are required.")
+            return
+        }
+        runIoAction {
+            val result = StandaloneRuntime.verifyInstalledAiModel(
+                mapOf(
+                    "model_id" to normalizedModelId,
+                    "version" to normalizedVersion,
+                ),
+            )
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Model verification passed: $normalizedModelId@$normalizedVersion"
+                    } else {
+                        "Model verification failed: $normalizedModelId@$normalizedVersion"
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun removeInstalledAiModel(modelId: String, version: String = "") {
+        val normalizedModelId = modelId.trim()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required.")
+            return
+        }
+        val normalizedVersion = version.trim()
+        runIoAction {
+            val payload = mutableMapOf<String, Any>(
+                "model_id" to normalizedModelId,
+                "delete_file" to false,
+            )
+            if (normalizedVersion.isNotBlank()) {
+                payload["version"] = normalizedVersion
+            }
+            val result = StandaloneRuntime.removeAiModel(payload)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        if (normalizedVersion.isBlank()) {
+                            "Removed installed model: $normalizedModelId"
+                        } else {
+                            "Removed installed model: $normalizedModelId@$normalizedVersion"
+                        }
+                    } else {
+                        "Failed to remove model: $normalizedModelId"
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun registerAvailableAiModel(form: Map<String, String>) {
+        val normalizedModelId = form["model_id"]?.trim().orEmpty()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required for model registration.")
+            return
+        }
+
+        runIoAction {
+            val payload = buildAiModelPayloadFromForm(form)
+            val result = StandaloneRuntime.registerAvailableAiModel(payload)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Registered available model: $normalizedModelId"
+                    } else {
+                        "Failed to register available model: $normalizedModelId"
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun importLocalAiModel(form: Map<String, String>) {
+        val normalizedModelId = form["model_id"]?.trim().orEmpty()
+        val sourcePath = form["source_path"]?.trim().orEmpty()
+        if (normalizedModelId.isBlank() || sourcePath.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id and source_path are required for local model import.")
+            return
+        }
+
+        runIoAction {
+            importLocalAiModelInternal(form, normalizedModelId, sourcePath)
+        }
+    }
+
+    fun importLocalAiModelDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        val normalizedModelId = form["model_id"]?.trim().orEmpty()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required for local model import.")
+            return
+        }
+
+        runIoAction {
+            val sourcePath = copyDocumentToAppStorage(context, uri, "models")
+            importLocalAiModelInternal(
+                form = form + mapOf("source_uri" to uri.toString()),
+                modelId = normalizedModelId,
+                sourcePath = sourcePath,
+            )
+        }
+    }
+
+    fun importLocalAiModelPackageTree(context: Context, uri: Uri, form: Map<String, String>) {
+        val normalizedModelId = form["model_id"]?.trim().orEmpty()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required for local model import.")
+            return
+        }
+
+        runIoAction {
+            val sourcePath = copyDocumentTreeToAppStorage(context, uri, "models")
+            importLocalAiModelInternal(
+                form = form + mapOf("source_uri" to uri.toString()),
+                modelId = normalizedModelId,
+                sourcePath = sourcePath,
+            )
+        }
+    }
+
+    fun registerAiModelDownload(form: Map<String, String>) {
+        val normalizedModelId = form["model_id"]?.trim().orEmpty()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required for download registration.")
+            return
+        }
+
+        runIoAction {
+            val payload = buildAiModelPayloadFromForm(form).toMutableMap()
+            form["priority"]?.trim()?.toIntOrNull()?.let { payload["priority"] = it }
+            val result = StandaloneRuntime.registerAiModelDownload(payload)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Registered model download: $normalizedModelId"
+                    } else {
+                        "Failed to register model download: $normalizedModelId"
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+            refreshResourceArtifacts()
+        }
+    }
+
+    fun setActiveAiModel(modelId: String, version: String = "", taskType: String = "") {
+        val normalizedModelId = modelId.trim()
+        if (normalizedModelId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "model_id is required to set active model.")
+            return
+        }
+
+        val normalizedTaskType = normalizeTaskType(taskType)
+        val keySuffix = if (normalizedTaskType.isBlank()) "" else ".${normalizedTaskType}"
+        val payload = mutableMapOf<String, Any>(
+            "active_model_id$keySuffix" to normalizedModelId,
+        )
+        if (version.trim().isNotBlank()) {
+            payload["active_model_version$keySuffix"] = version.trim()
+        }
+
+        runIoAction {
+            val updated = StandaloneRuntime.updateAiSettings(payload)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiSettings = updated,
+                    lastActionMessage = if (normalizedTaskType.isBlank()) {
+                        "Active model set to $normalizedModelId${if (version.isBlank()) "" else "@${version.trim()}"}."
+                    } else {
+                        "Active model set for $normalizedTaskType: $normalizedModelId${if (version.isBlank()) "" else "@${version.trim()}"}."
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun clearActiveAiModel(taskType: String = "") {
+        val normalizedTaskType = normalizeTaskType(taskType)
+        val keySuffix = if (normalizedTaskType.isBlank()) "" else ".${normalizedTaskType}"
+        val payload = mapOf<String, Any>(
+            "active_model_id$keySuffix" to "",
+            "active_model_version$keySuffix" to "",
+        )
+
+        runIoAction {
+            val updated = StandaloneRuntime.updateAiSettings(payload)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiSettings = updated,
+                    lastActionMessage = if (normalizedTaskType.isBlank()) {
+                        "Cleared active model selection."
+                    } else {
+                        "Cleared active model selection for $normalizedTaskType."
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun importFusionDatabasePayload(payload: String, format: String = "json", replaceExisting: Boolean = false) {
+        val sourcePayload = payload.trim()
+        if (sourcePayload.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Fusion import payload is required.")
+            return
+        }
+
+        runIoAction {
+            importFusionDatabaseInternal(sourcePayload, format, replaceExisting)
+        }
+    }
+
+    fun importFusionDatabaseDocument(context: Context, uri: Uri, format: String = "json", replaceExisting: Boolean = false) {
+        runIoAction {
+            importFusionDatabaseInternal(readDocumentText(context, uri), format, replaceExisting)
+        }
+    }
+
+    fun exportFusionDatabaseSnapshot(format: String = "json", pretty: Boolean = true) {
+        runIoAction {
+            val exportPayload = StandaloneRuntime.exportFusionDatabase(
+                format = format.trim().ifBlank { "json" },
+                pretty = pretty,
+            )
+            val result = mapOf(
+                "ok" to true,
+                "action" to "export_fusion_database",
+                "format" to format.trim().ifBlank { "json" },
+                "pretty" to pretty,
+                "bytes" to exportPayload.toByteArray().size,
+                "preview" to exportPayload.take(4000),
+            )
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = "Fusion database exported to in-memory payload preview.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun refreshFusionManagement() {
+        runIoAction {
+            val result = StandaloneRuntime.fusionManagementStatus() + mapOf("kind" to "fusion_management")
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastMaintenanceResult = result,
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun exportFusionManagement() {
+        runIoAction {
+            val export = StandaloneRuntime.exportFusionDatabaseFile()
+            val status = StandaloneRuntime.fusionManagementStatus()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastMaintenanceResult = status + export + mapOf("kind" to "fusion_management"),
+                    lastActionMessage = "Fusion database exported.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun rebuildFusionManagement() {
+        runIoAction {
+            val result = StandaloneRuntime.rebuildFusionOptimizations() + mapOf("kind" to "fusion_management")
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastMaintenanceResult = result,
+                    lastActionMessage = if (ok) "Fusion optimized structures rebuilt." else "Fusion rebuild requires attention.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun validateFusionDatabase() {
+        runIoAction {
+            val result = StandaloneRuntime.validateFusionDatabase()
+            val ok = result["ok"].asBooleanOrFalse() || result["valid"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) "Fusion database validation passed." else "Fusion database validation reported issues.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun previewExternalImport(form: Map<String, String>) {
+        val payload = buildExternalImportPayload(form) ?: return
+        runIoAction {
+            previewExternalImportInternal(payload)
+        }
+    }
+
+    fun previewExternalImportDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        runIoAction {
+            val payload = buildExternalImportPayload(form + mapOf("source" to readExternalImportDocument(context, uri, form)))
+                ?: return@runIoAction
+            previewExternalImportInternal(payload)
+        }
+    }
+
+    fun previewKnowledgePackDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        runIoAction {
+            val raw = readExternalImportDocument(context, uri, form)
+            val result = StandaloneRuntime.previewKnowledgePackDocument(raw, uri.lastPathSegment.orEmpty())
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result + mapOf("kind" to "knowledge_pack_preview"),
+                    lastActionMessage = result["message"]?.toString() ?: "Knowledge Pack preview ready.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun validateExternalImport(form: Map<String, String>) {
+        val payload = buildExternalImportPayload(form) ?: return
+        runIoAction {
+            validateExternalImportInternal(payload)
+        }
+    }
+
+    fun validateExternalImportDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        runIoAction {
+            val payload = buildExternalImportPayload(form + mapOf("source" to readExternalImportDocument(context, uri, form)))
+                ?: return@runIoAction
+            validateExternalImportInternal(payload)
+        }
+    }
+
+    fun validateKnowledgePackDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        runIoAction {
+            val raw = readExternalImportDocument(context, uri, form)
+            val result = StandaloneRuntime.validateKnowledgePackDocument(raw, uri.lastPathSegment.orEmpty())
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result + mapOf("kind" to "knowledge_pack_validation"),
+                    lastActionMessage = result["message"]?.toString() ?: "Knowledge Pack validation completed.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun importExternalDatabase(form: Map<String, String>) {
+        val payload = buildExternalImportPayload(form) ?: return
+        runIoAction {
+            importExternalDatabaseInternal(payload)
+        }
+    }
+
+    fun importExternalDatabaseDocument(context: Context, uri: Uri, form: Map<String, String>) {
+        runIoAction {
+            val payload = buildExternalImportPayload(form + mapOf("source" to readExternalImportDocument(context, uri, form)))
+                ?: return@runIoAction
+            importExternalDatabaseInternal(payload)
+        }
+    }
+
+    fun importKnowledgePackDocuments(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Choose at least one Knowledge Pack.")
+            return
+        }
+        runIoAction {
+            val results = StandaloneRuntime.importKnowledgePackDocuments(uris)
+            val imported = results.count { result -> result["ok"].asBooleanOrFalse() }
+            val duplicates = results.count { result -> result["message"]?.toString() == "Knowledge Pack already installed." }
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = mapOf("kind" to "knowledge_pack_import", "results" to results),
+                    lastActionMessage = "Imported $imported Knowledge Pack(s)${if (duplicates > 0) "; $duplicates already installed." else "."}",
+                    knowledgeAutomationStatus = if (imported > 0) "Knowledge changed\nPending Fusion rebuild" else _uiState.value.knowledgeAutomationStatus,
+                    errorMessage = null,
+                )
+            }
+            refreshResourceArtifacts()
+        }
+    }
+
+    fun previewKnowledgePack(filename: String) {
+        runIoAction {
+            val result = StandaloneRuntime.previewKnowledgePack(filename)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result + mapOf("kind" to "knowledge_pack_preview"),
+                    lastActionMessage = result["message"]?.toString() ?: "Knowledge Pack preview ready.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun replaceKnowledgePackDocument(filename: String, uri: Uri) {
+        runIoAction {
+            val result = StandaloneRuntime.replaceKnowledgePackDocument(filename, uri)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result + mapOf("kind" to "knowledge_pack_replace"),
+                    lastActionMessage = result["message"]?.toString() ?: if (ok) "Knowledge Pack replaced." else "Knowledge Pack replacement failed.",
+                    knowledgeAutomationStatus = if (ok) "Knowledge changed\nPending Fusion rebuild" else _uiState.value.knowledgeAutomationStatus,
+                    errorMessage = null,
+                )
+            }
+            if (ok) refreshResourceArtifacts()
+        }
+    }
+
+    fun removeKnowledgePack(filename: String) {
+        runIoAction {
+            val ok = StandaloneRuntime.removeKnowledgePack(filename)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = if (ok) "Knowledge Pack removed." else "Knowledge Pack removal failed.",
+                    knowledgeAutomationStatus = if (ok) "Knowledge changed\nPending Fusion rebuild" else _uiState.value.knowledgeAutomationStatus,
+                    errorMessage = null,
+                )
+            }
+            if (ok) refreshResourceArtifacts()
+        }
+    }
+
+    fun rollbackExternalImport(importId: String = "") {
+        runIoAction {
+            val normalized = importId.trim().ifBlank { null }
+            val result = StandaloneRuntime.rollbackImport(normalized)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Rollback import completed."
+                    } else {
+                        "Rollback import was not applied."
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshDashboard()
+        }
+    }
+
+    fun cancelExternalImport(importId: String) {
+        val normalized = importId.trim()
+        if (normalized.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "import_id is required to cancel import.")
+            return
+        }
+
+        runIoAction {
+            val ok = StandaloneRuntime.cancelImport(normalized)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = mapOf(
+                        "ok" to ok,
+                        "action" to "cancel_import",
+                        "import_id" to normalized,
+                    ),
+                    lastActionMessage = if (ok) {
+                        "Import cancellation requested: $normalized"
+                    } else {
+                        "Unable to request import cancellation: $normalized"
+                    },
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun controlAiTask(taskId: String, action: String) {
+        val normalizedTaskId = taskId.trim()
+        val normalizedAction = action.trim().lowercase()
+        if (normalizedTaskId.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "task_id is required.")
+            return
+        }
+        if (normalizedAction !in setOf("cancel", "pause", "resume", "retry")) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Unsupported task action: $normalizedAction")
+            return
+        }
+
+        runIoAction {
+            val ok = when (normalizedAction) {
+                "cancel" -> StandaloneRuntime.cancelAiTask(normalizedTaskId)
+                "pause" -> StandaloneRuntime.pauseAiTask(normalizedTaskId)
+                "resume" -> StandaloneRuntime.resumeAiTask(normalizedTaskId)
+                "retry" -> StandaloneRuntime.retryAiTask(normalizedTaskId)
+                else -> false
+            }
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = if (ok) {
+                        "Task ${normalizedAction.replaceFirstChar { it.uppercase() }} succeeded: $normalizedTaskId"
+                    } else {
+                        "Task ${normalizedAction.replaceFirstChar { it.uppercase() }} failed: $normalizedTaskId"
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun runSelectedImageAiPipeline(taskType: String, promptHint: String = "") {
+        val normalizedTaskType = normalizeTaskType(taskType)
+        if (normalizedTaskType.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "task_type is required.")
+            return
+        }
+        val selected = _uiState.value.selectedImage
+        val imageId = selected?.get("image_id").asIntOrZero()
+        if (imageId <= 0) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Select an image before running AI pipelines.")
+            return
+        }
+
+        runIoAction {
+            val payload = linkedMapOf<String, Any>(
+                "image_id" to imageId,
+            )
+            val prompt = promptHint.trim()
+            if (prompt.isNotBlank()) {
+                payload["prompt"] = prompt
+                payload["style_hint"] = prompt
+                payload["context"] = prompt
+            }
+            val payloadWithModelHint = withActiveModelHint(payload, normalizedTaskType)
+
+            val result = when (normalizedTaskType) {
+                "ocr" -> StandaloneRuntime.runOcrPipeline(payloadWithModelHint)
+                "captioning" -> StandaloneRuntime.runCaptioningPipeline(payloadWithModelHint)
+                "character_recognition" -> StandaloneRuntime.runCharacterRecognitionPipeline(payloadWithModelHint)
+                "series_recognition" -> StandaloneRuntime.runSeriesRecognitionPipeline(payloadWithModelHint)
+                "artist_recognition" -> StandaloneRuntime.runArtistRecognitionPipeline(payloadWithModelHint)
+                "tag_prediction" -> StandaloneRuntime.runTagPredictionPipeline(payloadWithModelHint)
+                "metadata_extraction" -> StandaloneRuntime.runMetadataExtractionPipeline(payloadWithModelHint)
+                "prompt_generation" -> StandaloneRuntime.runPromptGenerationPipeline(payloadWithModelHint)
+                "embedding_generation" -> StandaloneRuntime.runEmbeddingGenerationPipeline(payloadWithModelHint)
+                "duplicate_detection" -> StandaloneRuntime.runDuplicateDetectionPipeline(payloadWithModelHint)
+                "classification" -> StandaloneRuntime.runClassificationPipeline(payloadWithModelHint)
+                "detection" -> StandaloneRuntime.runDetectionPipeline(payloadWithModelHint)
+                "face_feature_extraction" -> StandaloneRuntime.runFaceFeatureExtractionPipeline(payloadWithModelHint)
+                "knowledge_pack_execution" -> StandaloneRuntime.runKnowledgePackExecution(payloadWithModelHint)
+                else -> StandaloneRuntime.runAiPipeline(payloadWithModelHint + mapOf("task_type" to normalizedTaskType))
+            }
+
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "${humanTaskName(normalizedTaskType)} completed for image #$imageId."
+                    } else {
+                        "${humanTaskName(normalizedTaskType)} failed for image #$imageId."
+                    },
+                    errorMessage = null,
+                )
+            }
+
+            if (ok) {
+                refreshImageInState(imageId)
+                val latestTags = StandaloneRuntime.getTags()
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(tags = latestTags)
+                }
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun runSelectedImageMultiStagePipeline(promptHint: String = "") {
+        val selected = _uiState.value.selectedImage
+        val imageId = selected?.get("image_id").asIntOrZero()
+        if (imageId <= 0) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Select an image before running multi-stage AI pipelines.")
+            return
+        }
+
+        val stages = listOf(
+            "ocr",
+            "captioning",
+            "character_recognition",
+            "series_recognition",
+            "artist_recognition",
+            "tag_prediction",
+            "metadata_extraction",
+            "classification",
+            "detection",
+            "face_feature_extraction",
+            "prompt_generation",
+        )
+
+        runIoAction {
+            val payload = linkedMapOf<String, Any>(
+                "image_id" to imageId,
+                "stages" to stages,
+            )
+            val prompt = promptHint.trim()
+            if (prompt.isNotBlank()) {
+                payload["prompt"] = prompt
+                payload["style_hint"] = prompt
+                payload["context"] = prompt
+            }
+            val payloadWithModelHint = withActiveModelHint(payload, "multi_stage")
+
+            val result = StandaloneRuntime.runMultiStageAiPipeline(payloadWithModelHint)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Multi-stage AI pipeline completed for image #$imageId."
+                    } else {
+                        "Multi-stage AI pipeline failed for image #$imageId."
+                    },
+                    errorMessage = null,
+                )
+            }
+
+            if (ok) {
+                refreshImageInState(imageId)
+                val latestTags = StandaloneRuntime.getTags()
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(tags = latestTags)
+                }
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun runBatchAiPipelineForVisibleImages(taskType: String, maxItems: Int = 24) {
+        val normalizedTaskType = normalizeTaskType(taskType)
+        if (normalizedTaskType.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "task_type is required for batch pipeline.")
+            return
+        }
+
+        val current = _uiState.value
+        val sourceRows = if (current.searchResults.isNotEmpty()) current.searchResults else current.images
+        val limit = maxItems.coerceIn(1, 200)
+        val imageIds = sourceRows
+            .mapNotNull { row ->
+                val id = row["image_id"].asIntOrZero()
+                if (id > 0) id else null
+            }
+            .distinct()
+            .take(limit)
+        if (imageIds.isEmpty()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "No visible images found for batch pipeline execution.")
+            return
+        }
+
+        runIoAction {
+            val items = imageIds.map { imageId ->
+                mapOf(
+                    "task_type" to normalizedTaskType,
+                    "image_id" to imageId,
+                )
+            }
+            val payloadWithModelHint = withActiveModelHint(
+                mapOf(
+                    "task_type" to normalizedTaskType,
+                    "items" to items,
+                ),
+                normalizedTaskType,
+            )
+            val result = StandaloneRuntime.runAiBatchPipeline(
+                payloadWithModelHint,
+            )
+            val ok = result["ok"].asBooleanOrFalse()
+            val succeeded = result["succeeded"].asIntOrZero()
+            val failed = result["failed"].asIntOrZero()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Batch ${humanTaskName(normalizedTaskType)} completed for ${imageIds.size} image(s)."
+                    } else {
+                        "Batch ${humanTaskName(normalizedTaskType)} finished with issues (ok=$succeeded, failed=$failed)."
+                    },
+                    errorMessage = null,
+                )
+            }
+
+            if (normalizedTaskType == "tag_prediction") {
+                val latestTags = StandaloneRuntime.getTags()
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(tags = latestTags)
+                }
+            }
+
+            val selectedImageId = _uiState.value.selectedImage?.get("image_id").asIntOrZero()
+            if (selectedImageId > 0 && selectedImageId in imageIds) {
+                refreshImageInState(selectedImageId)
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
+    fun enqueueSelectedImageAiTask(taskType: String) {
+        val normalizedTaskType = normalizeTaskType(taskType)
+        if (normalizedTaskType.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "task_type is required.")
+            return
+        }
+        val selected = _uiState.value.selectedImage
+        val imageId = selected?.get("image_id").asIntOrZero()
+        if (imageId <= 0) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Select an image before queueing AI tasks.")
+            return
+        }
+
+        runIoAction {
+            val payloadWithModelHint = withActiveModelHint(
+                mapOf(
+                    "task_type" to normalizedTaskType,
+                    "image_id" to imageId,
+                ),
+                normalizedTaskType,
+            )
+            val result = StandaloneRuntime.enqueueAiTask(payloadWithModelHint)
+            val ok = result["ok"].asBooleanOrFalse()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        "Queued ${humanTaskName(normalizedTaskType)} for image #$imageId."
+                    } else {
+                        "Failed to queue ${humanTaskName(normalizedTaskType)} for image #$imageId."
+                    },
+                    errorMessage = null,
+                )
+            }
+            refreshLocalAiStateInternal()
+        }
+    }
+
     fun selectImage(image: Map<String, Any>) {
-        _uiState.value = _uiState.value.copy(selectedImage = image)
+        _uiState.value = _uiState.value.copy(selectedImage = normalizeSelectedImage(image))
+    }
+
+    fun setActiveViewerContext(rows: List<Map<String, Any>>) {
+        _uiState.value = _uiState.value.copy(activeViewerContext = rows)
+    }
+
+    fun clearActiveViewerContext() {
+        _uiState.value = _uiState.value.copy(activeViewerContext = emptyList())
     }
 
     fun selectedImageUrl(): String? {
@@ -616,24 +1514,38 @@ class AppViewModel : ViewModel() {
                     lastActionMessage = "Executing file operations...",
                 )
             }
-            val response = StandaloneRuntime.executeFileOperations(payload)
-            val results = response["results"] as? List<Map<String, Any>> ?: emptyList()
-            val undoAvailable = response["undo_available"] as? Boolean ?: false
-            val ok = response["ok"] as? Boolean ?: false
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    fileOperationResults = results,
-                    fileOperationProgress = if (results.isEmpty()) 0.0 else 1.0,
-                    fileOperationRunning = false,
-                    fileOperationUndoAvailable = undoAvailable,
-                    lastActionMessage = if (ok) "Executed ${results.size} operation(s)." else (response["message"]?.toString() ?: "Execution failed."),
-                    selectedImage = if (ok) _uiState.value.selectedImage else _uiState.value.selectedImage,
-                    searchResults = _uiState.value.searchResults,
-                    totalResults = _uiState.value.totalResults,
-                )
-            }
-            if (ok) {
-                applyFileOperationResultsToUi(payload, results)
+            try {
+                val response = StandaloneRuntime.executeFileOperations(payload)
+                val results = response["results"] as? List<Map<String, Any>> ?: emptyList()
+                val undoAvailable = response["undo_available"] as? Boolean ?: false
+                val ok = response["ok"] as? Boolean ?: false
+                val hasSuccessfulResults = results.any { it["ok"] == true }
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        fileOperationResults = results,
+                        fileOperationProgress = if (results.isEmpty()) 0.0 else 1.0,
+                        fileOperationRunning = false,
+                        fileOperationUndoAvailable = undoAvailable,
+                        lastActionMessage = if (ok) {
+                            response["message"]?.toString() ?: "Executed ${results.size} operation(s)."
+                        } else {
+                            response["message"]?.toString() ?: "Execution failed."
+                        },
+                        selectedImage = _uiState.value.selectedImage,
+                        searchResults = _uiState.value.searchResults,
+                        totalResults = _uiState.value.totalResults,
+                    )
+                }
+                if (hasSuccessfulResults) {
+                    applyFileOperationResultsToUi(payload, results)
+                    refreshOperationSummaries(includeTags = true)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    if (_uiState.value.fileOperationRunning) {
+                        _uiState.value = _uiState.value.copy(fileOperationRunning = false)
+                    }
+                }
             }
         }
     }
@@ -651,46 +1563,54 @@ class AppViewModel : ViewModel() {
                 )
             }
 
-            val mergedResults = mutableListOf<Map<String, Any>>()
-            var overallOk = true
-            var undoAvailable = false
+            try {
+                val mergedResults = mutableListOf<Map<String, Any>>()
+                var overallOk = true
+                var undoAvailable = false
 
-            for (payload in payloads) {
-                val response = StandaloneRuntime.executeFileOperations(payload)
-                val results = response["results"] as? List<Map<String, Any>> ?: emptyList()
-                val ok = response["ok"] as? Boolean ?: false
-                mergedResults += results
-                overallOk = overallOk && ok
-                if (response["undo_available"] as? Boolean == true) {
-                    undoAvailable = true
+                for (payload in payloads) {
+                    val response = StandaloneRuntime.executeFileOperations(payload)
+                    val results = response["results"] as? List<Map<String, Any>> ?: emptyList()
+                    val ok = response["ok"] as? Boolean ?: false
+                    mergedResults += results
+                    overallOk = overallOk && ok
+                    if (response["undo_available"] as? Boolean == true) {
+                        undoAvailable = true
+                    }
+                    if (results.any { it["ok"] == true }) {
+                        applyFileOperationResultsToUi(payload, results)
+                    }
+                    if (!ok) {
+                        break
+                    }
                 }
-                if (ok) {
-                    applyFileOperationResultsToUi(payload, results)
-                }
-                if (!ok) {
-                    break
-                }
-            }
 
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    fileOperationResults = mergedResults,
-                    fileOperationProgress = if (mergedResults.isEmpty()) 0.0 else 1.0,
-                    fileOperationRunning = false,
-                    fileOperationUndoAvailable = undoAvailable,
-                    lastActionMessage = if (overallOk) {
-                        "Executed ${mergedResults.size} operation(s)."
-                    } else {
-                        "Execution failed."
-                    },
-                    selectedImage = _uiState.value.selectedImage,
-                    searchResults = _uiState.value.searchResults,
-                    totalResults = _uiState.value.totalResults,
-                )
-            }
+                withContext(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        fileOperationResults = mergedResults,
+                        fileOperationProgress = if (mergedResults.isEmpty()) 0.0 else 1.0,
+                        fileOperationRunning = false,
+                        fileOperationUndoAvailable = undoAvailable,
+                        lastActionMessage = if (overallOk) {
+                            "Executed ${mergedResults.size} operation(s)."
+                        } else {
+                            "Execution failed."
+                        },
+                        selectedImage = _uiState.value.selectedImage,
+                        searchResults = _uiState.value.searchResults,
+                        totalResults = _uiState.value.totalResults,
+                    )
+                }
 
-            if (overallOk) {
-                // State has already been updated incrementally per operation.
+                if (mergedResults.any { it["ok"] == true }) {
+                    refreshOperationSummaries(includeTags = true)
+                }
+            } finally {
+                withContext(Dispatchers.Main) {
+                    if (_uiState.value.fileOperationRunning) {
+                        _uiState.value = _uiState.value.copy(fileOperationRunning = false)
+                    }
+                }
             }
         }
     }
@@ -712,6 +1632,7 @@ class AppViewModel : ViewModel() {
             }
             if (ok) {
                 applyGroupedFileOperationResultsToUi(results)
+                refreshOperationSummaries(includeTags = true)
             }
         }
     }
@@ -752,23 +1673,18 @@ class AppViewModel : ViewModel() {
                     withContext(Dispatchers.Main) {
                         val stage8Start = SystemClock.elapsedRealtime()
                         val current = _uiState.value
-                        val images = current.images.toMutableList()
-                        val search = current.searchResults.toMutableList()
+                        val images = replaceRenamedImageRows(current.images, latestById)
+                        val search = replaceRenamedImageRows(current.searchResults, latestById)
+                        var selected = current.selectedImage
                         for ((id, latestRow) in latestById) {
-                            val imageIndex = images.indexOfFirst { row -> row["image_id"].asIntOrZero() == id }
-                            if (imageIndex >= 0) {
-                                images[imageIndex] = latestRow
-                            }
-                            if (search.isNotEmpty()) {
-                                val searchIndex = search.indexOfFirst { row -> row["image_id"].asIntOrZero() == id }
-                                if (searchIndex >= 0) {
-                                    search[searchIndex] = latestRow
-                                }
+                            if (selected?.resolvedImageIdOrZero() == id) {
+                                selected = latestRow
                             }
                         }
                         _uiState.value = current.copy(
                             images = images,
                             searchResults = search,
+                            selectedImage = selected,
                             totalResults = if (search.isEmpty()) current.totalResults else search.size,
                         )
                         val stage8Ms = SystemClock.elapsedRealtime() - stage8Start
@@ -817,6 +1733,18 @@ class AppViewModel : ViewModel() {
             "rename_folder", "create_folder", "delete_folder" -> {
                 applyFolderOperationResultsToUi(action, successful)
             }
+        }
+    }
+
+    private fun replaceRenamedImageRows(
+        rows: List<Map<String, Any>>,
+        latestById: Map<Int, Map<String, Any>>,
+    ): List<Map<String, Any>> {
+        val replacedIds = mutableSetOf<Int>()
+        return rows.mapNotNull { row ->
+            val imageId = row.resolvedImageIdOrZero()
+            val latest = latestById[imageId] ?: return@mapNotNull row
+            if (replacedIds.add(imageId)) latest else null
         }
     }
 
@@ -958,15 +1886,62 @@ class AppViewModel : ViewModel() {
 
     private fun Any?.asIntOrZero(): Int = when (this) {
         is Number -> this.toInt()
-        is String -> this.toIntOrNull() ?: 0
+        is String -> this.toIntOrNull()
+            ?: this.toDoubleOrNull()?.takeIf { it % 1.0 == 0.0 }?.toInt()
+            ?: 0
         else -> 0
+    }
+
+    private fun Map<String, Any>.resolvedImageIdOrZero(): Int {
+        val primary = this["image_id"].asIntOrZero()
+        if (primary > 0) {
+            return primary
+        }
+        val fallback = this["id"].asIntOrZero()
+        if (fallback > 0) {
+            return fallback
+        }
+        val metadata = this["metadata"] as? Map<*, *> ?: return 0
+        val metadataImageId = metadata["image_id"].asIntOrZero()
+        if (metadataImageId > 0) {
+            return metadataImageId
+        }
+        return metadata["id"].asIntOrZero()
+    }
+
+    private fun reconcileSearchResults(
+        currentImages: List<Map<String, Any>>,
+        currentSearchResults: List<Map<String, Any>>,
+        refreshedImages: List<Map<String, Any>>,
+    ): List<Map<String, Any>> {
+        val currentImageIds = currentImages.map { it.resolvedImageIdOrZero() }.filter { it > 0 }.toSet()
+        val currentSearchIds = currentSearchResults.map { it.resolvedImageIdOrZero() }.filter { it > 0 }.toSet()
+        if (currentSearchResults.isEmpty() || currentSearchIds == currentImageIds) {
+            return refreshedImages
+        }
+
+        val refreshedById = refreshedImages.associateBy { it.resolvedImageIdOrZero() }
+        val retainedIds = mutableSetOf<Int>()
+        return currentSearchResults.mapNotNull { row ->
+            val imageId = row.resolvedImageIdOrZero()
+            val refreshed = refreshedById[imageId] ?: return@mapNotNull null
+            if (imageId > 0 && !retainedIds.add(imageId)) null else refreshed
+        }
+    }
+
+    private fun normalizeSelectedImage(image: Map<String, Any>): Map<String, Any> {
+        val resolvedId = image.resolvedImageIdOrZero()
+        if (resolvedId <= 0 || image["image_id"].asIntOrZero() == resolvedId) {
+            return image
+        }
+        return image + mapOf("image_id" to resolvedId)
     }
 
     private fun updateImageState(imageId: Int, update: (Map<String, Any>) -> Map<String, Any>): Map<String, Any>? {
         val current = _uiState.value
         var updatedImage: Map<String, Any>? = null
         val updatedImages = current.images.map { image ->
-            if (image["image_id"].asIntOrZero() == imageId) {
+            if (image.resolvedImageIdOrZero() == imageId) {
                 val next = update(image)
                 if (updatedImage == null) {
                     updatedImage = next
@@ -977,14 +1952,14 @@ class AppViewModel : ViewModel() {
             }
         }
         val updatedSearchResults = current.searchResults.map { image ->
-            if (image["image_id"].asIntOrZero() == imageId) {
+            if (image.resolvedImageIdOrZero() == imageId) {
                 update(image)
             } else {
                 image
             }
         }
         val updatedSelected = current.selectedImage?.let { image ->
-            if (image["image_id"].asIntOrZero() == imageId) {
+            if (image.resolvedImageIdOrZero() == imageId) {
                 update(image)
             } else {
                 image
@@ -1005,6 +1980,462 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    private suspend fun refreshOperationSummaries(includeTags: Boolean) {
+        val refreshedStats = runCatching { StandaloneRuntime.libraryStatistics() }.getOrNull()
+        val refreshedCollections = runCatching { StandaloneRuntime.getCollections() }.getOrNull()
+        val refreshedFolders = runCatching { StandaloneRuntime.listLibraryFolders(includeDisabled = true) }.getOrNull()
+        val refreshedTags = if (includeTags) runCatching { StandaloneRuntime.getTags() }.getOrNull() else null
+
+        withContext(Dispatchers.Main) {
+            val current = _uiState.value
+            _uiState.value = current.copy(
+                stats = refreshedStats ?: current.stats,
+                collections = refreshedCollections ?: current.collections,
+                libraryFolders = refreshedFolders ?: current.libraryFolders,
+                tags = refreshedTags ?: current.tags,
+            )
+        }
+    }
+
+    private suspend fun refreshResourceArtifacts() {
+        val refreshedDownloads = runCatching { StandaloneRuntime.listDownloads() }.getOrNull()
+        val refreshedKnowledgePacks = runCatching { StandaloneRuntime.listKnowledgePacks() }.getOrNull()
+
+        withContext(Dispatchers.Main) {
+            val current = _uiState.value
+            _uiState.value = current.copy(
+                downloads = refreshedDownloads ?: current.downloads,
+                knowledgePacks = refreshedKnowledgePacks ?: current.knowledgePacks,
+            )
+        }
+    }
+
+    private suspend fun refreshLocalAiStateInternal(clearError: Boolean = false) {
+        val current = _uiState.value
+        val snapshot = collectLocalAiSnapshot(current)
+        withContext(Dispatchers.Main) {
+            _uiState.value = applyLocalAiSnapshot(_uiState.value, snapshot).copy(
+                errorMessage = if (clearError) null else _uiState.value.errorMessage,
+            )
+        }
+    }
+
+    private fun collectLocalAiSnapshot(fallback: AppUiState): LocalAiSnapshot {
+        return LocalAiSnapshot(
+            overview = runCatching { StandaloneRuntime.localAiOverview() }.getOrElse { fallback.aiOverview },
+            executionChain = runCatching { StandaloneRuntime.localAiExecutionChain() }.getOrElse { fallback.aiExecutionChain },
+            hardwareProfile = runCatching { StandaloneRuntime.latestAiHardwareProfile() }.getOrElse { fallback.aiHardwareProfile },
+            backends = runCatching { StandaloneRuntime.listAiBackends() }.getOrElse { fallback.aiBackends },
+            settings = runCatching { StandaloneRuntime.aiSettings() }.getOrElse { fallback.aiSettings },
+            availableModels = runCatching { StandaloneRuntime.listAvailableAiModels() }.getOrElse { fallback.aiAvailableModels },
+            installedModels = runCatching { StandaloneRuntime.listInstalledAiModels() }.getOrElse { fallback.aiInstalledModels },
+            tasks = runCatching { StandaloneRuntime.listAiTasks(limit = 250) }.getOrElse { fallback.aiTasks },
+            installRuns = runCatching { StandaloneRuntime.listAiInstallRuns(limit = 120) }.getOrElse { fallback.aiInstallRuns },
+            executionSessions = runCatching { StandaloneRuntime.listAiExecutionSessions(limit = 200) }.getOrElse { fallback.aiExecutionSessions },
+            runtimeHealthSnapshots = runCatching { StandaloneRuntime.listAiRuntimeHealthSnapshots(limit = 200) }.getOrElse { fallback.aiRuntimeHealthSnapshots },
+            plugins = runCatching { StandaloneRuntime.listAiPlugins() }.getOrElse { fallback.aiPlugins },
+            capabilities = runCatching { StandaloneRuntime.listAiCapabilities() }.getOrElse { fallback.aiCapabilities },
+            cacheEntries = runCatching { StandaloneRuntime.listAiCacheEntries(limit = 200) }.getOrElse { fallback.aiCacheEntries },
+        )
+    }
+
+    private fun applyLocalAiSnapshot(state: AppUiState, snapshot: LocalAiSnapshot): AppUiState {
+        return state.copy(
+            aiOverview = snapshot.overview,
+            aiExecutionChain = snapshot.executionChain,
+            aiHardwareProfile = snapshot.hardwareProfile,
+            aiBackends = snapshot.backends,
+            aiSettings = snapshot.settings,
+            aiAvailableModels = snapshot.availableModels,
+            aiInstalledModels = snapshot.installedModels,
+            aiTasks = snapshot.tasks,
+            aiInstallRuns = snapshot.installRuns,
+            aiExecutionSessions = snapshot.executionSessions,
+            aiRuntimeHealthSnapshots = snapshot.runtimeHealthSnapshots,
+            aiPlugins = snapshot.plugins,
+            aiCapabilities = snapshot.capabilities,
+            aiCacheEntries = snapshot.cacheEntries,
+        )
+    }
+
+    private fun normalizeAiSettingKey(input: String): String {
+        val key = input.trim()
+        if (key.startsWith("ai.")) {
+            return key.removePrefix("ai.")
+        }
+        return key
+    }
+
+    private fun parseAiSettingValue(key: String, input: String): Any {
+        val value = input.trim()
+        if (key == "preferred_runtime_order") {
+            return value
+                .split(',', '|')
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+        }
+        if (value.equals("true", ignoreCase = true)) {
+            return true
+        }
+        if (value.equals("false", ignoreCase = true)) {
+            return false
+        }
+        value.toIntOrNull()?.let { return it }
+        value.toLongOrNull()?.let { return it }
+        value.toDoubleOrNull()?.let { return it }
+        return value
+    }
+
+    private fun parseCsvValues(raw: String): List<String> {
+        return raw
+            .split(',', '|', ';', '\n', '\t')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+    }
+
+    private fun parseBooleanInput(raw: String, defaultValue: Boolean = false): Boolean {
+        val value = raw.trim().lowercase()
+        if (value.isBlank()) {
+            return defaultValue
+        }
+        return value in setOf("true", "1", "yes", "on")
+    }
+
+    private fun buildAiModelPayloadFromForm(form: Map<String, String>): Map<String, Any> {
+        val payload = linkedMapOf<String, Any>()
+        val modelId = form["model_id"]?.trim().orEmpty()
+        if (modelId.isNotBlank()) {
+            payload["model_id"] = modelId
+        }
+        val version = form["version"]?.trim().orEmpty()
+        if (version.isNotBlank()) {
+            payload["version"] = version
+        }
+        val displayName = form["display_name"]?.trim().orEmpty()
+        if (displayName.isNotBlank()) {
+            payload["display_name"] = displayName
+        }
+        val requiredRuntime = form["required_runtime"]?.trim().orEmpty()
+        if (requiredRuntime.isNotBlank()) {
+            payload["required_runtime"] = requiredRuntime
+        }
+
+        val supportedTasks = parseCsvValues(form["supported_tasks"].orEmpty())
+        if (supportedTasks.isNotEmpty()) {
+            payload["supported_tasks"] = supportedTasks
+        }
+        val supportedRuntimes = parseCsvValues(form["supported_runtimes"].orEmpty())
+        if (supportedRuntimes.isNotEmpty()) {
+            payload["supported_runtimes"] = supportedRuntimes
+        }
+        val dependencies = parseCsvValues(form["dependencies"].orEmpty())
+        if (dependencies.isNotEmpty()) {
+            payload["dependencies"] = dependencies
+        }
+
+        val source = form["source"]?.trim().orEmpty()
+        if (source.isNotBlank()) {
+            payload["source"] = source
+        }
+        val sourceUri = form["source_uri"]?.trim().orEmpty()
+        if (sourceUri.isNotBlank()) {
+            payload["source_uri"] = sourceUri
+        }
+        val hash = form["hash_sha256"]?.trim().orEmpty()
+        if (hash.isNotBlank()) {
+            payload["hash_sha256"] = hash
+        }
+        form["size_bytes"]?.trim()?.toLongOrNull()?.takeIf { it >= 0L }?.let {
+            payload["size_bytes"] = it
+        }
+
+        val metadata = form["metadata_json"]?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let(::parseModelMetadata)
+            ?.toMutableMap()
+            ?: linkedMapOf()
+        form["inference_contracts_json"]?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let(::parseModelMetadata)
+            ?.let { metadata["inference_contracts"] = it }
+        if (metadata.isNotEmpty()) {
+            payload["metadata"] = metadata
+        }
+
+        return payload
+    }
+
+    private fun parseModelMetadata(raw: String): Map<String, Any> {
+        val parsed = LocalAiJson.fromJsonValue(JSONObject(raw)) as? Map<*, *>
+            ?: throw IllegalArgumentException("Model metadata must be a JSON object.")
+        return parsed.entries.associate { (key, value) ->
+            key.toString() to (value ?: "")
+        }
+    }
+
+    private fun buildExternalImportPayload(form: Map<String, String>): Map<String, Any>? {
+        val source = form["source"]?.trim().orEmpty()
+        if (source.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Import source is required.")
+            return null
+        }
+
+        val payload = linkedMapOf<String, Any>(
+            "source" to source,
+            "replace_existing" to parseBooleanInput(form["replace_existing"].orEmpty(), defaultValue = false),
+        )
+        val importId = form["import_id"]?.trim().orEmpty()
+        if (importId.isNotBlank()) {
+            payload["import_id"] = importId
+        }
+        val sourceType = form["source_type"]?.trim().orEmpty()
+        if (sourceType.isNotBlank()) {
+            payload["source_type"] = sourceType
+        }
+        val conflict = form["conflict_strategy"]?.trim().orEmpty()
+        if (conflict.isNotBlank()) {
+            payload["conflict_strategy"] = conflict
+        }
+        val csvTable = form["csv_table_name"]?.trim().orEmpty()
+        if (csvTable.isNotBlank()) {
+            payload["csv_table_name"] = csvTable
+        }
+        return payload
+    }
+
+    private suspend fun importLocalAiModelInternal(
+        form: Map<String, String>,
+        modelId: String,
+        sourcePath: String,
+    ) {
+        val payload = buildAiModelPayloadFromForm(form).toMutableMap()
+        payload["source_path"] = sourcePath
+
+        // Generate an explicit install_id so we can observe progress while the runtime imports.
+        val installId = java.util.UUID.randomUUID().toString()
+        payload["install_id"] = installId
+
+        // Start a lightweight poller to refresh the install runs so the UI can show live status.
+        val pollJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                while (isActive) {
+                    val runs = runCatching { StandaloneRuntime.listAiInstallRuns(limit = 120) }.getOrElse { emptyList() }
+                    withContext(Dispatchers.Main) {
+                        _uiState.value = _uiState.value.copy(aiInstallRuns = runs)
+                    }
+                    val myRun = runs.firstOrNull { run -> run["install_id"]?.toString() == installId }
+                    val status = myRun?.get("status")?.toString()?.lowercase().orEmpty()
+                    if (status.isNotBlank() && status in setOf("succeeded", "failed", "cancelled", "removed")) {
+                        break
+                    }
+                    kotlinx.coroutines.delay(400)
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
+        val result = runCatching { StandaloneRuntime.importLocalAiModel(payload) }.getOrElse { error ->
+            mapOf("ok" to false, "message" to (error.message ?: error.javaClass.simpleName))
+        }
+
+        // Ensure poller finishes and we've got a final snapshot
+        pollJob.cancel()
+        pollJob.join()
+
+        val ok = result["ok"].asBooleanOrFalse()
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                aiLastPipelineResult = result,
+                lastActionMessage = if (ok) {
+                    "Imported local model: $modelId"
+                } else {
+                    "Failed to import local model: $modelId"
+                },
+                errorMessage = null,
+            )
+        }
+
+        // Final refresh to pick up repository state and artifacts
+        refreshLocalAiStateInternal()
+        refreshResourceArtifacts()
+    }
+
+    private suspend fun importFusionDatabaseInternal(payload: String, format: String, replaceExisting: Boolean) {
+        val result = StandaloneRuntime.importFusionDatabase(
+            payload = payload.trim(),
+            format = format.trim().ifBlank { "json" },
+            replaceExisting = replaceExisting,
+        )
+        val ok = result["ok"].asBooleanOrFalse()
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                aiLastPipelineResult = result,
+                lastActionMessage = if (ok) "Fusion database import completed." else "Fusion database import failed.",
+                errorMessage = null,
+            )
+        }
+        refreshResourceArtifacts()
+        refreshDashboard()
+    }
+
+    private suspend fun previewExternalImportInternal(payload: Map<String, Any>) {
+        val result = StandaloneRuntime.previewImport(payload)
+        val ok = result["ok"].asBooleanOrFalse()
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                aiLastPipelineResult = result,
+                lastActionMessage = if (ok) "Import preview generated." else "Import preview failed.",
+                errorMessage = null,
+            )
+        }
+    }
+
+    private suspend fun validateExternalImportInternal(payload: Map<String, Any>) {
+        val result = StandaloneRuntime.validateImport(payload)
+        val ok = result["ok"].asBooleanOrFalse()
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                aiLastPipelineResult = result,
+                lastActionMessage = if (ok) "Import validation passed." else "Import validation failed.",
+                errorMessage = null,
+            )
+        }
+    }
+
+    private suspend fun importExternalDatabaseInternal(payload: Map<String, Any>) {
+        val result = StandaloneRuntime.importDatabase(payload)
+        val ok = result["ok"].asBooleanOrFalse()
+        withContext(Dispatchers.Main) {
+            _uiState.value = _uiState.value.copy(
+                aiLastPipelineResult = result,
+                lastActionMessage = if (ok) "External database import completed." else "External database import failed.",
+                errorMessage = null,
+            )
+        }
+        refreshResourceArtifacts()
+        refreshDashboard()
+    }
+
+    private fun readExternalImportDocument(context: Context, uri: Uri, form: Map<String, String>): String {
+        return if (form["source_type"]?.trim()?.lowercase() == "sqlite") {
+            copyDocumentToAppStorage(context, uri, "knowledge-packs")
+        } else {
+            readDocumentText(context, uri)
+        }
+    }
+
+    private fun readDocumentText(context: Context, uri: Uri): String {
+        val input = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalArgumentException("Unable to open selected document.")
+        return input.bufferedReader().use { it.readText() }
+    }
+
+    private fun copyDocumentToAppStorage(context: Context, uri: Uri, category: String): String {
+        val directory = File(context.filesDir, "document-imports/$category")
+        require(directory.exists() || directory.mkdirs()) { "Unable to prepare import storage." }
+        val destination = File(directory, "${System.currentTimeMillis()}-${safeDocumentFileName(uri)}")
+        val input = context.contentResolver.openInputStream(uri)
+            ?: throw IllegalArgumentException("Unable to open selected document.")
+        input.use { source ->
+            destination.outputStream().use { target -> source.copyTo(target) }
+        }
+        return destination.absolutePath
+    }
+
+    private fun copyDocumentTreeToAppStorage(context: Context, uri: Uri, category: String): String {
+        val sourceRoot = DocumentFile.fromTreeUri(context, uri)
+            ?: throw IllegalArgumentException("Unable to open selected model package folder.")
+        val directory = File(context.filesDir, "document-imports/$category")
+        require(directory.exists() || directory.mkdirs()) { "Unable to prepare import storage." }
+        val destination = File(directory, "${System.currentTimeMillis()}-${safeDocumentFileName(uri)}")
+        require(destination.mkdirs()) { "Unable to prepare package destination." }
+
+        fun copyChildren(source: DocumentFile, target: File) {
+            source.listFiles().forEach { child ->
+                val name = child.name?.replace(Regex("[^A-Za-z0-9._-]"), "_")?.ifBlank { "package-file" }
+                    ?: "package-file"
+                val childTarget = File(target, name)
+                require(childTarget.canonicalPath.startsWith(destination.canonicalPath + File.separator)) { "Invalid package file path." }
+                if (child.isDirectory) {
+                    require(childTarget.mkdirs() || childTarget.isDirectory) { "Unable to create package directory '$name'." }
+                    copyChildren(child, childTarget)
+                } else if (child.isFile) {
+                    val input = context.contentResolver.openInputStream(child.uri)
+                        ?: throw IllegalArgumentException("Unable to read package file '$name'.")
+                    input.use { sourceInput -> childTarget.outputStream().use(sourceInput::copyTo) }
+                }
+            }
+        }
+
+        copyChildren(sourceRoot, destination)
+        return destination.absolutePath
+    }
+
+    private fun safeDocumentFileName(uri: Uri): String {
+        val candidate = uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+        return candidate.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "import.bin" }
+    }
+
+    private fun withActiveModelHint(payload: Map<String, Any>, taskType: String): Map<String, Any> {
+        val settings = _uiState.value.aiSettings
+        val normalizedTaskType = normalizeTaskType(taskType)
+        val scopedSuffix = if (normalizedTaskType.isBlank()) "" else ".${normalizedTaskType}"
+
+        val scopedModelId = if (scopedSuffix.isBlank()) {
+            ""
+        } else {
+            settings["active_model_id$scopedSuffix"]?.toString()?.trim().orEmpty()
+        }
+        val scopedVersion = if (scopedSuffix.isBlank()) {
+            ""
+        } else {
+            settings["active_model_version$scopedSuffix"]?.toString()?.trim().orEmpty()
+        }
+
+        val globalModelId = settings["active_model_id"]?.toString()?.trim().orEmpty()
+        val globalVersion = settings["active_model_version"]?.toString()?.trim().orEmpty()
+
+        val modelId = scopedModelId.ifBlank { globalModelId }
+        val version = scopedVersion.ifBlank { globalVersion }
+        if (modelId.isBlank()) {
+            return payload
+        }
+
+        val merged = linkedMapOf<String, Any>()
+        merged.putAll(payload)
+        merged["model_id"] = modelId
+        if (version.isNotBlank()) {
+            merged["version"] = version
+        }
+        return merged
+    }
+
+    private fun normalizeTaskType(taskType: String): String {
+        return taskType
+            .trim()
+            .lowercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+            .replace(Regex("_+"), "_")
+    }
+
+    private fun humanTaskName(taskType: String): String {
+        return normalizeTaskType(taskType)
+            .split('_')
+            .filter { it.isNotBlank() }
+            .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+            .ifBlank { "AI task" }
+    }
+
+    private fun Any?.asBooleanOrFalse(): Boolean {
+        return when (this) {
+            is Boolean -> this
+            is Number -> this.toInt() != 0
+            is String -> this.equals("true", ignoreCase = true) || this == "1"
+            else -> false
+        }
+    }
+
     private suspend fun refreshImageInState(imageId: Int, fallback: Map<String, Any>? = null) {
         val latestFromRepo = StandaloneRuntime.searchByImageId(imageId)
         Log.d(
@@ -1016,13 +2447,13 @@ class AppViewModel : ViewModel() {
             val current = _uiState.value
             Log.d(VM_TRACE_TAG, "selectedImage before replacement: imageId=$imageId value=${imageSummary(current.selectedImage)}")
             val updatedImages = current.images.map { image ->
-                if (image["image_id"].asIntOrZero() == imageId) latest else image
+                if (image.resolvedImageIdOrZero() == imageId) latest else image
             }
             val updatedSearchResults = current.searchResults.map { image ->
-                if (image["image_id"].asIntOrZero() == imageId) latest else image
+                if (image.resolvedImageIdOrZero() == imageId) latest else image
             }
             val updatedSelected = current.selectedImage?.let { image ->
-                if (image["image_id"].asIntOrZero() == imageId) latest else image
+                if (image.resolvedImageIdOrZero() == imageId) latest else image
             }
             _uiState.value = current.copy(
                 images = updatedImages,
@@ -1044,7 +2475,7 @@ class AppViewModel : ViewModel() {
             is String -> nested
             else -> ""
         }
-        return "id=${image["image_id"]} favorite=${image["favorite"]} rating=${image["rating"]} tags=$tags"
+        return "id=${image["image_id"]} tags=$tags"
     }
 
     private fun runIoAction(block: suspend () -> Unit) {

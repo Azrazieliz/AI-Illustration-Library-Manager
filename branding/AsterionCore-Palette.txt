@@ -1,0 +1,34 @@
+ASTERIONCORE OFFICIAL BRAND PALETTE
+
+Primary Background
+#080808
+#141414
+#1A1A1A
+
+Primary Gold
+#A67C1A
+#C8A95A
+#E0C16F
+
+Secondary Accent
+Amber
+
+Rules
+
+• Black + Gold only.
+• Amber only for warnings and temporary states.
+• Never use Material Blue.
+• Never use Green.
+• Never use Purple.
+• Never use Cyan.
+
+Visual Style
+
+Premium
+Luxury
+Minimal
+Professional
+Timeless
+High Contrast
+Matte Black
+Brushed Metallic Gold

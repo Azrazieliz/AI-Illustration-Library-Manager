@@ -993,30 +993,32 @@ class LibraryIntegrityEngine:
         return issues
 
     def _check_dataset_consistency(self, context: dict[str, Any]) -> list[IntegrityIssue]:
-        image_ids = {item.id for item in context["images"]}
-        provenance = context["dataset"]
+        image_by_uuid = {item.uuid: item for item in context["images"]}
+        records = context["dataset"]
         issues: list[IntegrityIssue] = []
 
-        for image_id in sorted(provenance.keys()):
-            if image_id not in image_ids:
+        for record in records:
+            image = image_by_uuid.get(record.image_uuid)
+            if image is None:
                 issues.append(
                     IntegrityIssue(
                         severity=IntegritySeverity.ERROR,
                         subsystem="dataset",
-                        description=f"Dataset provenance references missing image {image_id}.",
-                        image_id=image_id,
-                        suggested_repair="Remove orphan dataset provenance entry.",
+                        description=f"Dataset record {record.uuid} references missing image UUID {record.image_uuid}.",
+                        suggested_repair="Remove orphan dataset record or restore the canonical image.",
                     )
                 )
-            for source_path in sorted(provenance[image_id]):
+            for source_path in sorted(record.provenance):
+                if not Path(source_path).is_absolute():
+                    continue
                 if Path(source_path).exists():
                     continue
                 issues.append(
                     IntegrityIssue(
                         severity=IntegritySeverity.WARNING,
                         subsystem="dataset",
-                        description=f"Dataset provenance path is missing on disk for image {image_id}.",
-                        image_id=image_id,
+                        description=f"Dataset provenance path is missing on disk for record {record.uuid}.",
+                        image_id=image.id if image is not None else None,
                         file_path=source_path,
                         suggested_repair="Regenerate dataset export from current source image.",
                     )

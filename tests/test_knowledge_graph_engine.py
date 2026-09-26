@@ -7,10 +7,10 @@ import pytest
 
 from engine.config import settings
 from engine.database.database import database_manager
-from engine.embeddings import EmbeddingService
-from engine.knowledge_graph import EdgeType, KnowledgeGraphCheckpoint, KnowledgeGraphEngine, KnowledgeGraphService
+from engine.embeddings import EmbeddingService, MockProvider
+from engine.knowledge_graph import EdgeType, KnowledgeGraphCheckpoint, KnowledgeGraphEngine, KnowledgeGraphService, NodeType
 from engine.pipeline import PipelineJob, QueueManager, QueueType
-from engine.recognition import RecognitionService
+from engine.recognition import MockRecognitionProvider, RecognitionService
 from engine.repositories.duplicate_repository import DuplicateRepository
 from engine.repositories.image_repository import ImageRepository
 from engine.repositories.tag_repository import TagRepository
@@ -45,11 +45,14 @@ def _register_image(path: Path) -> int:
 def _queue_to_kg_job(queue_manager: QueueManager, path: Path, artist: str | None = None) -> PipelineJob:
     _register_image(path)
 
-    embedding_service = EmbeddingService(queue_manager=queue_manager)
+    embedding_service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
     embedding_job = PipelineJob(source_path=str(path), queue_type=QueueType.EMBEDDING)
     assert embedding_service.process_embedding_job(embedding_job) is not None
 
-    recognition_service = RecognitionService(queue_manager=queue_manager)
+    recognition_service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     recognition_job = queue_manager.dequeue(QueueType.RECOGNITION)
     assert recognition_job is not None
     assert recognition_service.process_recognition_job(recognition_job) is not None
@@ -126,6 +129,22 @@ def test_neighbor_lookup(kg_env: None, tmp_path: Path) -> None:
     neighbors = service.neighbors(image_node_id)
 
     assert len(neighbors) > 0
+
+
+def test_graph_queries_survive_service_restart(kg_env: None, tmp_path: Path) -> None:
+    queue_manager = QueueManager()
+    image_path = tmp_path / "fate__saber.jpg"
+    image_path.write_bytes(b"fake")
+    kg_job = _queue_to_kg_job(queue_manager, image_path, artist="Takeuchi")
+
+    first = KnowledgeGraphService(queue_manager=queue_manager)
+    result = first.process_knowledge_graph_job(kg_job)
+    assert result is not None
+
+    second = KnowledgeGraphService(queue_manager=queue_manager)
+    neighbors = second.neighbors(f"image:{result.image_id}")
+
+    assert any(node.node_type == NodeType.ARTIST and node.label == "Takeuchi" for node in neighbors)
 
 
 def test_shortest_path_query(kg_env: None, tmp_path: Path) -> None:

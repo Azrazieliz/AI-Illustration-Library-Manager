@@ -18,8 +18,8 @@ from engine.character_database.character_database_models import (
 )
 
 
-class CharacterDatabaseRepository:
-    """In-memory canonical character and series identity store."""
+class InMemoryCharacterDatabaseRepository:
+    """Explicit in-memory adapter retained for isolated tests and injected experiments."""
 
     def __init__(self, *, builder: CharacterDatabaseBuilder | None = None) -> None:
         self.builder = builder or CharacterDatabaseBuilder()
@@ -485,3 +485,6 @@ class CharacterDatabaseRepository:
         text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
         text = re.sub(r"\s+", " ", text, flags=re.UNICODE)
         return text.strip().casefold()
+
+
+from engine.repositories.character_database_repository_durable import DurableCharacterDatabaseRepository as CharacterDatabaseRepository

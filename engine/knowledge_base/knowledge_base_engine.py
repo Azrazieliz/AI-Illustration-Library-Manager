@@ -120,17 +120,18 @@ class KnowledgeBaseEngine:
     # ------------------------------------------------------------------
     def import_dataset(
         self,
-        data: str | dict[str, Any],
+        data: str | dict[str, Any] | list[dict[str, Any]],
         *,
         format: KnowledgeBaseImportFormat | str = KnowledgeBaseImportFormat.JSON,
         merge: bool = False,
-    ):
-        dataset = self.repository.import_dataset(data, format=format, merge=merge)
-        self.statistics.increment_imports()
+    ) -> Any:
+        datasets = self.repository.import_datasets(data, format=format, merge=merge)
+        for _ in datasets:
+            self.statistics.increment_imports()
         self._sync_statistics()
         self._search_cache.clear()
-        self._emit({"action": "import", "dataset_id": dataset.dataset_id})
-        return dataset
+        self._emit({"action": "import", "dataset_ids": [dataset.dataset_id for dataset in datasets]})
+        return datasets[0] if len(datasets) == 1 else datasets
 
     def export_dataset(self, dataset_id: int, *, format: KnowledgeBaseImportFormat | str = KnowledgeBaseImportFormat.JSON):
         payload = self.repository.export_dataset(dataset_id, format=format)
@@ -176,14 +177,16 @@ class KnowledgeBaseEngine:
     ) -> list[KnowledgeBaseOperationResult]:
         results: list[KnowledgeBaseOperationResult] = []
         for path in paths:
-            result = self.import_dataset(Path(path).read_text(encoding="utf-8"), format=KnowledgeBaseImportFormat.JSON)
-            results.append(
+            imported = self.import_dataset(Path(path).read_text(encoding="utf-8"), format=KnowledgeBaseImportFormat.JSON)
+            datasets = imported if isinstance(imported, list) else [imported]
+            results.extend(
                 self.builder.build_operation_result(
                     action=self._infer_action_from_path(path),
                     success=True,
                     message="Imported knowledge-base payload.",
-                    dataset_id=result.dataset_id,
+                    dataset_id=dataset.dataset_id,
                 )
+                for dataset in datasets
             )
             if checkpoint is not None:
                 checkpoint.add_processed(str(path))

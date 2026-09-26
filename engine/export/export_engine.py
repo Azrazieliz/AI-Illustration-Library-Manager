@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from engine.export.export_backend import ExportBackend, InMemoryExportBackend
+from engine.export.export_backend import ExportBackend, RepositoryExportBackend
 from engine.export.export_builder import ExportBuilder
 from engine.export.export_events import ExportCompleted, ExportFailed, ExportSkipped, ExportStarted, Exported
 from engine.export.export_models import ExportCheckpoint, ExportFilter, ExportOptions, ExportResult
@@ -26,7 +26,7 @@ class ExportEngine:
         max_workers: int = 4,
     ) -> None:
         self.repository = repository or ExportRepository()
-        self.backend = backend or InMemoryExportBackend()
+        self.backend = backend or RepositoryExportBackend(self.repository)
         self.callback = callback
         self.max_workers = max_workers
         self.logger = get_logger(self.__class__.__name__)

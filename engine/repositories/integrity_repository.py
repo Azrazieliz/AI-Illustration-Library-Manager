@@ -6,6 +6,7 @@ from typing import Any
 
 from engine.collections.collection_models import CollectionRecord
 from engine.database.models.character import Character
+from engine.database.models.dataset import DatasetRecord
 from engine.database.models.embedding import Embedding
 from engine.database.models.image import Image, image_character_association, image_tag_association
 from engine.database.models.job import Job
@@ -93,18 +94,15 @@ class IntegrityRepository:
         jobs = list(self.session.query(Job).order_by(Job.id).all())
         return PipelineSnapshot(jobs=jobs, now=datetime.now(timezone.utc))
 
-    def scan_dataset(self) -> dict[int, list[str]]:
-        return {int(key): list(value) for key, value in self.dataset_repository._dataset_provenance.items()}
+    def scan_dataset(self) -> list[DatasetRecord]:
+        return self.dataset_repository.list_dataset_records()
 
     def scan_exports(self) -> dict[str, Any]:
-        manifests: dict[tuple[str, int], dict[str, Any]] = {
-            key: dict(value)
-            for key, value in self.export_repository._manifest_store.items()
-        }
-        provenance: dict[tuple[str, int], list[str]] = {
-            key: list(value)
-            for key, value in self.export_repository._provenance_store.items()
-        }
+        manifests: dict[tuple[str, int], dict[str, Any]] = {}
+        provenance: dict[tuple[str, int], list[str]] = {}
+        for format_type, image_id, manifest, sources in self.export_repository.list_export_state():
+            manifests[(format_type, image_id)] = manifest
+            provenance[(format_type, image_id)] = sources
         known_formats = [item.value for item in ExportFormatType]
         return {
             "manifests": manifests,

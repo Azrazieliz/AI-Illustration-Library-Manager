@@ -4,10 +4,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Iterable
 
+import numpy as np
+
 from engine.knowledge_graph import EdgeType, KnowledgeGraphEngine
 from engine.logging import get_logger
 from engine.repositories.tagging_repository import TaggingRepository
-from engine.tagging.tagging_backend import RuleBasedTaggingBackend, TaggingBackend
+from engine.tagging.tagging_backend import TaggingBackend
 from engine.tagging.tagging_events import (
     TaggingCompleted,
     TaggingFailed,
@@ -17,6 +19,7 @@ from engine.tagging.tagging_events import (
 )
 from engine.tagging.tagging_models import TagKind, TaggingCheckpoint, TaggingContext, TaggingResult
 from engine.tagging.tagging_statistics import TaggingStatistics
+from engine.tagging.tagging_exceptions import TaggingBuildError
 
 
 class TaggingEngine:
@@ -36,7 +39,7 @@ class TaggingEngine:
         top_k_neighbors: int = 5,
     ) -> None:
         self.repository = repository or TaggingRepository()
-        self.backend = backend or RuleBasedTaggingBackend()
+        self.backend = backend
         self.knowledge_graph_engine = knowledge_graph_engine or KnowledgeGraphEngine()
         self.callback = callback
         self.max_workers = max_workers
@@ -145,6 +148,10 @@ class TaggingEngine:
                 graph_neighbors=graph_neighbors,
             )
 
+            if self.backend is None:
+                raise TaggingBuildError(
+                    "Automatic tagging requires an explicitly configured backend backed by a verified model."
+                )
             tags = self.backend.generate_tags(
                 context,
                 suggested_threshold=self.suggested_threshold,
@@ -165,6 +172,7 @@ class TaggingEngine:
                         image_id=image.id,
                         tag_name=generated.name,
                         provenance=generated.provenance,
+                        confidence=generated.confidence,
                     )
                     continue
 
@@ -175,6 +183,7 @@ class TaggingEngine:
                     image_id=image.id,
                     tag_name=generated.name,
                     provenance=generated.provenance,
+                    confidence=generated.confidence,
                 )
                 existing.add(generated.name.lower())
 
@@ -227,23 +236,24 @@ class TaggingEngine:
             self.callback(event)
 
 
-def _vector_from_path(vector_path: str) -> list[float]:
-    seed = vector_path.encode("utf-8")
-    values: list[float] = []
-    while len(values) < 128:
-        for byte in seed:
-            values.append(float(byte) / 255.0)
-            if len(values) >= 128:
-                break
-    return values
+def _vector_from_path(vector_path: str) -> np.ndarray:
+    path = Path(vector_path)
+    if not path.is_file():
+        raise TaggingBuildError(f"Embedding vector artifact does not exist: {path}")
+    try:
+        vector = np.asarray(np.load(path, allow_pickle=False), dtype=np.float32).reshape(-1)
+    except (OSError, ValueError) as error:
+        raise TaggingBuildError(f"Could not load embedding vector: {path}") from error
+    if vector.size == 0 or not np.isfinite(vector).all():
+        raise TaggingBuildError(f"Embedding vector is empty or non-finite: {path}")
+    return vector
 
 
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if len(left) != len(right):
-        return 0.0
-    left_norm = sum(x * x for x in left) ** 0.5
-    right_norm = sum(x * x for x in right) ** 0.5
+def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    if left.size != right.size:
+        raise TaggingBuildError("Embedding vector dimensions do not match")
+    left_norm = float(np.linalg.norm(left))
+    right_norm = float(np.linalg.norm(right))
     if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    dot = sum(x * y for x, y in zip(left, right))
-    return dot / (left_norm * right_norm)
+        raise TaggingBuildError("Embedding vector has zero magnitude")
+    return float(np.dot(left, right) / (left_norm * right_norm))

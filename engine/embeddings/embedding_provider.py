@@ -86,6 +86,7 @@ class CLIPProvider(EmbeddingProvider):
     def initialize(self) -> None:
         """Initialize CLIP model and processor."""
         try:
+            import torch
             from transformers import CLIPModel, CLIPProcessor
 
             self.logger.info(f"Loading CLIP model: {self.model_name}")
@@ -95,7 +96,7 @@ class CLIPProvider(EmbeddingProvider):
             self.logger.info("CLIP model loaded successfully")
         except ImportError as e:
             raise ProviderError(
-                "transformers library required for CLIP provider"
+                "torch and transformers libraries are required for the CLIP provider"
             ) from e
         except Exception as e:
             raise ProviderError(f"Failed to initialize CLIP provider: {e}") from e
@@ -106,6 +107,7 @@ class CLIPProvider(EmbeddingProvider):
             raise ProviderError("Provider not initialized. Call initialize() first.")
 
         try:
+            import torch
             from PIL import Image
 
             image = Image.open(image_path).convert("RGB")
@@ -114,7 +116,7 @@ class CLIPProvider(EmbeddingProvider):
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            with __import__("torch").no_grad():
+            with torch.no_grad():
                 image_features = self.model.get_image_features(**inputs)
                 image_features = image_features / image_features.norm(
                     dim=-1, keepdim=True

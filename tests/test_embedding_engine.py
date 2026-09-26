@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 
 from engine.config import settings
@@ -23,6 +24,7 @@ from engine.embeddings import (
 from engine.embeddings.embedding_models import ExtractedEmbedding
 from engine.pipeline import PipelineJob, QueueManager, QueueType
 from engine.repositories.embedding_repository import EmbeddingRepository
+from engine.repositories.ai_execution_repository import AiExecutionRepository
 from engine.repositories.image_repository import ImageRepository
 
 
@@ -173,6 +175,37 @@ def test_embedding_repository_create(embedding_env: None, tmp_path: Path) -> Non
     assert retrieved.model_version == "1.0.0"
 
 
+def test_embedding_repository_records_artifact_metadata(embedding_env: None, tmp_path: Path) -> None:
+    image_repo = ImageRepository()
+    image_path = tmp_path / "artifact.jpg"
+    image_path.write_bytes(b"fake")
+    image = image_repo.create_image(
+        original_path=str(image_path),
+        filename=image_path.name,
+        extension=image_path.suffix,
+    )
+    image_repo.commit()
+
+    vector_path = tmp_path / "artifact.npy"
+    np.save(vector_path, np.asarray([1.0, 2.0, 3.0], dtype=np.float32), allow_pickle=False)
+    repository = EmbeddingRepository()
+    record = repository.create_embedding_record(
+        image_id=image.id,
+        vector_path=str(vector_path),
+        model_name="test_model",
+        model_version="1.0.0",
+    )
+    repository.commit()
+
+    assert record.embedding_uuid == record.uuid
+    assert record.image_uuid == image.uuid
+    assert record.dimension == 3
+    assert record.dtype == "float32"
+    assert record.storage_path == str(vector_path)
+    assert record.checksum is not None and len(record.checksum) == 64
+    assert record.version == 1
+
+
 def test_embedding_repository_update(embedding_env: None, tmp_path: Path) -> None:
     """Test updating an embedding record."""
     image_repo = ImageRepository()
@@ -235,6 +268,18 @@ def test_engine_process_single_path(embedding_env: None, tmp_path: Path) -> None
 
     assert result is not None
     assert result.image_id == image.id
+
+    execution = AiExecutionRepository().list_records()[-1]
+    assert execution.execution_uuid == execution.uuid
+    assert execution.task == "embedding_generation"
+    assert execution.model == "mock"
+    assert execution.runtime == "mock"
+    assert execution.input_hash is not None and len(execution.input_hash) == 64
+    assert execution.output_hash is not None and len(execution.output_hash) == 64
+    assert execution.duration >= 0
+    assert execution.status == "completed"
+    assert execution.error is None
+    assert execution.version == 1
     assert result.embedding.dimensions == 256
 
 
@@ -350,19 +395,45 @@ def test_service_publishes_embedding_job(embedding_env: None, tmp_path: Path) ->
 
     # Process via service
     queue_manager = QueueManager()
-    service = EmbeddingService(queue_manager=queue_manager)
+    service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
 
     job = PipelineJob(source_path=str(img_path), queue_type=QueueType.EMBEDDING)
     result = service.process_embedding_job(job)
 
     assert result is not None
     assert result.image_id == image.id
+    assert queue_manager.dequeue(QueueType.RECOGNITION) is not None
+
+
+def test_service_can_skip_unavailable_recognition_handoff(embedding_env: None, tmp_path: Path) -> None:
+    img_path = tmp_path / "test.jpg"
+    img_path.write_bytes(b"fake")
+
+    image_repo = ImageRepository()
+    _ = image_repo.create_image(
+        original_path=str(img_path),
+        filename="test.jpg",
+        extension="jpg",
+    )
+    image_repo.commit()
+
+    queue_manager = QueueManager()
+    service = EmbeddingService(
+        queue_manager=queue_manager,
+        provider=MockProvider(),
+        publish_recognition=False,
+    )
+
+    result = service.process_embedding_job(PipelineJob(source_path=str(img_path), queue_type=QueueType.EMBEDDING))
+
+    assert result is not None
+    assert queue_manager.dequeue(QueueType.RECOGNITION) is None
 
 
 def test_service_skips_job_without_source_path(embedding_env: None) -> None:
     """Test service skips jobs without source_path."""
     queue_manager = QueueManager()
-    service = EmbeddingService(queue_manager=queue_manager)
+    service = EmbeddingService(queue_manager=queue_manager, provider=MockProvider())
 
     job = PipelineJob(queue_type=QueueType.EMBEDDING)
     result = service.process_embedding_job(job)
@@ -528,8 +599,8 @@ def test_duplicate_execution_prevention(embedding_env: None, tmp_path: Path) -> 
     assert engine.statistics.skipped >= 1
 
 
-def test_cache_prevents_duplicate_embedding(embedding_env: None, tmp_path: Path) -> None:
-    """Test that cache prevents re-embedding same image."""
+def test_cache_persists_embedding_without_rerunning_provider(embedding_env: None, tmp_path: Path) -> None:
+    """Test that cached output is persisted without rerunning inference."""
     img_path = tmp_path / "test.jpg"
     img_path.write_bytes(b"fake")
 
@@ -556,7 +627,11 @@ def test_cache_prevents_duplicate_embedding(embedding_env: None, tmp_path: Path)
         cache=cache,
     )
 
-    # Should skip due to cache
+    provider.extract_embedding = MagicMock(side_effect=AssertionError("Provider should not run"))
     result = worker._process_one(img_path)
-    assert result is None
-    assert worker.statistics.skipped == 1
+
+    assert result is not None
+    provider.extract_embedding.assert_not_called()
+    record = EmbeddingRepository().get_by_image_id(image.id)
+    assert record is not None
+    assert Path(record.vector_path).is_file()

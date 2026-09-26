@@ -20,6 +20,7 @@ from engine.recognition import (
     rank_character_candidates,
 )
 from engine.repositories.image_repository import ImageRepository
+from engine.repositories.ai_execution_repository import AiExecutionRepository
 from engine.repositories.recognition_repository import RecognitionRepository
 
 
@@ -91,6 +92,35 @@ def test_engine_process_single_path(recognition_env: None, tmp_path: Path) -> No
     assert image.series.name == "Bleach"
     assert sorted(character.name for character in image.characters) == ["Ichigo", "Rukia"]
 
+    history = RecognitionRepository().list_history(image_id=image_id)
+    assert len(history) == 1
+    record = history[0]
+    assert record.recognition_uuid == record.uuid
+    assert record.image_uuid == image.uuid
+    assert record.model == "mock-recognition"
+    assert record.model_version == "1.0.0"
+    assert record.runtime == "mock"
+    assert record.execution_time is not None and record.execution_time >= 0
+    assert record.review_uuid is None
+    assert record.version == 1
+    assert record.selected_candidate is not None
+    assert record.selected_candidate["character_name"] is None
+    assert record.selected_candidate["needs_review"] is True
+    assert record.candidates[0]["kind"] == "series"
+    raw_names = {candidate["name"] for candidate in record.candidates if "name" in candidate}
+    matched_names = {candidate["character_name"] for candidate in record.candidates if "character_name" in candidate}
+    assert raw_names >= {"Bleach", "Rukia", "Ichigo"}
+    assert matched_names == {"Unknown"}
+
+    execution = AiExecutionRepository().list_records()[-1]
+    assert execution.task == "recognition"
+    assert execution.model == "mock-recognition"
+    assert execution.runtime == "mock"
+    assert execution.input_hash is not None and len(execution.input_hash) == 64
+    assert execution.output_hash is None
+    assert execution.duration >= 0
+    assert execution.status == "completed"
+
 
 def test_engine_checkpoint_skips_processed(recognition_env: None, tmp_path: Path) -> None:
     img_path = tmp_path / "naruto__naruto.jpg"
@@ -128,7 +158,10 @@ def test_service_publishes_review_job(recognition_env: None, tmp_path: Path) -> 
     image_id = _register_image(img_path)
 
     queue_manager = QueueManager()
-    service = RecognitionService(queue_manager=queue_manager)
+    service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
 
     job = PipelineJob(source_path=str(img_path), queue_type=QueueType.RECOGNITION)
     result = service.process_recognition_job(job)
@@ -145,7 +178,10 @@ def test_service_publishes_review_job(recognition_env: None, tmp_path: Path) -> 
 
 def test_service_skips_job_without_source_path(recognition_env: None) -> None:
     queue_manager = QueueManager()
-    service = RecognitionService(queue_manager=queue_manager)
+    service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
 
     job = PipelineJob(queue_type=QueueType.RECOGNITION)
     result = service.process_recognition_job(job)
@@ -240,7 +276,10 @@ def test_service_review_metadata_contains_candidates(recognition_env: None, tmp_
     _register_image(img_path)
 
     queue_manager = QueueManager()
-    service = RecognitionService(queue_manager=queue_manager)
+    service = RecognitionService(
+        queue_manager=queue_manager,
+        provider=MockRecognitionProvider(),
+    )
     job = PipelineJob(source_path=str(img_path), queue_type=QueueType.RECOGNITION)
 
     result = service.process_recognition_job(job)

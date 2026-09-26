@@ -12,5 +12,10 @@
     "SFTP",
     "WebDAV"
   ],
+  "implemented_storage": [
+    "SAF",
+    "Tree URI",
+    "DocumentProvider"
+  ],
   "integration": "backend_adapters_only"
 }

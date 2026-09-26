@@ -152,6 +152,26 @@ def test_rollback(organizer_env: None, tmp_path: Path) -> None:
     assert not destination.exists()
 
 
+def test_rollback_survives_engine_restart(organizer_env: None, tmp_path: Path) -> None:
+    source = tmp_path / "restart.png"
+    source.write_bytes(b"x")
+    _register_image_for_organizer(source, series="Fate", characters=["Saber"], exif_data={"Year": 2004})
+
+    first = OrganizerEngine(rules=_default_rules())
+    result = first.apply_organize([source])
+    destination = result.previews[0].destination_path
+    assert destination.exists()
+
+    restarted = OrganizerEngine(rules=_default_rules())
+    rollback = restarted.rollback_last_batch()
+
+    assert rollback is not None
+    assert rollback.rolled_back is True
+    assert source.exists()
+    assert not destination.exists()
+    assert OrganizerEngine(rules=_default_rules()).rollback_last_batch() is None
+
+
 def test_collision_handling(organizer_env: None, tmp_path: Path) -> None:
     src1 = tmp_path / "src1" / "same.png"
     src1.parent.mkdir(parents=True, exist_ok=True)
