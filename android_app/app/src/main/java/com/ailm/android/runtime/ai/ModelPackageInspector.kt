@@ -296,42 +296,44 @@ internal class ModelPackageInspector {
             "output" to "683",
             "first_nodes" to graph.firstNodeNamesAndTypes.map { (name, type) -> mapOf("name" to name, "op_type" to type) },
         )
-        metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
-            "face_embedding" to mapOf(
-                "artifact_role" to "face_embedding",
-                "tokenizer" to mapOf("type" to "none"),
-                "image_preprocessing" to mapOf(
-                    "enabled" to true,
-                    "width" to 112,
-                    "height" to 112,
-                    "channels" to 3,
-                    "color_space" to "rgb",
-                    "resize_mode" to "similarity",
-                    "scale" to 1.0,
-                    "mean" to listOf(if (graph.hasSub && graph.hasMul) 0.0 else 127.5),
-                    "std" to listOf(if (graph.hasSub && graph.hasMul) 1.0 else 127.5),
-                ),
-                "inputs" to listOf(mapOf(
-                    "name" to input.name,
-                    "source" to "image",
-                    "data_type" to "float32",
-                    "layout" to "nchw",
-                    "shape" to input.shape,
-                )),
-                "outputs" to listOf(mapOf(
-                    "name" to output.name,
-                    "index" to 0,
-                    "data_type" to "float32",
-                    "shape" to output.shape,
-                )),
-                "output_decoder" to mapOf(
-                    "type" to "embedding",
-                    "output_name" to output.name,
-                    "hidden_dimension" to 512,
-                    "normalization" to "l2",
-                ),
-                "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
+        val faceEmbeddingContract = mapOf(
+            "artifact_role" to "face_embedding",
+            "tokenizer" to mapOf("type" to "none"),
+            "image_preprocessing" to mapOf(
+                "enabled" to true,
+                "width" to 112,
+                "height" to 112,
+                "channels" to 3,
+                "color_space" to "rgb",
+                "resize_mode" to "similarity",
+                "scale" to 1.0,
+                "mean" to listOf(if (graph.hasSub && graph.hasMul) 0.0 else 127.5),
+                "std" to listOf(if (graph.hasSub && graph.hasMul) 1.0 else 127.5),
             ),
+            "inputs" to listOf(mapOf(
+                "name" to input.name,
+                "source" to "image",
+                "data_type" to "float32",
+                "layout" to "nchw",
+                "shape" to input.shape,
+            )),
+            "outputs" to listOf(mapOf(
+                "name" to output.name,
+                "index" to 0,
+                "data_type" to "float32",
+                "shape" to output.shape,
+            )),
+            "output_decoder" to mapOf(
+                "type" to "embedding",
+                "output_name" to output.name,
+                "hidden_dimension" to 512,
+                "normalization" to "l2",
+            ),
+            "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
+        )
+        metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
+            "face_embedding" to faceEmbeddingContract,
+            "face_feature_extraction" to faceEmbeddingContract,
         )
         val capabilities = metadata["buffalo_l_capabilities"].asStringMap()?.toMutableMap()
         val embeddingCapability = capabilities?.get("face_embedding").asStringMap()?.toMutableMap()
