@@ -26,7 +26,9 @@ class BuffaloLExecutionContractTest {
         assertTrue(roles.contains("face_embedding"))
         assertTrue(roles.contains("gender_age"))
         assertTrue(roles.contains("landmark_3d"))
-        assertTrue(inspection.supportedTasks.contains("face_feature_extraction"))
+        assertTrue(inspection.capabilities.contains("face_feature_extraction"))
+        assertFalse(inspection.supportedTasks.contains("face_feature_extraction"))
+        assertTrue(inspection.supportedTasks.containsAll(listOf("face_detection", "face_embedding", "landmark_2d", "landmark_3d", "gender_age")))
         assertFalse(inspection.issues.any { it.code == "model_artifact_ambiguous" })
     }
 
@@ -71,13 +73,15 @@ class BuffaloLExecutionContractTest {
         val inspection = inspectPackage()
         val capabilities = inspection.metadata["buffalo_l_capabilities"] as? Map<*, *> ?: emptyMap<Any, Any>()
         val faceDetection = capabilities["face_detection"] as? Map<*, *> ?: emptyMap<Any, Any>()
-        assertFalse(inspection.valid)
+        assertTrue(inspection.valid)
         assertTrue(inspection.metadata.containsKey("buffalo_l_capabilities"))
         assertEquals(true, faceDetection["ready"])
         assertEquals(true, (capabilities["face_embedding"] as? Map<*, *>)?.get("ready"))
         assertEquals(true, (capabilities["landmark_2d"] as? Map<*, *>)?.get("ready"))
         assertEquals(true, (capabilities["landmark_3d"] as? Map<*, *>)?.get("ready"))
         assertEquals(true, (capabilities["gender_age"] as? Map<*, *>)?.get("ready"))
+        assertEquals(false, (capabilities["pose"] as? Map<*, *>)?.get("ready"))
+        assertEquals("pose_meanshape_missing", (capabilities["pose"] as? Map<*, *>)?.get("reason"))
     }
 
     @Test
