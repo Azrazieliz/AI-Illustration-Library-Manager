@@ -18,8 +18,9 @@ class AestheticScoringExecutionContractTest {
         val inspection = ModelPackageInspector().inspect(packageDirectory, File("build/aesthetic-extracted"))
         assertEquals("onnx", inspection.runtime)
         assertTrue(inspection.supportedTasks.contains("aesthetic_scoring"))
-        assertFalse(inspection.valid)
-        assertTrue(inspection.issues.any { it.code == "preprocessing_contract_unresolved" || it.code == "tensor_metadata_unreadable" })
+        assertTrue(inspection.valid)
+        assertTrue(inspection.issues.any { it.code == "preprocessing_contract_unresolved" })
+        assertFalse(inspection.issues.any { it.code == "model_artifact_missing" || it.code == "execution_task_missing" })
     }
 
     @Test
