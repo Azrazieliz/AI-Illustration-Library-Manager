@@ -143,8 +143,15 @@ internal data class ModelInferenceContract(
                     ),
                 )
             }
+            val coordinatedTasks = model.metadata["coordinated_tasks"]
+                .asDeclaredValues()
+                .map(AiTaskTypes::normalize)
+                .toSet()
             return model.supportedTasks.mapNotNull { rawTask ->
                 val taskType = AiTaskTypes.normalize(rawTask)
+                if (taskType in coordinatedTasks) {
+                    return@mapNotNull null
+                }
                 runCatching { resolve(model, taskType) }.exceptionOrNull()?.let { error ->
                     AiValidationIssue(
                         code = "inference_contract_invalid",
