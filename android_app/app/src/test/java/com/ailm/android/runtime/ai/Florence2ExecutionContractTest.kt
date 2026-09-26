@@ -32,6 +32,43 @@ class Florence2ExecutionContractTest {
     }
 
     @Test
+    fun `every Florence stage resolves bindings from its own artifact role`() {
+        val inspection = inspectPackage()
+        val paths = inspection.metadata["artifact_paths_by_role"] as Map<*, *>
+        assertEquals("vision_encoder_int8.onnx", File(paths["vision_encoder"].toString()).name)
+        assertEquals("embed_tokens_int8.onnx", File(paths["embed_tokens"].toString()).name)
+        assertEquals("encoder_model_int8.onnx", File(paths["encoder"].toString()).name)
+        assertEquals("decoder_model_int8.onnx", File(paths["decoder"].toString()).name)
+        assertEquals("decoder_with_past_model_int8.onnx", File(paths["decoder_with_past"].toString()).name)
+
+        val bindings = inspection.artifactBindingsByRole
+        assertEquals(setOf("vision_encoder", "embed_tokens", "encoder", "decoder", "decoder_with_past"), bindings.keys)
+        assertEquals(listOf("pixel_values"), bindings.getValue("vision_encoder").inputs.map { it.name })
+        assertEquals(listOf("image_features"), bindings.getValue("vision_encoder").outputs.map { it.name })
+        assertEquals(listOf("input_ids"), bindings.getValue("embed_tokens").inputs.map { it.name })
+        assertEquals(listOf("inputs_embeds"), bindings.getValue("embed_tokens").outputs.map { it.name })
+        assertEquals(setOf("attention_mask", "inputs_embeds"), bindings.getValue("encoder").inputs.map { it.name }.toSet())
+        assertEquals(listOf("last_hidden_state"), bindings.getValue("encoder").outputs.map { it.name })
+        assertTrue(bindings.getValue("decoder").inputs.map { it.name }.containsAll(listOf("input_ids", "encoder_hidden_states", "encoder_attention_mask")))
+        assertTrue(bindings.getValue("decoder").outputs.any { it.name == "logits" })
+        assertTrue(bindings.getValue("decoder_with_past").inputs.any { it.name == "inputs_embeds" })
+        assertTrue(bindings.getValue("decoder_with_past").inputs.any { it.name == "past_key_values.0.decoder.key" })
+        assertTrue(bindings.getValue("decoder_with_past").outputs.any { it.name == "logits" })
+        assertTrue(bindings.getValue("decoder_with_past").outputs.any { it.name == "present.0.decoder.key" })
+
+        val contracts = inspection.metadata["inference_contracts"] as Map<*, *>
+        assertEquals("vision_encoder", (contracts["vision_encoder"] as Map<*, *>)["artifact_role"])
+        assertEquals("embed_tokens", (contracts["embed_tokens"] as Map<*, *>)["artifact_role"])
+        assertEquals("encoder", (contracts["encoder"] as Map<*, *>)["artifact_role"])
+        assertFalse(
+            inspection.issues.any {
+                it.code in setOf("tensor_input_missing", "tensor_output_missing", "artifact_role_binding_missing") &&
+                    (it.message.startsWith("vision_encoder") || it.message.startsWith("embed_tokens") || it.message.startsWith("encoder"))
+            },
+        )
+    }
+
+    @Test
     fun `processor metadata preserves real Florence image settings`() {
         val processor = inspectPackage().metadata["florence_package"] as Map<*, *>
         val image = processor["processor"] as Map<*, *>
@@ -1362,6 +1399,9 @@ class Florence2ExecutionContractTest {
         }
     }
 
-    private fun inspectPackage(): ModelPackageInspection =
+    private val cachedInspection: ModelPackageInspection by lazy {
         ModelPackageInspector().inspect(packageDirectory, File("build/florence-stage1-extracted"))
+    }
+
+    private fun inspectPackage(): ModelPackageInspection = cachedInspection
 }
