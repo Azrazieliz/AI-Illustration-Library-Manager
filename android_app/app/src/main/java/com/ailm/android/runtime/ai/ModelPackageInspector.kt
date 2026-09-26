@@ -144,7 +144,7 @@ internal class ModelPackageInspector {
             }
             addTokenizerAssets(filesByName, this, issues)
             addLabelAssets(filesByName, this)
-            bindings?.let { addTensorBindings(this, it, issues) }
+            bindings?.let { addTensorBindings(this, artifact, it, issues) }
             addImagePreprocessing(this, bindings, issues)
             if (runtime == AiRuntimeType.LLAMA_CPP.raw) {
                 synthesizeQwenGgufMetadata(this, artifact)
@@ -240,6 +240,7 @@ internal class ModelPackageInspector {
         val imageInput = bindings.inputs.single()
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "face_detection" to mapOf(
+                "artifact_role" to "detector",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf("enabled" to true, "width" to 640, "height" to 640, "channels" to 3, "color_space" to "rgb", "resize_mode" to "center_crop", "scale" to (1.0 / 128.0), "mean" to listOf(127.5), "std" to listOf(128.0)),
                 "inputs" to listOf(mapOf("name" to imageInput.name, "source" to "image", "data_type" to imageInput.dataType, "layout" to "nchw", "shape" to imageInput.shape)),
@@ -297,6 +298,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "face_embedding" to mapOf(
+                "artifact_role" to "face_embedding",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -373,6 +375,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "landmark_2d" to mapOf(
+                "artifact_role" to "landmark_2d",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -429,6 +432,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "landmark_3d" to mapOf(
+                "artifact_role" to "landmark_3d",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -483,6 +487,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "gender_age" to mapOf(
+                "artifact_role" to "gender_age",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -580,6 +585,7 @@ internal class ModelPackageInspector {
         )
         metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
             "vision_encoder" to mapOf(
+                "artifact_role" to "vision_encoder",
                 "tokenizer" to mapOf("type" to "none"),
                 "image_preprocessing" to mapOf(
                     "enabled" to true,
@@ -598,6 +604,7 @@ internal class ModelPackageInspector {
                 "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
             ),
             "embed_tokens" to mapOf(
+                "artifact_role" to "embed_tokens",
                 "tokenizer" to mapOf("type" to "none"),
                 "inputs" to listOf(mapOf("name" to "input_ids", "source" to "numeric", "data_type" to "int64", "layout" to "sequence", "shape" to listOf(-1, -1), "payload_key" to "input_ids")),
                 "outputs" to listOf(mapOf("name" to "inputs_embeds", "index" to 0, "data_type" to "float32", "shape" to listOf(-1, -1, 768))),
@@ -605,6 +612,7 @@ internal class ModelPackageInspector {
                 "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
             ),
             "encoder" to mapOf(
+                "artifact_role" to "encoder",
                 "tokenizer" to mapOf("type" to "none"),
                 "inputs" to listOf(
                     mapOf("name" to "attention_mask", "source" to "numeric", "data_type" to "int64", "layout" to "sequence", "shape" to listOf(-1, -1), "payload_key" to "attention_mask"),
@@ -1512,14 +1520,63 @@ internal class ModelPackageInspector {
 
     private fun addTensorBindings(
         metadata: MutableMap<String, Any>,
-        bindings: ModelArtifactBindings,
+        primaryArtifact: File?,
+        primaryBindings: ModelArtifactBindings,
         issues: MutableList<ModelPackageIssue>,
     ) {
         val contracts = metadata[INFERENCE_CONTRACTS_KEY].asStringMap() ?: return
-        val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
-        val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
+        val pathsByRole = metadata["artifact_paths_by_role"].asStringMap().orEmpty()
+        val bindingsByArtifact = mutableMapOf<String, ModelArtifactBindings>()
+
+        primaryArtifact?.let { artifact ->
+            bindingsByArtifact[artifact.bindingCacheKey()] = primaryBindings
+        }
+
+        fun bindingsForContract(task: String, contract: Map<String, Any>): ModelArtifactBindings? {
+            val role = resolveContractArtifactRole(task, contract, pathsByRole.keys) ?: return primaryBindings
+            val path = pathsByRole[role]?.toString()?.trim().orEmpty()
+            if (path.isBlank()) {
+                issues += ModelPackageIssue(
+                    "artifact_role_binding_missing",
+                    "$task requires artifact role '$role', but the package does not provide a path for that role.",
+                )
+                return null
+            }
+
+            val artifact = File(path)
+            val cacheKey = artifact.bindingCacheKey()
+            bindingsByArtifact[cacheKey]?.let { return it }
+
+            val artifactRuntime = runtimeFor(artifact)
+            if (artifactRuntime.isBlank() || artifactRuntime == AiRuntimeType.LLAMA_CPP.raw) {
+                issues += ModelPackageIssue(
+                    "artifact_role_binding_invalid",
+                    "$task requires artifact role '$role', but '${artifact.name}' is not an inspectable tensor model.",
+                )
+                return null
+            }
+
+            val inspected = runCatching {
+                ModelArtifactInspector.inspect(artifact, artifactRuntime)
+            }.getOrElse { error ->
+                issues += ModelPackageIssue(
+                    "tensor_metadata_unreadable",
+                    "Unable to inspect artifact role '$role' (${artifact.name}) for $task: ${error.message ?: error.javaClass.simpleName}",
+                )
+                null
+            }
+            if (inspected != null) {
+                bindingsByArtifact[cacheKey] = inspected
+            }
+            return inspected
+        }
+
         metadata[INFERENCE_CONTRACTS_KEY] = contracts.mapValues { (task, value) ->
             val contract = value.asStringMap()?.toMutableMap() ?: return@mapValues value
+            val bindings = bindingsForContract(task, contract) ?: return@mapValues contract
+            val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
+            val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
+
             val inputs = contract["inputs"].asMapList().map { raw ->
                 val input = raw.toMutableMap()
                 val name = input["name"]?.toString()?.trim().orEmpty()
@@ -1529,7 +1586,7 @@ internal class ModelPackageInspector {
                     issues += ModelPackageIssue("tensor_input_name_missing", "$task is missing an input tensor name.")
                 } else if (tensor == null) {
                     if (source != "image") {
-                        issues += ModelPackageIssue("tensor_input_missing", "$task declares input '$name', which is absent from the model artifact.")
+                        issues += ModelPackageIssue("tensor_input_missing", "$task declares input '$name', which is absent from its assigned model artifact.")
                     }
                 } else {
                     input.putIfAbsent("data_type", tensor.dataType)
@@ -1540,6 +1597,7 @@ internal class ModelPackageInspector {
                 }
                 input
             }
+
             val outputs = contract["outputs"].asMapList().map { raw ->
                 val output = raw.toMutableMap()
                 val index = output["index"].toIntOrNull()
@@ -1551,18 +1609,42 @@ internal class ModelPackageInspector {
                 if (name.isBlank()) {
                     issues += ModelPackageIssue("tensor_output_name_missing", "$task is missing an output tensor name or index.")
                 } else if (tensor == null) {
-                    issues += ModelPackageIssue("tensor_output_missing", "$task declares output '$name', which is absent from the model artifact.")
+                    issues += ModelPackageIssue("tensor_output_missing", "$task declares output '$name', which is absent from its assigned model artifact.")
                 } else {
                     output.putIfAbsent("index", tensor.index)
                     output.putIfAbsent("data_type", tensor.dataType)
                 }
                 output
             }
+
             contract["inputs"] = inputs
             contract["outputs"] = outputs
             contract
         }
     }
+
+    internal fun resolveContractArtifactRole(
+        task: String,
+        contract: Map<String, Any>,
+        availableRoles: Set<String>,
+    ): String? {
+        val explicit = contract["artifact_role"]?.toString()?.trim().orEmpty()
+        if (explicit.isNotBlank()) {
+            return availableRoles.firstOrNull { it.equals(explicit, ignoreCase = true) } ?: explicit
+        }
+
+        val normalizedTask = AiTaskTypes.normalize(task)
+        val candidates = when (normalizedTask) {
+            "face_detection" -> listOf("detector", "face_detector", "face_detection")
+            else -> listOf(normalizedTask)
+        }
+        return candidates.firstNotNullOfOrNull { candidate ->
+            availableRoles.firstOrNull { role -> role.equals(candidate, ignoreCase = true) }
+        }
+    }
+
+    private fun File.bindingCacheKey(): String =
+        runCatching { canonicalPath }.getOrDefault(absolutePath)
 
     private fun addImagePreprocessing(
         metadata: MutableMap<String, Any>,
