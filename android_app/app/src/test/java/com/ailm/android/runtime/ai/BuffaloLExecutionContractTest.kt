@@ -31,6 +31,42 @@ class BuffaloLExecutionContractTest {
     }
 
     @Test
+    fun `every buffalo tensor contract is validated against its own artifact role`() {
+        val inspection = inspectPackage()
+        val paths = inspection.metadata["artifact_paths_by_role"] as Map<*, *>
+        assertEquals("det_10g.onnx", File(paths["detector"].toString()).name)
+        assertEquals("w600k_r50.onnx", File(paths["face_embedding"].toString()).name)
+        assertEquals("2d106det.onnx", File(paths["landmark_2d"].toString()).name)
+        assertEquals("1k3d68.onnx", File(paths["landmark_3d"].toString()).name)
+        assertEquals("genderage.onnx", File(paths["gender_age"].toString()).name)
+
+        val contracts = inspection.metadata["inference_contracts"] as Map<*, *>
+        assertEquals("detector", (contracts["face_detection"] as Map<*, *>)["artifact_role"])
+        assertEquals("face_embedding", (contracts["face_embedding"] as Map<*, *>)["artifact_role"])
+        assertEquals("landmark_2d", (contracts["landmark_2d"] as Map<*, *>)["artifact_role"])
+        assertEquals("landmark_3d", (contracts["landmark_3d"] as Map<*, *>)["artifact_role"])
+        assertEquals("gender_age", (contracts["gender_age"] as Map<*, *>)["artifact_role"])
+
+        val bindings = inspection.artifactBindingsByRole
+        assertEquals(9, bindings.getValue("detector").outputs.size)
+        assertEquals(listOf("683"), bindings.getValue("face_embedding").outputs.map { it.name })
+        assertEquals(listOf(1, 512), bindings.getValue("face_embedding").outputs.single().shape)
+        assertEquals(listOf("fc1"), bindings.getValue("landmark_2d").outputs.map { it.name })
+        assertEquals(listOf(1, 212), bindings.getValue("landmark_2d").outputs.single().shape)
+        assertEquals(listOf("fc1"), bindings.getValue("landmark_3d").outputs.map { it.name })
+        assertEquals(listOf(1, 3309), bindings.getValue("landmark_3d").outputs.single().shape)
+        assertEquals(listOf("fc1"), bindings.getValue("gender_age").outputs.map { it.name })
+        assertEquals(listOf(1, 3), bindings.getValue("gender_age").outputs.single().shape)
+
+        assertFalse(
+            inspection.issues.any {
+                it.code in setOf("tensor_input_missing", "tensor_output_missing", "artifact_role_binding_missing") &&
+                    it.message.startsWith("face_embedding")
+            },
+        )
+    }
+
+    @Test
     fun `buffalo_l package is partly ready while other features remain unresolved`() {
         val inspection = inspectPackage()
         val capabilities = inspection.metadata["buffalo_l_capabilities"] as? Map<*, *> ?: emptyMap<Any, Any>()
@@ -477,6 +513,9 @@ class BuffaloLExecutionContractTest {
             "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0.0),
         ))))
 
-    private fun inspectPackage(): ModelPackageInspection =
+    private val cachedInspection: ModelPackageInspection by lazy {
         ModelPackageInspector().inspect(packageDirectory, File("build/buffalo-l-extracted"))
+    }
+
+    private fun inspectPackage(): ModelPackageInspection = cachedInspection
 }
