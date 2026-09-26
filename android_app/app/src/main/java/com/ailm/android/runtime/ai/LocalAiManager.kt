@@ -1488,7 +1488,7 @@ class LocalAiManager(
             "duplicate_detection" -> listOf("metadata_extraction", "embedding_generation", "duplicate_detection")
             "classification" -> listOf("metadata_extraction", "tag_prediction", "classification")
             "detection" -> listOf("metadata_extraction", "detection")
-            "face_feature_extraction" -> listOf("metadata_extraction", "detection", "face_feature_extraction")
+            "face_feature_extraction" -> listOf("face_feature_extraction")
             "knowledge_pack_execution" -> listOf("knowledge_pack_execution")
             else -> listOf(taskType)
         }
