@@ -144,7 +144,7 @@ internal data class ModelInferenceContract(
                 )
             }
             val coordinatedTasks = model.metadata["coordinated_tasks"]
-                .asDeclaredValues()
+                .stringList()
                 .map(AiTaskTypes::normalize)
                 .toSet()
             return model.supportedTasks.mapNotNull { rawTask ->
