@@ -107,9 +107,13 @@ internal class ModelPackageInspector {
             normalizedMetadata["supported_tasks"].asDeclaredValues())
             .distinct()
         val nsfwMetadataTasks = inferNsfwClassificationTasks(normalizedMetadata)
+        val nonExecutableCapabilities = normalizedMetadata["non_executable_capabilities"].asDeclaredValues()
+            .map(AiTaskTypes::normalize)
+            .toSet()
         val declaredExecutionTasks = (declaredTasks + declaredCapabilities + nsfwMetadataTasks)
             .map(AiTaskTypes::normalize)
             .filter(AiTaskTypes::isExecutionTask)
+            .filterNot(nonExecutableCapabilities::contains)
             .distinct()
         
         // Infer default capability from runtime when no explicit capability/task is declared
@@ -830,7 +834,8 @@ internal class ModelPackageInspector {
             buffaloEmbed?.let { artifacts += mapOf("path" to it.relativeTo(packageRoot).invariantSeparatorsPath, "role" to "face_embedding") }
             if (artifacts.isNotEmpty()) {
                 result["model_artifacts"] = artifacts
-                result["task"] = "face_feature_extraction"
+                result["capabilities"] = (result["capabilities"].asDeclaredValues() + "face_feature_extraction").distinct()
+                result["non_executable_capabilities"] = (result["non_executable_capabilities"].asDeclaredValues() + "face_feature_extraction").distinct()
                 return result
             }
         }
@@ -848,7 +853,8 @@ internal class ModelPackageInspector {
         }
         if (insight.size >= 3) {
             result["model_artifacts"] = insight
-            result["task"] = "face_feature_extraction"
+            result["capabilities"] = (result["capabilities"].asDeclaredValues() + "face_feature_extraction").distinct()
+            result["non_executable_capabilities"] = (result["non_executable_capabilities"].asDeclaredValues() + "face_feature_extraction").distinct()
             return result
         }
 
