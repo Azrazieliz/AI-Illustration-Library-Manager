@@ -144,7 +144,7 @@ internal class ModelPackageInspector {
             }
             addTokenizerAssets(filesByName, this, issues)
             addLabelAssets(filesByName, this)
-            bindings?.let { addTensorBindings(this, it, issues) }
+            bindings?.let { addTensorBindings(this, it, artifact, issues) }
             addImagePreprocessing(this, bindings, issues)
             if (runtime == AiRuntimeType.LLAMA_CPP.raw) {
                 synthesizeQwenGgufMetadata(this, artifact)
@@ -1512,14 +1512,30 @@ internal class ModelPackageInspector {
 
     private fun addTensorBindings(
         metadata: MutableMap<String, Any>,
-        bindings: ModelArtifactBindings,
+        primaryBindings: ModelArtifactBindings,
+        primaryArtifact: File?,
         issues: MutableList<ModelPackageIssue>,
     ) {
         val contracts = metadata[INFERENCE_CONTRACTS_KEY].asStringMap() ?: return
-        val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
-        val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
+        val artifactPathsByRole = metadata["artifact_paths_by_role"].asStringMap().orEmpty()
+        val bindingCache = mutableMapOf<String, ModelArtifactBindings>()
+        primaryArtifact?.let { artifact ->
+            bindingCache[artifactBindingKey(artifact)] = primaryBindings
+        }
+
         metadata[INFERENCE_CONTRACTS_KEY] = contracts.mapValues { (task, value) ->
             val contract = value.asStringMap()?.toMutableMap() ?: return@mapValues value
+            val bindings = bindingsForTask(
+                task = task,
+                artifactPathsByRole = artifactPathsByRole,
+                primaryArtifact = primaryArtifact,
+                primaryBindings = primaryBindings,
+                bindingCache = bindingCache,
+                issues = issues,
+            ) ?: return@mapValues contract
+
+            val inputsByName = bindings.inputs.associateBy(ModelArtifactTensor::name)
+            val outputsByName = bindings.outputs.associateBy(ModelArtifactTensor::name)
             val inputs = contract["inputs"].asMapList().map { raw ->
                 val input = raw.toMutableMap()
                 val name = input["name"]?.toString()?.trim().orEmpty()
@@ -1563,6 +1579,59 @@ internal class ModelPackageInspector {
             contract
         }
     }
+
+    private fun bindingsForTask(
+        task: String,
+        artifactPathsByRole: Map<String, Any>,
+        primaryArtifact: File?,
+        primaryBindings: ModelArtifactBindings,
+        bindingCache: MutableMap<String, ModelArtifactBindings>,
+        issues: MutableList<ModelPackageIssue>,
+    ): ModelArtifactBindings? {
+        val role = artifactRolesForTask(task)
+            .firstOrNull { candidate -> artifactPathsByRole[candidate]?.toString()?.isNotBlank() == true }
+            ?: return primaryBindings
+        val path = artifactPathsByRole[role]?.toString()?.trim().orEmpty()
+        if (path.isBlank()) return primaryBindings
+
+        val artifact = File(path)
+        val key = artifactBindingKey(artifact)
+        val primaryKey = primaryArtifact?.let(::artifactBindingKey)
+        if (primaryKey != null && key == primaryKey) {
+            return primaryBindings
+        }
+        bindingCache[key]?.let { return it }
+
+        val runtime = runtimeFor(artifact)
+        if (runtime.isBlank() || runtime == AiRuntimeType.LLAMA_CPP.raw) {
+            issues += ModelPackageIssue(
+                "tensor_metadata_unreadable",
+                "$task resolves to artifact role '$role', but '${artifact.name}' is not an inspectable tensor runtime artifact.",
+            )
+            return null
+        }
+
+        return runCatching { ModelArtifactInspector.inspect(artifact, runtime) }
+            .onSuccess { resolved -> bindingCache[key] = resolved }
+            .getOrElse { error ->
+                issues += ModelPackageIssue(
+                    "tensor_metadata_unreadable",
+                    "Unable to inspect ${artifact.name} for task '$task' (role '$role'): ${error.message ?: error.javaClass.simpleName}",
+                )
+                null
+            }
+    }
+
+    private fun artifactRolesForTask(task: String): List<String> {
+        val normalized = AiTaskTypes.normalize(task)
+        return when (normalized) {
+            "face_detection" -> listOf("detector", "face_detector", "face_detection")
+            else -> listOf(normalized)
+        }
+    }
+
+    private fun artifactBindingKey(artifact: File): String =
+        runCatching { artifact.canonicalPath }.getOrElse { artifact.absolutePath }
 
     private fun addImagePreprocessing(
         metadata: MutableMap<String, Any>,

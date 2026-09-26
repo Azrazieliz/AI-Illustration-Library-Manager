@@ -154,6 +154,20 @@ class BuffaloLExecutionContractTest {
     }
 
     @Test
+    fun `buffalo_l tensor validation uses the artifact assigned to each role`() {
+        val inspection = inspectPackage()
+        val roleTasks = listOf("face_embedding", "landmark_2d", "landmark_3d", "gender_age")
+        val falseTensorIssues = inspection.issues.filter { issue ->
+            issue.code in setOf("tensor_input_missing", "tensor_output_missing") &&
+                roleTasks.any { task -> issue.message.startsWith(task) }
+        }
+        assertTrue(
+            "Role-specific Buffalo-L contracts must not be validated against det_10g.onnx: $falseTensorIssues",
+            falseTensorIssues.isEmpty(),
+        )
+    }
+
+    @Test
     fun `2d landmark role routes to 2d106det`() {
         val inspection = inspectPackage()
         val paths = inspection.metadata["artifact_paths_by_role"] as Map<*, *>
