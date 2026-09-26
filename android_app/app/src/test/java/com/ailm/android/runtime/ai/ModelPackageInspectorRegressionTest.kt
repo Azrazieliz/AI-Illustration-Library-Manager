@@ -29,6 +29,30 @@ class ModelPackageInspectorRegressionTest {
     // =====================================================
 
     @Test
+    fun `genuine missing non-image tensor input remains a blocking inspection issue`() {
+        withTempDir { root ->
+            val artifact = File(root, "model.onnx").apply { writeText("placeholder") }
+            val inspection = ModelPackageInspection(
+                packageRoot = root,
+                artifact = artifact,
+                runtime = "onnx",
+                supportedTasks = listOf("classification"),
+                capabilities = listOf("classification"),
+                metadata = emptyMap(),
+                files = listOf("model.onnx"),
+                issues = listOf(
+                    ModelPackageIssue(
+                        "tensor_input_missing",
+                        "classification declares a required non-image input that is absent",
+                    ),
+                ),
+            )
+
+            assertFalse("Missing executable tensor inputs must reject the package", inspection.valid)
+        }
+    }
+
+    @Test
     fun `runtime parser canonically maps llama_cpp and llama_cpp export spellings to the LLAMA_CPP enum`() {
         assertEquals("LLAMA_CPP canonical enum must be recovered from llama_cpp", AiRuntimeType.LLAMA_CPP, AiRuntimeType.fromRaw("llama_cpp"))
         assertEquals("LLAMA_CPP canonical enum must be recovered from llama.cpp", AiRuntimeType.LLAMA_CPP, AiRuntimeType.fromRaw("llama.cpp"))
