@@ -60,6 +60,9 @@ class PaddleOcrExecutionContractTest {
         assertFalse(inspectPackage().valid)
     }
 
-    private fun inspectPackage(): ModelPackageInspection =
+    private val cachedInspection: ModelPackageInspection by lazy {
         ModelPackageInspector().inspect(packageDirectory, File("build/paddleocr-extracted"))
+    }
+
+    private fun inspectPackage(): ModelPackageInspection = cachedInspection
 }
