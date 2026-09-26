@@ -12,6 +12,12 @@ import kotlin.coroutines.startCoroutine
 
 class QwenLlamaCppContractTest {
     @Test
+    fun `qwen native descriptor does not require tensor inference contracts`() {
+        val issues = ModelInferenceContract.validationIssues(qwenModel())
+        assertTrue("LLAMA_CPP GGUF models are validated by the native backend contract", issues.isEmpty())
+    }
+
+    @Test
     fun `qwen coder metadata selects real llama cpp text backend`() {
         val bridge = FakeLlamaBridge()
         val backend = LlamaCppBackend({ _, _ -> qwenModel() }, context = nullContext(), bridge = bridge)
