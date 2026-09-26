@@ -203,7 +203,11 @@ internal class ModelPackageInspector {
                 "Package metadata does not establish an executable tensor-source and output-decoder mapping. The package must provide enough standard task, processor/tokenizer, labels, and output metadata for automatic construction.",
             )
         } else if (contracts != null) {
-            tasks.filterNot(contracts::containsKey).forEach { task ->
+            val coordinatedTasks = resolvedMetadata["coordinated_tasks"]
+                .asDeclaredValues()
+                .map(AiTaskTypes::normalize)
+                .toSet()
+            tasks.filterNot { task -> contracts.containsKey(task) || task in coordinatedTasks }.forEach { task ->
                 issues += ModelPackageIssue(
                     "task_contract_missing",
                     "Package metadata is missing inference_contracts.$task for declared task '$task'.",
@@ -536,7 +540,12 @@ internal class ModelPackageInspector {
         val tokenizerJson = metadata["tokenizer_json"].asStringMap().orEmpty()
         val addedTokens = tokenizerJson["added_tokens"].asMapList()
         val baseVocab = tokenizerJson["model"].asStringMap()?.get("vocab").asStringMap()?.size ?: 50265
-        metadata["supported_tasks"] = (metadata["supported_tasks"].asDeclaredValues() + "vision_encoder").distinct()
+        metadata["supported_tasks"] = (
+            metadata["supported_tasks"].asDeclaredValues() + listOf("vision_encoder", "prompt_generation")
+        ).distinct()
+        metadata["coordinated_tasks"] = (
+            metadata["coordinated_tasks"].asDeclaredValues() + "prompt_generation"
+        ).distinct()
         metadata["florence_package"] = mapOf(
             "recognized" to true,
             "model_id" to (metadata["model_id"] ?: "florence-2-base"),
