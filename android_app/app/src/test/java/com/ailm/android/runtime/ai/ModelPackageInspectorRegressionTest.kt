@@ -402,7 +402,7 @@ class ModelPackageInspectorRegressionTest {
                       "artifact_role": "detector",
                       "tokenizer": {"type": "none"},
                       "image_preprocessing": {"enabled": true, "width": 640, "height": 640, "channels": 3, "color_space": "rgb", "resize_mode": "stretch", "scale": 1.0, "mean": [0.0], "std": [1.0]},
-                      "inputs": [{"name": "input.1", "source": "image", "data_type": "float32", "layout": "nchw", "shape": [-1, 3, 640, 640]}],
+                      "inputs": [{"name": "definitely_missing_input", "source": "numeric", "data_type": "float32", "layout": "sequence", "shape": [1, 1]}],
                       "outputs": [{"name": "definitely_missing_output", "index": 0, "data_type": "float32", "shape": [1, 1]}],
                       "output_decoder": {"type": "classification", "output_name": "definitely_missing_output", "labels": ["x"]},
                       "confidence_scoring": {"type": "identity", "threshold": 0.0}
@@ -414,6 +414,14 @@ class ModelPackageInspectorRegressionTest {
 
             val result = ModelPackageInspector().inspect(root, File(root, "inspection-output"))
             assertFalse("A genuinely missing output tensor must remain blocking", result.valid)
+            assertTrue(
+                result.issues.any {
+                    it.code == "tensor_input_missing" &&
+                        it.message.contains("classification") &&
+                        it.message.contains("definitely_missing_input") &&
+                        it.message.contains("artifact role 'detector'")
+                },
+            )
             assertTrue(
                 result.issues.any {
                     it.code == "tensor_output_missing" &&
