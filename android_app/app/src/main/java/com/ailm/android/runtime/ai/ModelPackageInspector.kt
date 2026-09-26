@@ -1556,15 +1556,16 @@ internal class ModelPackageInspector {
                 return null
             }
 
-            val inspected = runCatching {
+            val inspectionAttempt = runCatching {
                 ModelArtifactInspector.inspect(artifact, artifactRuntime)
-            }.getOrElse { error ->
+            }
+            inspectionAttempt.exceptionOrNull()?.let { error ->
                 issues += ModelPackageIssue(
                     "tensor_metadata_unreadable",
                     "Unable to inspect artifact role '$role' (${artifact.name}) for $task: ${error.message ?: error.javaClass.simpleName}",
                 )
-                null
             }
+            val inspected = inspectionAttempt.getOrNull()
             if (inspected != null) {
                 bindingsByArtifact[cacheKey] = inspected
             }
