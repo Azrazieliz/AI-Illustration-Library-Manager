@@ -487,6 +487,11 @@ class ModelPackageInspectorRegressionTest {
         assertEquals("vision_encoder", (contracts["vision_encoder"] as? Map<*, *>)?.get("artifact_role"))
         assertEquals("embed_tokens", (contracts["embed_tokens"] as? Map<*, *>)?.get("artifact_role"))
         assertEquals("encoder", (contracts["encoder"] as? Map<*, *>)?.get("artifact_role"))
+        assertTrue("Florence full generation must be selectable by the execution planner", result.supportedTasks.contains("prompt_generation"))
+        assertFalse(
+            "Coordinated Florence prompt generation must not require one synthetic tensor contract",
+            result.issues.any { it.code == "task_contract_missing" && it.message.contains("prompt_generation") },
+        )
 
         val bindingIssues = result.issues.filter {
             it.code in setOf("tensor_input_missing", "tensor_output_missing")
