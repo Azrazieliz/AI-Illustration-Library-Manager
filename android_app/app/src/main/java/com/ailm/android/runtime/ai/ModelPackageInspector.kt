@@ -29,7 +29,7 @@ internal data class ModelPackageInspection(
 
     val valid: Boolean
         get() = artifact != null && runtime.isNotBlank() && supportedTasks.isNotEmpty() &&
-            issues.none { it.code !in NON_BLOCKING_IMPORT_ISSUES && it.code !in setOf("tensor_input_missing") }
+            issues.none { it.code !in NON_BLOCKING_IMPORT_ISSUES }
 
     fun toMap(): Map<String, Any> = mapOf(
         "valid" to valid,
