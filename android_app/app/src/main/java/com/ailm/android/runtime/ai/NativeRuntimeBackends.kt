@@ -131,7 +131,7 @@ class OnnxRuntimeBackend(
         reporter.report(0.15, "Preparing ONNX Runtime inputs")
         return try {
             val normalizedTask = AiTaskTypes.normalize(request.taskType)
-            val effectivePayload = if (normalizedTask == "face_embedding" &&
+            val effectivePayload = if (normalizedTask in setOf("face_embedding", "face_feature_extraction") &&
                 request.payload["face_keypoints"] == null && request.payload["kps"] == null
             ) {
                 detectSingleFacePayload(registeredModel, request)
@@ -180,7 +180,7 @@ class OnnxRuntimeBackend(
 
     private fun resolveRoleArtifact(model: AiModelDescriptor, taskType: String): AiModelDescriptor {
         val role = when (AiTaskTypes.normalize(taskType)) {
-            "face_embedding" -> "face_embedding"
+            "face_embedding", "face_feature_extraction" -> "face_embedding"
             "face_detection" -> "detector"
             "landmark_2d" -> "landmark_2d"
             "landmark_3d" -> "landmark_3d"
