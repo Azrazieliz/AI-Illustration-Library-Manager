@@ -6,6 +6,10 @@ on:
       - fix/asterion-role-aware-bindings
   workflow_dispatch:
 
+concurrency:
+  group: asterion-core-role-aware-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   focused-tests:
     runs-on: ubuntu-latest
