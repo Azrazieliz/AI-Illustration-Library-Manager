@@ -7,6 +7,11 @@ import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import com.ailm.android.workers.LibraryAutomationWorker
 import com.ailm.android.runtime.StandaloneRuntime
 import com.ailm.android.runtime.ai.LocalAiJson
 import kotlinx.coroutines.Dispatchers
@@ -615,6 +620,55 @@ class AppViewModel : ViewModel() {
             }
             refreshLocalAiStateInternal()
         }
+    }
+
+    fun startLibraryAutomation(context: Context, forceAll: Boolean = false) {
+        val appContext = context.applicationContext
+        runCatching {
+            StandaloneRuntime.initialize(appContext)
+            val pending = StandaloneRuntime.automationImageIds(forceAll).size
+            StandaloneRuntime.updateAutomationStatus(
+                status = "queued",
+                total = pending,
+                processed = 0,
+                failed = 0,
+                message = if (pending == 0) "Nothing to process." else "Automation queued.",
+            )
+            val request = OneTimeWorkRequestBuilder<LibraryAutomationWorker>()
+                .setInputData(workDataOf(LibraryAutomationWorker.FORCE_ALL_KEY to forceAll))
+                .build()
+            WorkManager.getInstance(appContext).enqueueUniqueWork(
+                LibraryAutomationWorker.UNIQUE_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                request,
+            )
+            _uiState.value = _uiState.value.copy(
+                lastActionMessage = if (pending == 0) "No unprocessed images found." else "Automation started in the background.",
+                errorMessage = null,
+            )
+            refreshLocalAiState()
+        }.onFailure { error ->
+            _uiState.value = _uiState.value.copy(errorMessage = error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    fun stopLibraryAutomation(context: Context) {
+        val appContext = context.applicationContext
+        WorkManager.getInstance(appContext).cancelUniqueWork(LibraryAutomationWorker.UNIQUE_WORK_NAME)
+        runCatching {
+            StandaloneRuntime.initialize(appContext)
+            val current = StandaloneRuntime.automationStatus()
+            StandaloneRuntime.updateAutomationStatus(
+                status = "stopping",
+                total = (current["automation_total"] as? Number)?.toInt() ?: 0,
+                processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
+                failed = (current["automation_failed"] as? Number)?.toInt() ?: 0,
+                currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
+                message = "Stopping automation…",
+            )
+        }
+        _uiState.value = _uiState.value.copy(lastActionMessage = "Automation stop requested.")
+        refreshLocalAiState()
     }
 
     fun pauseAiQueue() {
@@ -2041,7 +2095,9 @@ class AppViewModel : ViewModel() {
 
     private fun collectLocalAiSnapshot(fallback: AppUiState): LocalAiSnapshot {
         return LocalAiSnapshot(
-            overview = runCatching { StandaloneRuntime.localAiOverview() }.getOrElse { fallback.aiOverview },
+            overview = runCatching {
+                StandaloneRuntime.localAiOverview() + StandaloneRuntime.automationStatus()
+            }.getOrElse { fallback.aiOverview },
             executionChain = runCatching { StandaloneRuntime.localAiExecutionChain() }.getOrElse { fallback.aiExecutionChain },
             hardwareProfile = runCatching { StandaloneRuntime.latestAiHardwareProfile() }.getOrElse { fallback.aiHardwareProfile },
             backends = runCatching { StandaloneRuntime.listAiBackends() }.getOrElse { fallback.aiBackends },
