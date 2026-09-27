@@ -21,6 +21,14 @@ import java.util.UUID
 
 object StandaloneRuntime {
     private const val RUNTIME_TRACE_TAG = "AilmTraceRuntime"
+    private const val AUTOMATION_PREFS = "ailm_automation"
+    private const val AUTOMATION_STATUS_KEY = "status"
+    private const val AUTOMATION_TOTAL_KEY = "total"
+    private const val AUTOMATION_PROCESSED_KEY = "processed"
+    private const val AUTOMATION_FAILED_KEY = "failed"
+    private const val AUTOMATION_CURRENT_IMAGE_KEY = "current_image_id"
+    private const val AUTOMATION_MESSAGE_KEY = "message"
+    private const val AUTOMATION_UPDATED_AT_KEY = "updated_at_ms"
 
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
@@ -228,9 +236,6 @@ object StandaloneRuntime {
                     )
                     seenUris += node.uri
                     discoveredLocal += 1
-                    if (upsert.needsAiProcessing) {
-                        scheduleAutonomousImageWorkflow(upsert.imageId)
-                    }
 
                     stateMutex.withLock {
                         scanDiscovered += 1
@@ -928,9 +933,50 @@ object StandaloneRuntime {
         val prepared = prepareAiPipelinePayload(payload + mapOf(
             "task_type" to "autonomous_image_workflow",
             "stages" to autonomousImageStages,
+            "continue_on_stage_error" to true,
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
         return response + mapOf("workflow" to aiWorkflowCoordinator.applyImageWorkflow(imageId, response))
+    }
+
+    fun automationImageIds(forceAll: Boolean = false): List<Int> {
+        ensureInitialized()
+        return repository.listAutomationImageIds(forceAll)
+    }
+
+    fun automationStatus(): Map<String, Any> {
+        ensureInitialized()
+        val prefs = appContext.getSharedPreferences(AUTOMATION_PREFS, Context.MODE_PRIVATE)
+        return mapOf(
+            "automation_status" to prefs.getString(AUTOMATION_STATUS_KEY, "idle").orEmpty(),
+            "automation_total" to prefs.getInt(AUTOMATION_TOTAL_KEY, 0),
+            "automation_processed" to prefs.getInt(AUTOMATION_PROCESSED_KEY, 0),
+            "automation_failed" to prefs.getInt(AUTOMATION_FAILED_KEY, 0),
+            "automation_current_image_id" to prefs.getInt(AUTOMATION_CURRENT_IMAGE_KEY, 0),
+            "automation_message" to prefs.getString(AUTOMATION_MESSAGE_KEY, "").orEmpty(),
+            "automation_updated_at_ms" to prefs.getLong(AUTOMATION_UPDATED_AT_KEY, 0L),
+        )
+    }
+
+    fun updateAutomationStatus(
+        status: String,
+        total: Int,
+        processed: Int,
+        failed: Int,
+        currentImageId: Int = 0,
+        message: String = "",
+    ) {
+        ensureInitialized()
+        appContext.getSharedPreferences(AUTOMATION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(AUTOMATION_STATUS_KEY, status)
+            .putInt(AUTOMATION_TOTAL_KEY, total.coerceAtLeast(0))
+            .putInt(AUTOMATION_PROCESSED_KEY, processed.coerceAtLeast(0))
+            .putInt(AUTOMATION_FAILED_KEY, failed.coerceAtLeast(0))
+            .putInt(AUTOMATION_CURRENT_IMAGE_KEY, currentImageId.coerceAtLeast(0))
+            .putString(AUTOMATION_MESSAGE_KEY, message)
+            .putLong(AUTOMATION_UPDATED_AT_KEY, System.currentTimeMillis())
+            .apply()
     }
 
     fun runKnowledgePackExecution(payload: Map<String, Any>): Map<String, Any> {
@@ -1073,9 +1119,6 @@ object StandaloneRuntime {
                 )
                 seenUris += node.uri
                 synced += 1
-                if (upsert.needsAiProcessing) {
-                    scheduleAutonomousImageWorkflow(upsert.imageId)
-                }
             }
 
             repository.markMissingFolderImagesInactive(normalizedUri, seenUris, startedAt)
@@ -2526,12 +2569,6 @@ object StandaloneRuntime {
             return
         }
         repository.setTags(imageId, tags)
-    }
-
-    private fun scheduleAutonomousImageWorkflow(imageId: Int) {
-        runtimeScope.launch {
-            runCatching { runAutonomousImageWorkflow(mapOf("image_id" to imageId)) }
-        }
     }
 
     private fun extractPredictedTags(response: Map<String, Any>): List<String> {
