@@ -389,7 +389,7 @@ internal data class OutputDecoderContract(
         fun parse(raw: Map<String, Any>?, taskType: String): OutputDecoderContract {
             val value = raw ?: throw ModelInferenceContractException("Inference contract for '$taskType' must define output_decoder")
             val type = value["type"].text().lowercase()
-            require(type in setOf("classification", "embedding", "tokens", "detection", "similarity", "regression", "landmarks_2d", "landmarks_3d", "gender_age", "vision_features")) {
+            require(type in setOf("classification", "embedding", "tokens", "detection", "similarity", "reranking", "regression", "landmarks_2d", "landmarks_3d", "gender_age", "vision_features")) {
                 "Unsupported output decoder '$type' for '$taskType'"
             }
             val labels = value["labels"].stringList()
