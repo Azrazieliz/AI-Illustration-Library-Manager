@@ -462,7 +462,7 @@ class ModelPackageInspectorRegressionTest {
 
             val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_paddleocr")
 
-            assertTrue(result.valid)
+            assertTrue("PaddleOCR inspection issues: ${result.issues}", result.valid)
             assertTrue(result.supportedTasks.contains("ocr"))
             assertTrue(result.metadata["execution_readiness"] == null)
             assertFalse(result.issues.any { it.code.startsWith("ocr_") })
