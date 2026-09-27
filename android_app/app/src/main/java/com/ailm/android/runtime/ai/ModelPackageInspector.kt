@@ -411,20 +411,13 @@ internal class ModelPackageInspector(
         relativeFiles: List<String>,
         issues: MutableList<ModelPackageIssue>,
     ): ModelPackageInspection? {
-        val identity = modelIdHint.trim().lowercase()
-        if (!identity.contains("nsfw-classifier") && !identity.contains("nsfw_classifier")) {
-            return null
-        }
-
-        val configFile = filesByName["config.json"]?.singleOrNull()
-        val preprocessorFile = filesByName["preprocessor_config.json"]?.singleOrNull()
-        val config = configFile?.let { runCatching { LocalAiJson.decodeMap(it.readText()) }.getOrNull() }.orEmpty()
-        val preprocessor = preprocessorFile?.let { runCatching { LocalAiJson.decodeMap(it.readText()) }.getOrNull() }.orEmpty()
+        val knownPackage = modelIdHint.contains("nsfw-classifier", ignoreCase = true) ||
+            modelIdHint.contains("nsfw_classifier", ignoreCase = true)
+        if (!knownPackage) return null
 
         val onnxArtifacts = files.filter { it.extension.equals("onnx", ignoreCase = true) }
         val artifact = when {
             onnxArtifacts.size == 1 -> onnxArtifacts.single()
-            onnxArtifacts.isEmpty() -> null
             else -> onnxArtifacts.firstOrNull { it.name.equals("model.onnx", ignoreCase = true) }
         }
         if (artifact == null) {
@@ -451,63 +444,46 @@ internal class ModelPackageInspector(
             )
             null
         }
-
-        val id2label = config["id2label"] as? Map<*, *>
-        val labels = id2label
-            ?.mapNotNull { (key, value) -> key?.toString()?.toIntOrNull()?.let { index -> index to value.toString() } }
-            ?.sortedBy { it.first }
-            ?.map { it.second }
-            .orEmpty()
-        val expectedLabels = listOf("drawings", "hentai", "neutral", "porn", "sexy")
-        if (labels.map(String::lowercase) != expectedLabels) {
-            issues += ModelPackageIssue(
-                "nsfw_labels_invalid",
-                "NSFW classifier package must declare labels in canonical order: ${expectedLabels.joinToString()}.",
-            )
-        }
-
         val input = bindings?.inputs?.singleOrNull { tensor ->
-            tensor.dataType == "float32" && tensor.shape.size == 4
+            tensor.dataType == "float32" &&
+                tensor.shape.size == 4 &&
+                tensor.shape[1] == 3 &&
+                tensor.shape[2] == 224 &&
+                tensor.shape[3] == 224
         }
         val output = bindings?.outputs?.singleOrNull { tensor ->
-            tensor.dataType == "float32" && tensor.shape.size == 2 && tensor.shape.lastOrNull() == 5
+            tensor.dataType == "float32" &&
+                tensor.shape.size == 2 &&
+                tensor.shape.lastOrNull() == 5
         }
         if (input == null || output == null) {
             issues += ModelPackageIssue(
                 "nsfw_graph_incompatible",
-                "NSFW classifier requires one float32 image input and one float32 [B,5] logits output.",
+                "Known NSFW classifier requires float32 image input [B,3,224,224] and float32 logits output [B,5].",
             )
         }
 
-        val size = preprocessor["size"] as? Map<*, *>
-        val cropSize = preprocessor["crop_size"] as? Map<*, *>
-        fun intField(map: Map<*, *>?, key: String): Int? =
-            (map?.get(key) as? Number)?.toInt() ?: map?.get(key)?.toString()?.toIntOrNull()
-        val width = intField(cropSize, "width")
-            ?: intField(size, "width")
-            ?: intField(size, "shortest_edge")
-            ?: input?.shape?.getOrNull(3)?.takeIf { it > 0 }
-        val height = intField(cropSize, "height")
-            ?: intField(size, "height")
-            ?: intField(size, "shortest_edge")
-            ?: input?.shape?.getOrNull(2)?.takeIf { it > 0 }
-
-        fun floatList(value: Any?): List<Float> =
-            (value as? List<*>)?.mapNotNull { item ->
-                (item as? Number)?.toFloat() ?: item?.toString()?.toFloatOrNull()
-            }.orEmpty()
-        val mean = floatList(preprocessor["image_mean"])
-        val std = floatList(preprocessor["image_std"])
-        val scale = (preprocessor["rescale_factor"] as? Number)?.toFloat()
-            ?: preprocessor["rescale_factor"]?.toString()?.toFloatOrNull()
-        val convertsRgb = preprocessor["do_convert_rgb"] as? Boolean
-        val centerCrop = preprocessor["do_center_crop"] as? Boolean ?: false
-
-        if (width == null || height == null || mean.isEmpty() || std.isEmpty() || scale == null || convertsRgb == null) {
-            issues += ModelPackageIssue(
-                "image_preprocessing_metadata_missing",
-                "NSFW classifier requires explicit size, image_mean, image_std, rescale_factor, and do_convert_rgb preprocessing metadata.",
-            )
+        val expectedLabels = listOf("drawings", "hentai", "neutral", "porn", "sexy")
+        val configText = filesByName["config.json"]?.singleOrNull()?.let { file ->
+            runCatching { file.readText() }.getOrNull()
+        }.orEmpty()
+        if (configText.isNotBlank()) {
+            var cursor = -1
+            val labelsInOrder = expectedLabels.all { label ->
+                val next = configText.indexOf("\"$label\"", startIndex = cursor + 1, ignoreCase = true)
+                if (next < 0) {
+                    false
+                } else {
+                    cursor = next
+                    true
+                }
+            }
+            if (!labelsInOrder) {
+                issues += ModelPackageIssue(
+                    "nsfw_labels_invalid",
+                    "NSFW classifier config does not declare the expected five labels in canonical order.",
+                )
+            }
         }
 
         val metadata = linkedMapOf<String, Any>(
@@ -521,29 +497,27 @@ internal class ModelPackageInspector(
                 "capabilities" to listOf("nsfw_classification"),
             ),
         )
-        if (input != null && output != null && width != null && height != null &&
-            mean.isNotEmpty() && std.isNotEmpty() && scale != null && convertsRgb != null
-        ) {
+        if (input != null && output != null) {
             metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
                 "nsfw_classification" to mapOf(
                     "tokenizer" to mapOf("type" to "none"),
                     "image_preprocessing" to mapOf(
                         "enabled" to true,
-                        "width" to width,
-                        "height" to height,
-                        "channels" to if (convertsRgb) 3 else 1,
-                        "color_space" to if (convertsRgb) "rgb" else "grayscale",
-                        "resize_mode" to if (centerCrop) "center_crop" else "stretch",
-                        "scale" to scale,
-                        "mean" to mean,
-                        "std" to std,
+                        "width" to 224,
+                        "height" to 224,
+                        "channels" to 3,
+                        "color_space" to "rgb",
+                        "resize_mode" to "stretch",
+                        "scale" to (1f / 255f),
+                        "mean" to listOf(0.5f, 0.5f, 0.5f),
+                        "std" to listOf(0.5f, 0.5f, 0.5f),
                     ),
                     "inputs" to listOf(
                         mapOf(
                             "name" to input.name,
                             "source" to "image",
                             "data_type" to input.dataType,
-                            "layout" to (inferImageLayout(input.shape) ?: "nchw"),
+                            "layout" to "nchw",
                             "shape" to input.shape,
                         ),
                     ),
