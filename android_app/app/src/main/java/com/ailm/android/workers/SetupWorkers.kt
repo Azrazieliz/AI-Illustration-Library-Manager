@@ -1,8 +1,14 @@
 package com.ailm.android.workers
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
+import android.os.Build
+import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.ailm.android.runtime.StandaloneRuntime
 
 class InitialSetupWorker(
@@ -45,5 +51,138 @@ class ModelDownloadWorker(
     companion object {
         const val INSTALL_ID_KEY = "install_id"
         private const val MAX_RETRY_ATTEMPTS = 3
+    }
+}
+
+
+class LibraryAutomationWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+    override suspend fun doWork(): Result {
+        return runCatching {
+            StandaloneRuntime.initialize(applicationContext)
+            StandaloneRuntime.resumeAiQueue()
+            val forceAll = inputData.getBoolean(FORCE_ALL_KEY, false)
+            val imageIds = StandaloneRuntime.automationImageIds(forceAll)
+            var processed = 0
+            var failed = 0
+
+            StandaloneRuntime.updateAutomationStatus(
+                status = if (imageIds.isEmpty()) "completed" else "running",
+                total = imageIds.size,
+                processed = 0,
+                failed = 0,
+                message = if (imageIds.isEmpty()) "Nothing to process." else "Starting library automation.",
+            )
+            setForeground(foregroundInfo(0, imageIds.size, "Preparing automation"))
+
+            imageIds.forEach { imageId ->
+                if (isStopped) {
+                    StandaloneRuntime.updateAutomationStatus(
+                        status = "stopped",
+                        total = imageIds.size,
+                        processed = processed,
+                        failed = failed,
+                        currentImageId = imageId,
+                        message = "Automation stopped.",
+                    )
+                    return Result.success()
+                }
+
+                StandaloneRuntime.updateAutomationStatus(
+                    status = "running",
+                    total = imageIds.size,
+                    processed = processed,
+                    failed = failed,
+                    currentImageId = imageId,
+                    message = "Processing image ${processed + 1} of ${imageIds.size}",
+                )
+                setProgress(workDataOf(
+                    "processed" to processed,
+                    "total" to imageIds.size,
+                    "failed" to failed,
+                    "current_image_id" to imageId,
+                ))
+                setForeground(foregroundInfo(processed, imageIds.size, "Processing image ${processed + 1} of ${imageIds.size}"))
+
+                val result = StandaloneRuntime.runAutonomousImageWorkflow(mapOf("image_id" to imageId))
+                if (result["ok"] != true) {
+                    failed += 1
+                }
+                processed += 1
+            }
+
+            StandaloneRuntime.updateAutomationStatus(
+                status = "completed",
+                total = imageIds.size,
+                processed = processed,
+                failed = failed,
+                message = if (failed == 0) {
+                    "Automation completed."
+                } else {
+                    "Automation completed with $failed image(s) needing review or retry."
+                },
+            )
+            setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed))
+            Result.success()
+        }.getOrElse { error ->
+            val current = runCatching { StandaloneRuntime.automationStatus() }.getOrDefault(emptyMap())
+            StandaloneRuntime.updateAutomationStatus(
+                status = "failed",
+                total = (current["automation_total"] as? Number)?.toInt() ?: 0,
+                processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
+                failed = ((current["automation_failed"] as? Number)?.toInt() ?: 0) + 1,
+                currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
+                message = error.message ?: error.javaClass.simpleName,
+            )
+            Result.failure()
+        }
+    }
+
+    override fun onStopped() {
+        runCatching {
+            StandaloneRuntime.initialize(applicationContext)
+            val current = StandaloneRuntime.automationStatus()
+            StandaloneRuntime.updateAutomationStatus(
+                status = "stopped",
+                total = (current["automation_total"] as? Number)?.toInt() ?: 0,
+                processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
+                failed = (current["automation_failed"] as? Number)?.toInt() ?: 0,
+                currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
+                message = "Automation stopped.",
+            )
+        }
+        super.onStopped()
+    }
+
+    private fun foregroundInfo(processed: Int, total: Int, text: String): ForegroundInfo {
+        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "AsterionCore automation",
+                    NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
+        }
+        val max = total.coerceAtLeast(1)
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("AsterionCore automation")
+            .setContentText(text)
+            .setOnlyAlertOnce(true)
+            .setOngoing(total > 0 && processed < total)
+            .setProgress(max, processed.coerceIn(0, max), total <= 0)
+            .build()
+        return ForegroundInfo(NOTIFICATION_ID, notification)
+    }
+
+    companion object {
+        const val UNIQUE_WORK_NAME = "asterion_library_automation"
+        const val FORCE_ALL_KEY = "force_all"
+        private const val CHANNEL_ID = "asterion_automation"
+        private const val NOTIFICATION_ID = 4207
     }
 }
