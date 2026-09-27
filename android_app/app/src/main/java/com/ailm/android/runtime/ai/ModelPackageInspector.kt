@@ -44,7 +44,11 @@ internal data class ModelPackageInspection(
 }
 
 /** Reads a distributed model package without assigning meanings that its files do not declare. */
-internal class ModelPackageInspector {
+internal class ModelPackageInspector(
+    private val inspectArtifactBindings: (File, String) -> ModelArtifactBindings = { artifact, runtime ->
+        ModelArtifactInspector.inspect(artifact, runtime)
+    },
+) {
     fun inspect(source: File, extractionDirectory: File, modelIdHint: String = ""): ModelPackageInspection {
         val issues = mutableListOf<ModelPackageIssue>()
         val packageRoot = materializePackage(source, extractionDirectory, issues)
@@ -77,7 +81,7 @@ internal class ModelPackageInspector {
         val artifact = resolveArtifact(source, packageRoot, files, normalizedMetadata, issues)
         val runtime = artifact?.let(::runtimeFor).orEmpty()
         val bindings = artifact?.takeIf { runtime.isNotBlank() && runtime != AiRuntimeType.LLAMA_CPP.raw }?.let { model ->
-            runCatching { ModelArtifactInspector.inspect(model, runtime) }.getOrElse { error ->
+            runCatching { inspectArtifactBindings(model, runtime) }.getOrElse { error ->
                 issues += ModelPackageIssue(
                     "tensor_metadata_unreadable",
                     "Unable to inspect ${model.name}: ${error.message ?: error.javaClass.simpleName}",
@@ -118,8 +122,20 @@ internal class ModelPackageInspector {
                 "files" to relativeFiles,
             )
             bindings?.let { synthesizeStandardClassificationContract(this, declaredExecutionTasks, it, filesByName, issues) }
-            bindings?.let { synthesizeNomicVisionEmbeddingContract(this, declaredExecutionTasks, it, filesByName, issues) }
-            bindings?.let { synthesizeNomicTextEmbeddingContract(this, declaredExecutionTasks, it, filesByName, issues) }
+            bindings?.let { synthesizeNomicVisionEmbeddingContract(
+                    this,
+                    (declaredExecutionTasks + inferredCapabilities.map(AiTaskTypes::normalize)).distinct(),
+                    it,
+                    filesByName,
+                    issues,
+                ) }
+            bindings?.let { synthesizeNomicTextEmbeddingContract(
+                    this,
+                    (declaredExecutionTasks + inferredCapabilities.map(AiTaskTypes::normalize)).distinct(),
+                    it,
+                    filesByName,
+                    issues,
+                ) }
             bindings?.let { synthesizeScrfdDetectionContract(this, declaredExecutionTasks, it, artifact, issues) }
             synthesizeBuffaloEmbeddingContract(this, files, issues)
             synthesizeBuffaloLandmark2dContract(this, files, issues)
@@ -677,7 +693,9 @@ internal class ModelPackageInspector {
             val file = candidates.singleOrNull() ?: return@forEach
             val parsed = runCatching { LocalAiJson.decodeMap(file.readText()) }.getOrElse { emptyMap() }
             if (parsed.isEmpty() && file.readText().trim().isNotEmpty()) {
-                issues += ModelPackageIssue("metadata_invalid", "Metadata file '${file.name}' is not a JSON object.")
+                if (name != "tokenizer.json") {
+                    issues += ModelPackageIssue("metadata_invalid", "Metadata file '${file.name}' is not a JSON object.")
+                }
             } else {
                 metadata[name] = parsed
             }
@@ -1613,7 +1631,7 @@ internal class ModelPackageInspector {
             return null
         }
 
-        return runCatching { ModelArtifactInspector.inspect(artifact, runtime) }
+        return runCatching { inspectArtifactBindings(artifact, runtime) }
             .onSuccess { resolved -> bindingCache[key] = resolved }
             .getOrElse { error ->
                 issues += ModelPackageIssue(
@@ -1731,7 +1749,7 @@ internal class ModelPackageInspector {
 
     private fun readUnigramTokenizer(filesByName: Map<String, List<File>>): Map<String, Any>? {
         val tokenizerFile = filesByName["tokenizer.json"]?.singleOrNull() ?: return null
-        val tokenizer = runCatching { LocalAiJson.decodeMap(tokenizerFile.readText()) }.getOrNull() ?: return null
+        val tokenizer = runCatching { LocalAiJson.decodeMap(tokenizerFile.readText().removePrefix("\uFEFF")) }.getOrNull() ?: return null
         val model = tokenizer["model"].asStringMap() ?: return null
         if (model["type"]?.toString() != "Unigram") return null
         val entries = (model["vocab"] as? List<*>)?.mapNotNull { value ->
