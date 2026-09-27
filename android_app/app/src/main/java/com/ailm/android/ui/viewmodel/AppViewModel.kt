@@ -659,12 +659,12 @@ class AppViewModel : ViewModel() {
             StandaloneRuntime.initialize(appContext)
             val current = StandaloneRuntime.automationStatus()
             StandaloneRuntime.updateAutomationStatus(
-                status = "stopping",
+                status = "stopped",
                 total = (current["automation_total"] as? Number)?.toInt() ?: 0,
                 processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
                 failed = (current["automation_failed"] as? Number)?.toInt() ?: 0,
                 currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
-                message = "Stopping automation…",
+                message = "Automation stopped.",
             )
         }
         _uiState.value = _uiState.value.copy(lastActionMessage = "Automation stop requested.")
