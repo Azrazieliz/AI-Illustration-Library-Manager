@@ -2395,6 +2395,9 @@ private fun AiModelManagerScreen(
     var previewedModelKey by rememberSaveable { mutableStateOf("") }
     var modelImportMessage by rememberSaveable { mutableStateOf("") }
     var taskPickerKey by rememberSaveable { mutableStateOf("") }
+    var showTaskAssignments by rememberSaveable { mutableStateOf(false) }
+    var showResourceTools by rememberSaveable { mutableStateOf(false) }
+    var showInstallHistory by rememberSaveable { mutableStateOf(false) }
 
     var fusionFormat by rememberSaveable { mutableStateOf("json") }
     var fusionReplaceExisting by rememberSaveable { mutableStateOf(false) }
@@ -2452,21 +2455,28 @@ private fun AiModelManagerScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Local AI Model and Resource Manager", style = MaterialTheme.typography.headlineMedium)
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Models", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "${state.aiInstalledModels.size} installed · ${executionReadyModels.size} execution-ready",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Import Model", style = MaterialTheme.typography.titleMedium)
+                Text("Import model", style = MaterialTheme.typography.titleMedium)
                 Text(
                     if (hasSelectedModelDocument) "Selected package: $selectedModelDocumentName" else "Choose a model package, archive, or model file.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = onChooseModelDocument) {
-                        Text("Browse Package File")
+                        Text("Choose package")
                     }
                     Button(onClick = onChooseModelPackageDirectory) {
-                        Text("Browse Package Folder")
+                        Text("Choose folder")
                     }
                     Button(
                         onClick = {
@@ -2479,7 +2489,7 @@ private fun AiModelManagerScreen(
                         },
                         enabled = hasSelectedModelDocument,
                     ) {
-                        Text("Import Model")
+                        Text("Import")
                     }
                 }
                 if (modelImportMessage.isNotBlank()) {
@@ -2520,7 +2530,7 @@ private fun AiModelManagerScreen(
             }
         }
 
-        Text("Installed Models", style = MaterialTheme.typography.titleMedium)
+        Text("Installed models", style = MaterialTheme.typography.titleMedium)
         if (state.aiInstalledModels.isEmpty()) {
             Text("Imported models will appear here.")
         } else {
@@ -2559,18 +2569,24 @@ private fun AiModelManagerScreen(
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text("${model["display_name"] ?: listedId} (${listedVersion.ifBlank { "n/a" }})")
-                        Text("Status: $verificationLabel | State: $stateLabel")
-                        Text("Size: ${humanBytes(model["size_bytes"].asLongNullable() ?: 0L)}", style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            model["display_name"]?.toString().orEmpty().ifBlank { listedId },
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Text(
+                            "$verificationLabel · $stateLabel · ${humanBytes(model["size_bytes"].asLongNullable() ?: 0L)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { previewedModelKey = if (previewedModelKey == modelKey) "" else modelKey }) {
-                                Text(if (previewedModelKey == modelKey) "Hide Preview" else "Preview")
+                                Text(if (previewedModelKey == modelKey) "Less" else "Details")
                             }
                             Button(onClick = { onVerifyModel(listedId, listedVersion) }, enabled = listedId.isNotBlank() && listedVersion.isNotBlank()) {
                                 Text("Verify")
                             }
                             Button(onClick = { onRemoveModel(listedId, listedVersion) }, enabled = listedId.isNotBlank()) {
-                                Text("Uninstall")
+                                Text("Remove")
                             }
                             Button(
                                 onClick = { onSetActiveModel(listedId, listedVersion, "") },
