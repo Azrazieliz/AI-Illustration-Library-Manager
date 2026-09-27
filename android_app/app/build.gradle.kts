@@ -15,27 +15,27 @@ if (keystorePropertiesFile.exists()) {
 
 val generatedBrandingResources = layout.buildDirectory.dir("generated/asterion-branding/res").get().asFile
 val prepareAsterionBrandingResources by tasks.registering(Sync::class) {
-	from(layout.projectDirectory.dir("../../Branding")) {
+	from(layout.projectDirectory.dir("../../branding")) {
 		include("AsterionCore-Logo.png")
 		rename { "asterioncore_logo.png" }
 		into("drawable-nodpi")
 	}
-	from(layout.projectDirectory.dir("../../Branding")) {
+	from(layout.projectDirectory.dir("../../branding")) {
 		include("AsterionCore-Splash.png")
 		rename { "asterioncore_splash.png" }
 		into("drawable-nodpi")
 	}
-	from(layout.projectDirectory.dir("../../Branding")) {
+	from(layout.projectDirectory.dir("../../branding")) {
 		include("AsterionCore-Icon-512.png")
 		rename { "asterioncore_icon.png" }
 		into("drawable-nodpi")
 	}
-	from(layout.projectDirectory.dir("../../Branding")) {
+	from(layout.projectDirectory.dir("../../branding")) {
 		include("AsterionCore-Icon-512.png")
 		rename { "ic_launcher.png" }
 		into("mipmap-nodpi")
 	}
-	from(layout.projectDirectory.dir("../../Branding")) {
+	from(layout.projectDirectory.dir("../../branding")) {
 		include("AsterionCore-Icon-512.png")
 		rename { "ic_launcher_round.png" }
 		into("mipmap-nodpi")
