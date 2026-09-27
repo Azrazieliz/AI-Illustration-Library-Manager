@@ -814,6 +814,35 @@ class LocalRepository(
         return count > 0
     }
 
+    fun listAutomationImageIds(forceAll: Boolean = false): List<Int> {
+        val profileTable = FusionDatabaseSchema.TABLE_IMAGE_PROFILES
+        val predicate = if (forceAll) {
+            "i.active = 1"
+        } else {
+            """
+            i.active = 1 AND (
+                p.image_id IS NULL OR
+                COALESCE(p.updated_at_ms, 0) < COALESCE(i.scanned_at_ms, 0) OR
+                p.metadata_json NOT LIKE '%\"ai_workflow_updated_at_ms\"%'
+            )
+            """.trimIndent()
+        }
+        val sql = """
+            SELECT i.image_id
+            FROM images i
+            LEFT JOIN $profileTable p ON p.image_id = i.image_id
+            WHERE $predicate
+            ORDER BY i.imported_order ASC, i.image_id ASC
+        """.trimIndent()
+        val ids = mutableListOf<Int>()
+        database.readableDatabase.rawQuery(sql, emptyArray()).use { cursor ->
+            while (cursor.moveToNext()) {
+                ids += cursor.getInt(0)
+            }
+        }
+        return ids
+    }
+
     fun setTags(imageId: Int, tags: List<String>): Boolean {
         val normalized = tags.map { it.trim() }.filter { it.isNotBlank() }.joinToString("|")
         val values = ContentValues().apply { put("tags_text", normalized) }
