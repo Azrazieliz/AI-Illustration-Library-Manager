@@ -799,40 +799,48 @@ private fun DashboardScreen(
             }
         }
 
-        ScanControlsCard(
-            state = state,
-            onStartScan = onStartScan,
-            onPauseScan = onPauseScan,
-            onResumeScan = onResumeScan,
-            onCancelScan = onCancelScan,
-        )
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("More", style = MaterialTheme.typography.titleMedium)
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+        val scanActive = state.scanStatus.lowercase() in setOf("running", "paused", "queued", "in_progress")
+        if (scanActive) {
+            ScanControlsCard(
+                state = state,
+                onStartScan = onStartScan,
+                onPauseScan = onPauseScan,
+                onResumeScan = onResumeScan,
+                onCancelScan = onCancelScan,
+            )
+        } else {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    listOf(
-                        AppDestination.FolderBrowser,
-                        AppDestination.ReviewQueue,
-                        AppDestination.FusionDatabase,
-                        AppDestination.Automation,
-                        AppDestination.Statistics,
-                        AppDestination.Settings,
-                    ).forEach { destination ->
-                        AssistChip(
-                            onClick = { onNavigate(destination) },
-                            label = { Text(destination.title) },
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text("Library indexing", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (totalFolders.toString() == "0") "Add a folder to start building the library." else "Folders are idle. Rescan only when the library changes.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    TextButton(onClick = { onNavigate(AppDestination.FolderBrowser) }) {
+                        Text("Manage")
+                    }
                 }
-                TextButton(onClick = onRefresh) { Text("Refresh library folders") }
             }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            TextButton(onClick = { onNavigate(AppDestination.ReviewQueue) }) { Text("Review") }
+            TextButton(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            TextButton(onClick = { onNavigate(AppDestination.FusionDatabase) }) { Text("Fusion") }
+            TextButton(onClick = { onNavigate(AppDestination.Settings) }) { Text("Settings") }
         }
     }
 }
