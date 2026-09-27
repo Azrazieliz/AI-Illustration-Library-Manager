@@ -366,7 +366,7 @@ data class AiSettings(
     val extra: Map<String, Any> = emptyMap(),
 ) {
     fun toMap(): Map<String, Any> {
-        return linkedMapOf(
+        val result = linkedMapOf<String, Any>(
             "max_cache_bytes" to maxCacheBytes,
             "max_queue_retries" to maxQueueRetries,
             "max_concurrent_tasks" to maxConcurrentTasks,
@@ -377,8 +377,14 @@ data class AiSettings(
             "max_reserved_ram_bytes" to maxReservedRamBytes,
             "scheduler_poll_interval_ms" to schedulerPollIntervalMs,
             "scheduler_idle_delay_ms" to schedulerIdleDelayMs,
-            "extra" to extra,
         )
+        extra.forEach { (key, value) ->
+            if (key !in result) {
+                result[key] = value
+            }
+        }
+        result["extra"] = extra
+        return result
     }
 }
 
