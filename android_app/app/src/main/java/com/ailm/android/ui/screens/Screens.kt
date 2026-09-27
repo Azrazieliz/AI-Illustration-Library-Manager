@@ -35,11 +35,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -253,6 +255,11 @@ fun ScreenScaffold(
             onPauseScan = appViewModel::pauseScan,
             onResumeScan = appViewModel::resumeScan,
             onCancelScan = appViewModel::cancelScan,
+            onOpenRecentImage = { item ->
+                appViewModel.setActiveViewerContext(state.images)
+                appViewModel.selectImage(item)
+                onNavigate(AppDestination.ImageViewer)
+            },
             onNavigate = onNavigate,
         )
 
@@ -687,6 +694,7 @@ private fun DashboardScreen(
     onPauseScan: () -> Unit,
     onResumeScan: () -> Unit,
     onCancelScan: () -> Unit,
+    onOpenRecentImage: (Map<String, Any>) -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
     val totalImages = state.stats["total_images"] ?: state.images.size
@@ -697,6 +705,7 @@ private fun DashboardScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -754,8 +763,10 @@ private fun DashboardScreen(
                 ) {
                     Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) { Text("Library") }
                     Button(onClick = { onNavigate(AppDestination.Search) }) { Text("Search") }
-                    Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("AI") }
-                    Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Models") }
+                    Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Run Automation") }
+                    Button(onClick = { onNavigate(AppDestination.ReviewQueue) }) { Text("Review") }
+                    AssistChip(onClick = { onNavigate(AppDestination.PluginManager) }, label = { Text("Models") })
+                    AssistChip(onClick = { onNavigate(AppDestination.RecognitionResults) }, label = { Text("Manual AI") })
                 }
             }
         }
@@ -763,27 +774,31 @@ private fun DashboardScreen(
         if (state.images.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Recent", style = MaterialTheme.typography.titleMedium)
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(end = 18.dp),
                 ) {
-                    state.images.take(4).forEach { image ->
+                    items(state.images.take(12)) { image ->
                         val title = image["filename"]?.toString().orEmpty().ifBlank { "Untitled" }
-                        val thumb = image["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() }
-                            ?: image["file_url"]?.toString()?.takeIf { it.isNotBlank() }
-                        Card(modifier = Modifier.width(156.dp)) {
+                        val preview = image["file_url"]?.toString()?.takeIf { it.isNotBlank() }
+                            ?: image["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() }
+                        Card(
+                            modifier = Modifier
+                                .width(252.dp)
+                                .clickable { onOpenRecentImage(image) },
+                        ) {
                             Column(
-                                modifier = Modifier.padding(6.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(7.dp),
+                                verticalArrangement = Arrangement.spacedBy(7.dp),
                             ) {
-                                if (!thumb.isNullOrBlank()) {
+                                if (!preview.isNullOrBlank()) {
                                     ImageTile(
-                                        model = thumb,
+                                        model = preview,
                                         contentDescription = title,
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(112.dp),
-                                        contentScale = ContentScale.Crop,
+                                            .height(340.dp),
+                                        contentScale = ContentScale.Fit,
                                     )
                                 }
                                 Text(
@@ -809,37 +824,27 @@ private fun DashboardScreen(
                 onCancelScan = onCancelScan,
             )
         } else {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                    ) {
-                        Text("Library indexing", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            if (totalFolders.toString() == "0") "Add a folder to start building the library." else "Folders are idle. Rescan only when the library changes.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(onClick = { onNavigate(AppDestination.FolderBrowser) }) {
-                        Text("Manage")
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (totalFolders.toString() == "0") "No library folder configured" else "Library indexed • $totalFolders folder(s)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                TextButton(onClick = { onNavigate(AppDestination.FolderBrowser) }) {
+                    Text("Manage folders")
                 }
             }
         }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            TextButton(onClick = { onNavigate(AppDestination.ReviewQueue) }) { Text("Review") }
-            TextButton(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
-            TextButton(onClick = { onNavigate(AppDestination.FusionDatabase) }) { Text("Fusion") }
+            TextButton(onClick = { onNavigate(AppDestination.FusionDatabase) }) { Text("Knowledge & Fusion") }
             TextButton(onClick = { onNavigate(AppDestination.Settings) }) { Text("Settings") }
         }
     }
