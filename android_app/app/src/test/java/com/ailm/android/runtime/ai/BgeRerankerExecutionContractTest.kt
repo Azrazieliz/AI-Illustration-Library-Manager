@@ -15,6 +15,20 @@ class BgeRerankerExecutionContractTest {
     private val contract by lazy { contractFromRealPackage() }
 
     @Test
+    fun `reranking output decoder parses for text reranking task`() {
+        val decoder = OutputDecoderContract.parse(
+            mapOf(
+                "type" to "reranking",
+                "output_name" to "logits",
+                "hidden_dimension" to 1,
+            ),
+            "text_reranking",
+        )
+        assertEquals("reranking", decoder.type)
+        assertEquals("logits", decoder.outputName)
+    }
+
+    @Test
     fun `real package resolves XLM-R reranking contract`() {
         check(packageDirectory.isDirectory)
         assertEquals(listOf("input_ids", "attention_mask"), contract.inputs.map { it.name })
