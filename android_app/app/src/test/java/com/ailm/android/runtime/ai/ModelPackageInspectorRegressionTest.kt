@@ -247,6 +247,90 @@ class ModelPackageInspectorRegressionTest {
         }
     }
 
+    @Test
+    fun `Nomic vision inferred task builds executable contract from inspected graph`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(ModelArtifactTensor("pixel_values", 0, "float32", listOf(1, 3, 224, 224))),
+                    outputs = listOf(ModelArtifactTensor("last_hidden_state", 0, "float32", listOf(1, 197, 768))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-vision-v1.5",
+            )
+
+            assertTrue(result.valid)
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
+            assertTrue(contracts?.containsKey("embedding_generation") == true)
+        }
+    }
+
+    @Test
+    fun `Nomic text inferred task builds executable contract from inspected graph`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            File(root, "vocab.txt").writeText("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n")
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(
+                        ModelArtifactTensor("input_ids", 0, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("token_type_ids", 1, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("attention_mask", 2, "int64", listOf(1, -1)),
+                    ),
+                    outputs = listOf(ModelArtifactTensor("last_hidden_state", 0, "float32", listOf(1, -1, 768))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-text-v1.5",
+            )
+
+            assertTrue(result.valid)
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
+            assertTrue(contracts?.containsKey("embedding_generation") == true)
+        }
+    }
+
+    @Test
+    fun `BGE tokenizer with UTF-8 BOM remains valid package metadata and builds reranking contract`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            File(root, "tokenizer.json").writeText(
+                "\uFEFF" + """{"model":{"type":"Unigram","vocab":[["<s>",0.0],["<pad>",0.0],["</s>",0.0],["<unk>",0.0],["hello",-1.0]]}}""",
+            )
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(
+                        ModelArtifactTensor("input_ids", 0, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("attention_mask", 1, "int64", listOf(1, -1)),
+                    ),
+                    outputs = listOf(ModelArtifactTensor("logits", 0, "float32", listOf(1, 1))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_bge-reranker-v2-m3",
+            )
+
+            assertTrue(result.valid)
+            assertFalse(result.issues.any { it.code == "metadata_invalid" })
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
+            assertTrue(contracts?.containsKey("text_reranking") == true)
+        }
+    }
+
     // =====================================================
     // Regression Tests for Fix C: Aesthetic Model Detection
     // =====================================================
