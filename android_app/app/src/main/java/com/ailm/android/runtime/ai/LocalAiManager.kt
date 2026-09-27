@@ -477,17 +477,8 @@ class LocalAiManager(
                 finishedAtMs = System.currentTimeMillis(),
             )
 
-            enqueueTask(
-                payload = mapOf(
-                    "task_type" to "metadata_refresh",
-                    "model_id" to modelId,
-                    "version" to version,
-                    "priority" to 10,
-                    "payload" to mapOf("trigger" to "local_import"),
-                ),
-            )
-            scheduleIdleBenchmark(descriptor)
-
+            // Local import is storage + registration only. Do not enqueue model work here:
+            // execution/benchmarking must happen only after explicit readiness verification/activation.
             mapOf(
                 "ok" to true,
                 "install_id" to installId,
