@@ -14,12 +14,24 @@ class AestheticScoringExecutionContractTest {
     )
 
     @Test
-    fun `real package is recognized as aesthetic scoring but not ready without preprocessing`() {
+    fun `real package resolves exact Aesthetic v2_5 SigLIP preprocessing profile`() {
         val inspection = ModelPackageInspector().inspect(packageDirectory, File("build/aesthetic-extracted"))
         assertEquals("onnx", inspection.runtime)
         assertTrue(inspection.supportedTasks.contains("aesthetic_scoring"))
-        assertFalse(inspection.valid)
-        assertTrue(inspection.issues.any { it.code == "preprocessing_contract_unresolved" || it.code == "tensor_metadata_unreadable" })
+        assertTrue(inspection.valid)
+        assertFalse(inspection.issues.any { it.code == "preprocessing_contract_unresolved" })
+        val contract = ModelInferenceContract.resolve(
+            descriptor().copy(
+                metadata = inspection.metadata,
+                installPath = inspection.artifact?.absolutePath.orEmpty(),
+            ),
+            "aesthetic_scoring",
+        )
+        assertTrue(contract.imagePreprocessing.enabled)
+        assertEquals(384, contract.imagePreprocessing.width)
+        assertEquals(384, contract.imagePreprocessing.height)
+        assertEquals(listOf(0.5f, 0.5f, 0.5f), contract.imagePreprocessing.mean)
+        assertEquals(listOf(0.5f, 0.5f, 0.5f), contract.imagePreprocessing.standardDeviation)
     }
 
     @Test
