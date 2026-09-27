@@ -199,14 +199,24 @@ internal class PaddleOcrRuntime(
             val detectorInput = prepareDetector(source)
             reporter.report(0.20, "Running PP-OCRv5 text detector")
             val detectorModel = model.copy(installPath = detectorPath)
-            val detectorOutputs = OnnxRuntimeClient.run(detectorModel, listOf(detectorInput.tensor))
-            val probabilityMap = detectorOutputs["fetch_name_0"]
+            val detectorOutputs = OnnxRuntimeClient.runDetailed(detectorModel, listOf(detectorInput.tensor))
+            val detectorOutput = detectorOutputs["fetch_name_0"]
                 ?: return incompatible("PaddleOCR detector output fetch_name_0 is missing")
+            val probabilityMap = detectorOutput.values
+            val detectorShape = detectorOutput.shape
+            val outputHeight = detectorShape.getOrNull(detectorShape.size - 2)
+                ?.takeIf { it > 0 }
+                ?.toInt()
+                ?: detectorInput.height
+            val outputWidth = detectorShape.lastOrNull()
+                ?.takeIf { it > 0 }
+                ?.toInt()
+                ?: detectorInput.width
 
             val boxes = PaddleOcrDbPostProcessor.boxes(
                 probabilities = probabilityMap,
-                width = detectorInput.width,
-                height = detectorInput.height,
+                width = outputWidth,
+                height = outputHeight,
                 sourceWidth = source.width,
                 sourceHeight = source.height,
             )
@@ -228,12 +238,21 @@ internal class PaddleOcrRuntime(
                     (box.bottom - box.top).coerceAtLeast(1),
                 )
                 val recognizerInput = prepareRecognizer(crop)
-                val outputs = OnnxRuntimeClient.run(recognizerModel, listOf(recognizerInput))
-                val logits = outputs["fetch_name_0"]
+                val outputs = OnnxRuntimeClient.runDetailed(recognizerModel, listOf(recognizerInput))
+                val recognizerOutput = outputs["fetch_name_0"]
                     ?: throw ModelInferenceContractException("PaddleOCR recognizer output fetch_name_0 is missing")
+                val logits = recognizerOutput.values
+                val recognizerShape = recognizerOutput.shape
+                val classCount = recognizerShape.lastOrNull()
+                    ?.takeIf { it > 1 }
+                    ?.toInt()
+                    ?: 18385
+                require(classCount == 18385) {
+                    "PaddleOCR recognizer returned $classCount classes; expected 18385."
+                }
                 val decoded = PaddleOcrCtcDecoder.decode(
                     logits = logits,
-                    classCount = 18385,
+                    classCount = classCount,
                     dictionary = dictionary,
                 )
                 if (decoded.text.isNotBlank() && (decoded.confidence !in 0f..1f || decoded.confidence >= 0.5f)) {
