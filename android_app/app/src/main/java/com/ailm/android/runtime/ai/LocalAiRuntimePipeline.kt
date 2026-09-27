@@ -666,9 +666,18 @@ class LocalAiModelRegistry(
     }
 
     private fun supportsTask(model: AiModelDescriptor, taskType: String): Boolean {
-        return model.supportedTasks
-            .map(AiTaskTypes::normalize)
-            .contains(taskType)
+        if (model.supportedTasks.map(AiTaskTypes::normalize).contains(taskType)) {
+            return true
+        }
+        val llama = model.metadata["llama_cpp"] as? Map<*, *>
+        val qwenVlSemanticTasks = setOf(
+            "captioning",
+            "series_recognition",
+            "character_recognition",
+            "tag_prediction",
+            "normalization",
+        )
+        return llama?.get("multimodal") == true && taskType in qwenVlSemanticTasks
     }
 }
 
