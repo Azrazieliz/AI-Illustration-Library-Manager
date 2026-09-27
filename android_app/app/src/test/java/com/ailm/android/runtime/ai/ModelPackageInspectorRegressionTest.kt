@@ -331,6 +331,122 @@ class ModelPackageInspectorRegressionTest {
         }
     }
 
+    @Test
+    fun `Buffalo-L imports granular role contracts without requiring aggregate face feature contract`() {
+        withTempDir { root ->
+            listOf("det_10g.onnx", "2d106det.onnx", "1k3d68.onnx", "genderage.onnx", "w600k_r50.onnx")
+                .forEach { File(root, it).writeText("fixture") }
+            val inspector = ModelPackageInspector { artifact, _ ->
+                when (artifact.name) {
+                    "det_10g.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("input.1", 0, "float32", listOf(1, 3, 640, 640))),
+                        outputs = List(9) { index -> ModelArtifactTensor("det_$index", index, "float32", listOf(1, 1, 1, 1)) },
+                    )
+                    "w600k_r50.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("input.1", 0, "float32", listOf(1, 3, 112, 112))),
+                        outputs = listOf(ModelArtifactTensor("683", 0, "float32", listOf(1, 512))),
+                    )
+                    "2d106det.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("data", 0, "float32", listOf(1, 3, 192, 192))),
+                        outputs = listOf(ModelArtifactTensor("fc1", 0, "float32", listOf(1, 212))),
+                    )
+                    "1k3d68.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("data", 0, "float32", listOf(1, 3, 192, 192))),
+                        outputs = listOf(ModelArtifactTensor("fc1", 0, "float32", listOf(1, 3309))),
+                    )
+                    "genderage.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("data", 0, "float32", listOf(1, 3, 96, 96))),
+                        outputs = listOf(ModelArtifactTensor("fc1", 0, "float32", listOf(1, 3))),
+                    )
+                    else -> error("Unexpected artifact ${artifact.name}")
+                }
+            }
+
+            val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_buffalo_l")
+
+            assertTrue(result.valid)
+            assertFalse(result.supportedTasks.contains("face_feature_extraction"))
+            assertEquals("face_feature_extraction", result.metadata["buffalo_l_composite_capability"])
+            assertFalse(result.issues.any { it.code == "task_contract_missing" })
+            assertTrue(result.supportedTasks.containsAll(listOf("face_detection", "face_embedding", "landmark_2d", "landmark_3d", "gender_age")))
+        }
+    }
+
+    @Test
+    fun `PaddleOCR is importable while unresolved execution readiness stays explicit`() {
+        withTempDir { root ->
+            File(root, "det.onnx").writeText("fixture")
+            File(root, "rec.onnx").writeText("fixture")
+            File(root, "dict.txt").writeText("a\nb\nc\n")
+            val inspector = ModelPackageInspector { artifact, _ ->
+                when (artifact.name) {
+                    "det.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("x", 0, "float32", listOf(1, 3, 640, 640))),
+                        outputs = listOf(ModelArtifactTensor("fetch_name_0", 0, "float32", listOf(1, 1, 640, 640))),
+                    )
+                    else -> error("Unexpected primary artifact ${artifact.name}")
+                }
+            }
+
+            val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_paddleocr")
+
+            assertTrue(result.valid)
+            assertTrue(result.supportedTasks.contains("ocr"))
+            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
+            assertTrue(result.issues.any { it.code == "execution_metadata_missing" })
+            assertTrue(result.issues.any { it.code == "ocr_preprocessing_unresolved" })
+        }
+    }
+
+    @Test
+    fun `Aesthetic predictor is importable but remains explicitly not execution ready without preprocessing`() {
+        withTempDir { root ->
+            File(root, "aesthetic_predictor_v2.5.onnx").writeText("fixture")
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(ModelArtifactTensor("input", 0, "float32", listOf(1, 3, 384, 384))),
+                    outputs = listOf(ModelArtifactTensor("output", 0, "float32", listOf(1, 1))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_aesthetic_predictor_v2.5",
+            )
+
+            assertTrue(result.valid)
+            assertTrue(result.supportedTasks.contains("aesthetic_scoring"))
+            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
+            assertTrue(result.issues.any { it.code == "preprocessing_contract_unresolved" })
+        }
+    }
+
+    @Test
+    fun `NSFW classifier package builds an executable image classification contract`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            File(root, "config.json").writeText(
+                """{"architectures":["ViTForImageClassification"],"problem_type":"single_label_classification","id2label":{"0":"drawings","1":"hentai","2":"neutral","3":"porn","4":"sexy"}}""",
+            )
+            File(root, "preprocessor_config.json").writeText(
+                """{"size":{"height":224,"width":224},"image_mean":[0.5,0.5,0.5],"image_std":[0.5,0.5,0.5],"rescale_factor":0.0039215686,"do_convert_rgb":true,"do_center_crop":false}""",
+            )
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(ModelArtifactTensor("pixel_values", 0, "float32", listOf(1, 3, 224, 224))),
+                    outputs = listOf(ModelArtifactTensor("logits", 0, "float32", listOf(1, 5))),
+                )
+            }
+
+            val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_nsfw-classifier")
+
+            assertTrue(result.valid)
+            assertTrue(result.supportedTasks.contains("nsfw_classification"))
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+        }
+    }
+
     // =====================================================
     // Regression Tests for Fix C: Aesthetic Model Detection
     // =====================================================
