@@ -460,9 +460,9 @@ fun ScreenScaffold(
         AppDestination.Automation -> AiAutomationScreen(
             state = state,
             onRefreshAi = appViewModel::refreshLocalAiState,
-            onPauseQueue = appViewModel::pauseAiQueue,
-            onResumeQueue = appViewModel::resumeAiQueue,
-            onTaskAction = appViewModel::controlAiTask,
+            onStartAutomation = { appViewModel.startLibraryAutomation(context, forceAll = false) },
+            onReprocessAll = { appViewModel.startLibraryAutomation(context, forceAll = true) },
+            onStopAutomation = { appViewModel.stopLibraryAutomation(context) },
             onNavigate = onNavigate,
         )
 
@@ -2328,91 +2328,209 @@ private fun AiTaskFilterScreen(
 private fun AiAutomationScreen(
     state: AppUiState,
     onRefreshAi: () -> Unit,
-    onPauseQueue: () -> Unit,
-    onResumeQueue: () -> Unit,
-    onTaskAction: (String, String) -> Unit,
+    onStartAutomation: () -> Unit,
+    onReprocessAll: () -> Unit,
+    onStopAutomation: () -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
-    val pending = state.aiOverview["queue_pending"]?.toString().orEmpty().ifBlank { "0" }
-    val running = state.aiOverview["queue_running"]?.toString().orEmpty().ifBlank { "0" }
-    val paused = state.aiOverview["queue_paused"]?.toString().orEmpty().ifBlank { "0" }
-    val failed = state.aiOverview["queue_failed"]?.toString().orEmpty().ifBlank { "0" }
+    val automationStatus = state.aiOverview["automation_status"]?.toString().orEmpty().ifBlank { "idle" }
+    val total = (state.aiOverview["automation_total"] as? Number)?.toInt() ?: 0
+    val processed = (state.aiOverview["automation_processed"] as? Number)?.toInt() ?: 0
+    val failed = (state.aiOverview["automation_failed"] as? Number)?.toInt() ?: 0
+    val currentImageId = (state.aiOverview["automation_current_image_id"] as? Number)?.toInt() ?: 0
+    val message = state.aiOverview["automation_message"]?.toString().orEmpty()
+    val active = automationStatus in setOf("queued", "running", "stopping")
+    val progress = if (total > 0) processed.toFloat() / total.toFloat() else 0f
+    var showDiagnostics by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            onRefreshAi()
+            delay(1500)
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .verticalScroll(rememberScrollState())
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Automation", style = MaterialTheme.typography.headlineMedium)
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text("Automation", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "One run processes the library image by image. Asterion chooses the required models and tasks automatically.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("AI Queue", style = MaterialTheme.typography.titleMedium)
-                Text("Pending $pending   Running $running   Paused $paused   Failed $failed")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onRefreshAi) { Text("Refresh") }
-                    Button(onClick = onPauseQueue, enabled = pending != "0" || running != "0") { Text("Pause Queue") }
-                    Button(onClick = onResumeQueue, enabled = paused != "0") { Text("Resume Queue") }
-                }
-            }
-        }
-
-        state.knowledgeAutomationStatus?.let { status ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Knowledge Status", style = MaterialTheme.typography.titleMedium)
-                    status.lines().forEach { Text(it) }
-                }
-            }
-        }
-
-        Text("Tasks", style = MaterialTheme.typography.titleMedium)
-        if (state.aiTasks.isEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Text("No AI tasks queued yet.", modifier = Modifier.padding(12.dp))
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                items(state.aiTasks) { task ->
-                    val taskId = task["task_id"]?.toString().orEmpty()
-                    val status = task["status"]?.toString().orEmpty().ifBlank { "unknown" }
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("${task["task_type"] ?: "task"} • $taskId")
-                            Text("Status: $status | Progress: ${task["progress"] ?: 0.0}")
-                            Text("Model: ${task["model_id"] ?: "(auto)"} ${task["version"] ?: ""}")
-                            val error = task["error_message"]?.toString().orEmpty()
-                            if (error.isNotBlank()) {
-                                Text("Error: $error", style = MaterialTheme.typography.bodySmall)
-                            }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            when (automationStatus) {
+                                "queued" -> "Queued"
+                                "running" -> "Running"
+                                "stopping" -> "Stopping"
+                                "completed" -> "Complete"
+                                "failed" -> "Needs attention"
+                                "stopped" -> "Stopped"
+                                else -> "Ready"
+                            },
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        Text(
+                            when {
+                                active && total > 0 -> "$processed / $total images"
+                                total > 0 -> "$processed / $total images processed"
+                                else -> "Processes new or changed images"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (failed > 0) {
+                        Text(
+                            "$failed issue${if (failed == 1) "" else "s"}",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
+                }
 
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { onTaskAction(taskId, "pause") }, enabled = taskId.isNotBlank() && status in setOf("pending", "running")) { Text("Pause") }
-                                Button(onClick = { onTaskAction(taskId, "resume") }, enabled = taskId.isNotBlank() && status == "paused") { Text("Resume") }
-                                Button(onClick = { onTaskAction(taskId, "retry") }, enabled = taskId.isNotBlank() && status == "failed") { Text("Retry") }
-                                Button(onClick = { onTaskAction(taskId, "cancel") }, enabled = taskId.isNotBlank() && status in setOf("pending", "running", "paused")) { Text("Cancel") }
+                if (active || total > 0) {
+                    LinearProgressIndicator(
+                        progress = { progress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                if (currentImageId > 0 && active) {
+                    Text(
+                        "Current image #$currentImageId",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (message.isNotBlank()) {
+                    Text(message, style = MaterialTheme.typography.bodyMedium)
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = onStartAutomation,
+                        enabled = !active,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (automationStatus == "completed") "Run New / Changed" else "Run Automation")
+                    }
+                    Button(
+                        onClick = onStopAutomation,
+                        enabled = active,
+                    ) {
+                        Text("Stop")
+                    }
+                }
+
+                TextButton(
+                    onClick = onReprocessAll,
+                    enabled = !active,
+                ) {
+                    Text("Reprocess entire library")
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Each image is analysed with every applicable stage: recognition, OCR when text is present, captioning, tags, embeddings, normalization and safety classification. High-confidence results are saved; uncertain or failed stages are sent to Review without stopping the rest of the library.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text("Review", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (state.reviewQueue.isEmpty()) "No items need attention." else "${state.reviewQueue.size} item(s) need attention.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = { onNavigate(AppDestination.ReviewQueue) }) {
+                    Text("Open")
+                }
+            }
+        }
+
+        state.errorMessage?.let { AsterionStatusNotice(it, isError = true) }
+
+        TextButton(onClick = { showDiagnostics = !showDiagnostics }) {
+            Text(if (showDiagnostics) "Hide diagnostics" else "Diagnostics")
+        }
+        AnimatedVisibility(visible = showDiagnostics) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val pending = state.aiOverview["queue_pending"]?.toString().orEmpty().ifBlank { "0" }
+                val running = state.aiOverview["queue_running"]?.toString().orEmpty().ifBlank { "0" }
+                val queueFailed = state.aiOverview["queue_failed"]?.toString().orEmpty().ifBlank { "0" }
+                Text(
+                    "Internal queue • pending $pending • running $running • failed $queueFailed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                state.aiTasks.take(5).forEach { task ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(task["task_type"]?.toString().orEmpty().ifBlank { "Task" })
+                            Text(
+                                "${task["status"] ?: "unknown"} • ${task["model_id"] ?: "automatic model"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            task["error_message"]?.toString()?.takeIf { it.isNotBlank() }?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
                 }
+                TextButton(onClick = onRefreshAi) { Text("Refresh diagnostics") }
             }
         }
 
-        if (state.lastActionMessage != null) {
-            Text(state.lastActionMessage)
-        }
-        if (state.errorMessage != null) {
-            Text("Error: ${state.errorMessage}")
-        }
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
-            Button(onClick = { onNavigate(AppDestination.Logs) }) { Text("Logs") }
-            Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+            TextButton(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Models") }
         }
     }
 }
