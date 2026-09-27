@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import kotlin.math.sqrt
 
 private data class CompatTokenizedText(
@@ -43,6 +44,38 @@ private class CompatModelTokenizer(
 }
 
 class NomicTextExecutionContractTest {
+    @Test
+    fun `file backed WordPiece tokenizer materializes only when execution needs it`() {
+        val file = File.createTempFile("nomic-tokenizer-", ".json")
+        try {
+            file.writeText(
+                """{"model":{"type":"WordPiece","unk_token":"[UNK]","continuing_subword_prefix":"##","vocab":{"[PAD]":0,"[UNK]":100,"[CLS]":101,"[SEP]":102,"[MASK]":103,"hello":104,"world":105}}}""",
+            )
+            val tokenizer = TokenizerContract(
+                type = "wordpiece",
+                vocabulary = emptyList(),
+                unknownToken = "[UNK]",
+                startToken = "[CLS]",
+                endToken = "[SEP]",
+                padToken = "[PAD]",
+                maxLength = 8,
+                sourceFile = file.absolutePath,
+                sourceFormat = "hf_wordpiece_json",
+            )
+
+            val materialized = materializeTokenizerContract(tokenizer)
+
+            assertEquals("[PAD]", materialized.vocabulary[0])
+            assertEquals("[UNK]", materialized.vocabulary[100])
+            assertEquals("[CLS]", materialized.vocabulary[101])
+            assertEquals("hello", materialized.vocabulary[104])
+            assertEquals("world", materialized.vocabulary[105])
+        } finally {
+            file.delete()
+        }
+    }
+
+
     @Test
     fun `tokenizer normalization lowers and tokenizes punctuation with wordpiece semantics`() {
         val vocab = listOf("[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "hello", "world", "hello", "!", "?", "##world", "##s")
