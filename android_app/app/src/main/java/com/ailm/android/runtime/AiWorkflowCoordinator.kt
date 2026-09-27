@@ -26,6 +26,9 @@ class AiWorkflowCoordinator(
             stages["captioning"]?.resultMap()?.optText("caption")?.takeIf { it.isNotBlank() }?.let { profile.put("caption", it) }
             stages["embedding_generation"]?.get("embedding")?.let { profile.put("embedding", JSONArray(it as? List<*> ?: emptyList<Any>())) }
             stages["nsfw_classification"]?.resultMap()?.let { nsfw -> profile.put("nsfw", JSONObject(nsfw)) }
+            stages["normalization"]?.resultMap()?.optText("text")?.takeIf { it.isNotBlank() }?.let {
+                profile.put("normalized_context", it)
+            }
             profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
             writeProfile(imageId, profile)
         }
@@ -138,10 +141,46 @@ class AiWorkflowCoordinator(
         database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_IMAGE_TAGS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
     }
 
-    private fun resolveEntityId(table: String, idColumn: String, nameColumn: String, name: String): String? = database.readableDatabase.rawQuery(
-        "SELECT $idColumn FROM $table WHERE LOWER($nameColumn) = LOWER(?) LIMIT 1",
-        arrayOf(name.trim()),
-    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty().ifBlank { null } else null }
+    private fun resolveEntityId(table: String, idColumn: String, nameColumn: String, name: String): String? {
+        val normalized = name.trim()
+        if (normalized.isBlank() || normalized.equals("UNKNOWN", ignoreCase = true)) return null
+
+        database.readableDatabase.rawQuery(
+            "SELECT $idColumn FROM $table WHERE LOWER($nameColumn) = LOWER(?) LIMIT 1",
+            arrayOf(normalized),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                return cursor.getString(0).orEmpty().ifBlank { null }
+            }
+        }
+
+        if (table == FusionDatabaseSchema.TABLE_SERIES) {
+            database.readableDatabase.rawQuery(
+                "SELECT series_code, aliases_json FROM ${FusionDatabaseSchema.TABLE_SERIES}",
+                emptyArray(),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val aliases = runCatching { JSONArray(cursor.getString(1).orEmpty()) }.getOrNull() ?: continue
+                    for (index in 0 until aliases.length()) {
+                        if (aliases.optString(index).trim().equals(normalized, ignoreCase = true)) {
+                            return cursor.getString(0).orEmpty().ifBlank { null }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (table == FusionDatabaseSchema.TABLE_TAGS) {
+            database.readableDatabase.rawQuery(
+                "SELECT tag_id FROM ${FusionDatabaseSchema.TABLE_TAG_ALIASES} WHERE LOWER(alias_value) = LOWER(?) LIMIT 1",
+                arrayOf(normalized),
+            ).use { cursor ->
+                if (cursor.moveToFirst()) return cursor.getString(0).orEmpty().ifBlank { null }
+            }
+        }
+
+        return null
+    }
 
     private fun readProfile(imageId: Int): JSONObject = database.readableDatabase.rawQuery(
         "SELECT metadata_json FROM ${FusionDatabaseSchema.TABLE_IMAGE_PROFILES} WHERE image_id = ? LIMIT 1",
