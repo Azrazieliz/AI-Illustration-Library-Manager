@@ -467,9 +467,9 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
-    fun `Aesthetic predictor is importable but remains explicitly not execution ready without preprocessing`() {
+    fun `Aesthetic Predictor v2_5 exact package profile is execution ready`() {
         withTempDir { root ->
-            File(root, "aesthetic_predictor_v2.5.onnx").writeText("fixture")
+            File(root, "aesthetic_predictor_v2_5.onnx").writeText("fixture")
             val inspector = ModelPackageInspector { _, _ ->
                 ModelArtifactBindings(
                     inputs = listOf(ModelArtifactTensor("input", 0, "float32", listOf(1, 3, 384, 384))),
@@ -485,8 +485,14 @@ class ModelPackageInspectorRegressionTest {
 
             assertTrue(result.valid)
             assertTrue(result.supportedTasks.contains("aesthetic_scoring"))
-            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
-            assertTrue(result.issues.any { it.code == "preprocessing_contract_unresolved" })
+            assertTrue(result.metadata["execution_readiness"] == null)
+            assertFalse(result.issues.any { it.code == "preprocessing_contract_unresolved" })
+            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
+            val contract = contracts?.get("aesthetic_scoring") as? Map<*, *>
+            val pre = contract?.get("image_preprocessing") as? Map<*, *>
+            assertEquals(true, pre?.get("enabled"))
+            assertEquals(384, pre?.get("width"))
+            assertEquals(384, pre?.get("height"))
         }
     }
 
