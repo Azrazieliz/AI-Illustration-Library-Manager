@@ -2432,6 +2432,7 @@ private fun AiModelManagerScreen(
     var previewedModelKey by rememberSaveable { mutableStateOf("") }
     var modelImportMessage by rememberSaveable { mutableStateOf("") }
     var taskPickerKey by rememberSaveable { mutableStateOf("") }
+    var showImportTools by rememberSaveable { mutableStateOf(false) }
     var showTaskAssignments by rememberSaveable { mutableStateOf(false) }
     var showResourceTools by rememberSaveable { mutableStateOf(false) }
     var showInstallHistory by rememberSaveable { mutableStateOf(false) }
@@ -2501,6 +2502,11 @@ private fun AiModelManagerScreen(
             )
         }
 
+        AssistChip(
+            onClick = { showImportTools = !showImportTools },
+            label = { Text(if (showImportTools) "Hide import" else "Import model") },
+        )
+        AnimatedVisibility(visible = showImportTools) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Import model", style = MaterialTheme.typography.titleMedium)
@@ -2566,6 +2572,7 @@ private fun AiModelManagerScreen(
                 }
             }
         }
+        }
 
         Text("Installed models", style = MaterialTheme.typography.titleMedium)
         if (state.aiInstalledModels.isEmpty()) {
@@ -2615,16 +2622,10 @@ private fun AiModelManagerScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { previewedModelKey = if (previewedModelKey == modelKey) "" else modelKey }) {
-                                Text(if (previewedModelKey == modelKey) "Less" else "Details")
-                            }
-                            Button(onClick = { onVerifyModel(listedId, listedVersion) }, enabled = listedId.isNotBlank() && listedVersion.isNotBlank()) {
-                                Text("Verify")
-                            }
-                            Button(onClick = { onRemoveModel(listedId, listedVersion) }, enabled = listedId.isNotBlank()) {
-                                Text("Remove")
-                            }
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                             Button(
                                 onClick = { onSetActiveModel(listedId, listedVersion, "") },
                                 enabled = listedId.isNotBlank() &&
@@ -2634,16 +2635,36 @@ private fun AiModelManagerScreen(
                             ) {
                                 Text(if (isActive) "Selected" else "Activate")
                             }
+                            if (verificationLabel != "Verified") {
+                                TextButton(
+                                    onClick = { onVerifyModel(listedId, listedVersion) },
+                                    enabled = listedId.isNotBlank() && listedVersion.isNotBlank(),
+                                ) {
+                                    Text("Verify")
+                                }
+                            }
+                            TextButton(onClick = { previewedModelKey = if (previewedModelKey == modelKey) "" else modelKey }) {
+                                Text(if (previewedModelKey == modelKey) "Less" else "Details")
+                            }
                         }
                         AnimatedVisibility(visible = previewedModelKey == modelKey) {
-                            Text(
-                                if (executionReady) {
-                                    "Installed locally. Runtime execution has not been initialized by selection."
-                                } else {
-                                    "Installed locally, but execution readiness is blocked by the package contract."
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    if (executionReady) {
+                                        "Execution contract ready. Selection stays session-only until runtime work is requested."
+                                    } else {
+                                        "Imported successfully, but this package does not yet expose a complete execution contract."
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                TextButton(
+                                    onClick = { onRemoveModel(listedId, listedVersion) },
+                                    enabled = listedId.isNotBlank(),
+                                ) {
+                                    Text("Remove model")
+                                }
+                            }
                         }
                     }
                 }
