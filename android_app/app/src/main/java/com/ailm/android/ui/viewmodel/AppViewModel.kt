@@ -865,31 +865,50 @@ class AppViewModel : ViewModel() {
 
     fun setActiveAiModel(modelId: String, version: String = "", taskType: String = "") {
         val normalizedModelId = modelId.trim()
+        val normalizedVersion = version.trim()
         if (normalizedModelId.isBlank()) {
             _uiState.value = _uiState.value.copy(errorMessage = "model_id is required to set active model.")
             return
         }
-
-        val normalizedTaskType = normalizeTaskType(taskType)
-        val keySuffix = if (normalizedTaskType.isBlank()) "" else ".${normalizedTaskType}"
-        val payload = mutableMapOf<String, Any>(
-            "active_model_id$keySuffix" to normalizedModelId,
-        )
-        if (version.trim().isNotBlank()) {
-            payload["active_model_version$keySuffix"] = version.trim()
+        if (normalizedVersion.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "version is required to activate an installed model.")
+            return
         }
 
+        val normalizedTaskType = normalizeTaskType(taskType)
         runIoAction {
-            val updated = StandaloneRuntime.updateAiSettings(payload)
+            val result = StandaloneRuntime.activateInstalledAiModel(
+                buildMap {
+                    put("model_id", normalizedModelId)
+                    put("version", normalizedVersion)
+                    if (normalizedTaskType.isNotBlank()) {
+                        put("task_type", normalizedTaskType)
+                    }
+                },
+            )
+            val ok = result["ok"].asBooleanOrFalse()
+            val message = result["message"]?.toString()?.trim().orEmpty()
+            val returnedSettings = (result["settings"] as? Map<*, *>)
+                ?.entries
+                ?.filter { it.key != null }
+                ?.associate { it.key.toString() to (it.value ?: "") }
+
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
-                    aiSettings = updated,
-                    lastActionMessage = if (normalizedTaskType.isBlank()) {
-                        "Active model set to $normalizedModelId${if (version.isBlank()) "" else "@${version.trim()}"}."
+                    aiSettings = returnedSettings ?: _uiState.value.aiSettings,
+                    aiLastPipelineResult = result,
+                    lastActionMessage = if (ok) {
+                        if (normalizedTaskType.isBlank()) {
+                            "Active model set to $normalizedModelId@$normalizedVersion."
+                        } else {
+                            "Active model set for $normalizedTaskType: $normalizedModelId@$normalizedVersion."
+                        }
                     } else {
-                        "Active model set for $normalizedTaskType: $normalizedModelId${if (version.isBlank()) "" else "@${version.trim()}"}."
+                        message.ifBlank { "Model activation was rejected safely." }
                     },
-                    errorMessage = null,
+                    errorMessage = if (ok) null else message.ifBlank {
+                        "Model activation was rejected safely."
+                    },
                 )
             }
             refreshLocalAiStateInternal()
