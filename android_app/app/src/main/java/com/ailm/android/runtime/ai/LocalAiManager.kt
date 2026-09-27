@@ -1107,16 +1107,36 @@ class LocalAiManager(
         val stages = (payload["stages"] as? List<*>)
             ?.mapNotNull { it?.toString()?.trim() }
             ?.filter { it.isNotBlank() }
+            ?.map(AiTaskTypes::normalize)
+            ?.filter(AiTaskTypes::isExecutionTask)
+            ?.distinct()
             ?: emptyList()
         if (stages.isEmpty()) {
             return mapOf("ok" to false, "status" to "invalid", "message" to "stages are required for multi-stage pipeline")
         }
-        val merged = linkedMapOf<String, Any>()
-        merged.putAll(payload)
-        if (merged["task_type"] == null && merged["pipeline_type"] == null) {
-            merged["task_type"] = stages.last()
-        }
-        return runPipeline(merged)
+
+        val pipelineType = payload["pipeline_type"]?.toString()?.trim().orEmpty()
+            .ifBlank { payload["task_type"]?.toString()?.trim().orEmpty() }
+            .ifBlank { "multi_stage" }
+        val requestedModelId = payload["model_id"]?.toString()?.trim().orEmpty()
+        val requestedVersion = payload["version"]?.toString()?.trim().orEmpty()
+        val priority = payload["priority"].toIntValue(defaultValue = DEFAULT_PIPELINE_PRIORITY)
+        val maxRetries = payload["max_retries"].toIntValue(defaultValue = 1).coerceAtLeast(0)
+        val timeoutMs = payload["timeout_ms"].toLongValue(defaultValue = DEFAULT_PIPELINE_STAGE_TIMEOUT_MS)
+            .coerceIn(1_000L, 180_000L)
+        val pipelineId = payload["pipeline_id"]?.toString()?.trim().orEmpty().ifBlank { UUID.randomUUID().toString() }
+
+        return executePipelineStages(
+            pipelineId = pipelineId,
+            pipelineType = pipelineType,
+            payload = payload,
+            stages = stages,
+            requestedModelId = requestedModelId,
+            requestedVersion = requestedVersion,
+            priority = priority,
+            maxRetries = maxRetries,
+            timeoutMs = timeoutMs,
+        )
     }
 
     fun cancelTask(taskId: String): Boolean {
