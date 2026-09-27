@@ -56,6 +56,22 @@ internal class FusionResolutionStore(
         }
     }
 
+    fun resetWaitingForKnowledge() {
+        database.writableDatabase.execSQL(
+            """
+            UPDATE fusion_automation_state
+            SET state = 'pending',
+                pipeline_complete = 0,
+                organization_complete = 0,
+                needs_review = 0,
+                last_error = '',
+                updated_at_ms = ?
+            WHERE state = 'waiting_for_knowledge'
+            """.trimIndent(),
+            arrayOf(System.currentTimeMillis()),
+        )
+    }
+
     fun markAutomationState(
         imageId: Int,
         state: String,
