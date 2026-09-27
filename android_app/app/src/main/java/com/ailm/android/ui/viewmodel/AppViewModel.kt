@@ -831,15 +831,11 @@ class AppViewModel : ViewModel() {
 
         runIoAction {
             val sourcePath = copyDocumentTreeToAppStorage(context, uri, "models")
-            try {
-                importLocalAiModelInternal(
-                    form = form + mapOf("source_uri" to uri.toString()),
-                    modelId = normalizedModelId,
-                    sourcePath = sourcePath,
-                )
-            } finally {
-                File(sourcePath).deleteRecursively()
-            }
+            importLocalAiModelInternal(
+                form = form + mapOf("source_uri" to uri.toString()),
+                modelId = normalizedModelId,
+                sourcePath = sourcePath,
+            )
         }
     }
 
