@@ -29,13 +29,15 @@ internal data class ModelPackageInspection(
 
     val valid: Boolean
         get() {
-            val executionReadinessBlocked =
-                metadata["execution_readiness"].asStringMap()?.get("ready") == false
+            val readiness = metadata["execution_readiness"].asStringMap().orEmpty()
+            val executionReadinessBlocked = readiness["ready"] == false
+            val readinessBlockers = readiness["blockers"].asDeclaredValues().toSet()
             return artifact != null && runtime.isNotBlank() && supportedTasks.isNotEmpty() &&
                 issues.none { issue ->
                     issue.code !in NON_BLOCKING_IMPORT_ISSUES &&
                         issue.code != "tensor_input_missing" &&
-                        !(executionReadinessBlocked && issue.code == "execution_metadata_missing")
+                        !(executionReadinessBlocked &&
+                            (issue.code == "execution_metadata_missing" || issue.code in readinessBlockers))
                 }
         }
 
@@ -85,6 +87,14 @@ internal class ModelPackageInspector(
             packageRoot = packageRoot,
             files = files,
             filesByName = filesByName,
+            relativeFiles = relativeFiles,
+            issues = issues,
+        )?.let { return it }
+
+        inspectKnownBgeRerankerPackageEarly(
+            modelIdHint = modelIdHint,
+            packageRoot = packageRoot,
+            files = files,
             relativeFiles = relativeFiles,
             issues = issues,
         )?.let { return it }
@@ -579,6 +589,102 @@ internal class ModelPackageInspector(
         )
     }
 
+    private fun inspectKnownBgeRerankerPackageEarly(
+        modelIdHint: String,
+        packageRoot: File,
+        files: List<File>,
+        relativeFiles: List<String>,
+        issues: MutableList<ModelPackageIssue>,
+    ): ModelPackageInspection? {
+        val knownPackage = modelIdHint.contains("bge-reranker-v2-m3", ignoreCase = true) ||
+            modelIdHint.contains("bge_reranker", ignoreCase = true)
+        if (!knownPackage) return null
+
+        val onnxArtifacts = files.filter { it.extension.equals("onnx", ignoreCase = true) }
+        val artifact = when {
+            onnxArtifacts.size == 1 -> onnxArtifacts.single()
+            else -> onnxArtifacts.firstOrNull { it.name.equals("model.onnx", ignoreCase = true) }
+        }
+        if (artifact == null) {
+            issues += ModelPackageIssue(
+                "model_artifact_missing",
+                "Known BGE reranker package requires one unambiguous ONNX artifact.",
+            )
+            return ModelPackageInspection(
+                packageRoot = packageRoot,
+                artifact = null,
+                runtime = "",
+                supportedTasks = listOf("text_reranking"),
+                capabilities = listOf("text_reranking"),
+                metadata = mapOf("model_id" to modelIdHint),
+                files = relativeFiles,
+                issues = issues,
+            )
+        }
+
+        val bindings = runCatching { inspectArtifactBindings(artifact, AiRuntimeType.ONNX.raw) }.getOrElse { error ->
+            issues += ModelPackageIssue(
+                "tensor_metadata_unreadable",
+                "Unable to inspect ${artifact.name}: ${error.message ?: error.javaClass.simpleName}",
+            )
+            null
+        }
+        val inputIds = bindings?.inputs?.firstOrNull { it.name == "input_ids" }
+        val attentionMask = bindings?.inputs?.firstOrNull { it.name == "attention_mask" }
+        val logits = bindings?.outputs?.firstOrNull { it.name == "logits" } ?: bindings?.outputs?.singleOrNull()
+        val graphReady =
+            inputIds?.dataType == "int64" && inputIds.shape.size == 2 &&
+                attentionMask?.dataType == "int64" && attentionMask.shape.size == 2 &&
+                logits?.dataType == "float32" && logits.shape.isNotEmpty() && logits.shape.lastOrNull() == 1
+
+        if (!graphReady) {
+            issues += ModelPackageIssue(
+                "bge_reranking_graph_incompatible",
+                "BGE reranker graph does not expose the expected int64 input_ids/attention_mask and scalar float logits contract.",
+            )
+        }
+
+        issues += ModelPackageIssue(
+            "bge_tokenizer_deferred",
+            "BGE tokenizer loading is deferred until execution readiness is implemented; the package remains importable.",
+        )
+        issues += ModelPackageIssue(
+            "execution_metadata_missing",
+            "BGE reranker package is imported, but execution metadata is intentionally deferred.",
+        )
+
+        val metadata = linkedMapOf<String, Any>(
+            "model_id" to modelIdHint,
+            "task" to "text_reranking",
+            "supported_tasks" to listOf("text_reranking"),
+            "package_inspection" to mapOf(
+                "artifact_path" to artifact.absolutePath,
+                "runtime" to AiRuntimeType.ONNX.raw,
+                "files" to relativeFiles,
+                "capabilities" to listOf("text_reranking"),
+            ),
+            "execution_readiness" to mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to buildList {
+                    add("bge_tokenizer_deferred")
+                    if (!graphReady) add("bge_reranking_graph_incompatible")
+                },
+            ),
+        )
+
+        return ModelPackageInspection(
+            packageRoot = packageRoot,
+            artifact = artifact,
+            runtime = AiRuntimeType.ONNX.raw,
+            supportedTasks = listOf("text_reranking"),
+            capabilities = listOf("text_reranking"),
+            metadata = metadata,
+            files = relativeFiles,
+            issues = issues,
+        )
+    }
+
     private fun inspectKnownNsfwPackageEarly(
         modelIdHint: String,
         packageRoot: File,
@@ -671,6 +777,17 @@ internal class ModelPackageInspector(
                 "capabilities" to listOf("nsfw_classification"),
             ),
         )
+        if (input == null || output == null) {
+            metadata["execution_readiness"] = mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to listOf("nsfw_graph_incompatible"),
+            )
+            issues += ModelPackageIssue(
+                "execution_metadata_missing",
+                "NSFW package is importable, but the exact execution tensor contract is unresolved.",
+            )
+        }
         if (input != null && output != null) {
             metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
                 "nsfw_classification" to mapOf(
