@@ -2034,6 +2034,8 @@ private fun RecognitionWorkbenchScreen(
 ) {
     var promptHint by rememberSaveable { mutableStateOf("") }
     var selectedTaskType by rememberSaveable { mutableStateOf("ocr") }
+    var showBackendDetails by rememberSaveable { mutableStateOf(false) }
+    var showLatestResult by rememberSaveable { mutableStateOf(false) }
 
     val selected = state.selectedImage
     val selectedId = selected?.imageId()
@@ -2094,22 +2096,27 @@ private fun RecognitionWorkbenchScreen(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Recognition Results", style = MaterialTheme.typography.headlineMedium)
+        Text("AI Workbench", style = MaterialTheme.typography.headlineMedium)
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Local AI Runtime", style = MaterialTheme.typography.titleMedium)
+                Text("Runtime", style = MaterialTheme.typography.titleMedium)
                 Text("Active model: $activeModelLabel")
                 Text("Pending $queuePending   Running $queueRunning   Failed $queueFailed")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onRefreshAi) { Text("Refresh AI") }
-                    Button(onClick = onDetectHardware) { Text("Detect Hardware") }
-                    Button(onClick = onValidateInfrastructure) { Text("Validate Runtime") }
-                    Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Manage Models") }
+                    TextButton(onClick = onRefreshAi) { Text("Refresh") }
+                    TextButton(onClick = onDetectHardware) { Text("Hardware") }
+                    TextButton(onClick = onValidateInfrastructure) { Text("Validate") }
+                    Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Models") }
                 }
             }
         }
 
+        AssistChip(
+            onClick = { showBackendDetails = !showBackendDetails },
+            label = { Text(if (showBackendDetails) "Hide runtime details" else "Runtime details") },
+        )
+        AnimatedVisibility(visible = showBackendDetails) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Backend Status", style = MaterialTheme.typography.titleMedium)
@@ -2122,6 +2129,8 @@ private fun RecognitionWorkbenchScreen(
                     }
                 }
             }
+        }
+
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -2152,8 +2161,8 @@ private fun RecognitionWorkbenchScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Run AI Task", style = MaterialTheme.typography.titleMedium)
-                Text("1. Select image  2. Select task  3. Confirm active model  4. Run", style = MaterialTheme.typography.bodySmall)
+                Text("Run task", style = MaterialTheme.typography.titleMedium)
+                Text("Choose a task compatible with the selected model.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = promptHint,
                     onValueChange = { promptHint = it },
@@ -2176,7 +2185,7 @@ private fun RecognitionWorkbenchScreen(
                     onClick = { onRunPipeline(selectedTaskType, promptHint) },
                     enabled = selectedId != null && selectedTaskAvailable,
                 ) {
-                    Text("Run Selected Task")
+                    Text("Run")
                 }
             }
         }
@@ -2186,11 +2195,16 @@ private fun RecognitionWorkbenchScreen(
                 Text("Queue", style = MaterialTheme.typography.titleMedium)
                 Text("Queue the selected task for the selected image; progress appears in Automation.", style = MaterialTheme.typography.bodySmall)
                 Button(onClick = { onEnqueueTask(selectedTaskType) }, enabled = selectedId != null && selectedTaskAvailable) {
-                    Text("Queue Selected Task")
+                    Text("Queue")
                 }
             }
         }
 
+        AssistChip(
+            onClick = { showLatestResult = !showLatestResult },
+            label = { Text(if (showLatestResult) "Hide latest result" else "Latest result") },
+        )
+        AnimatedVisibility(visible = showLatestResult) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Latest AI Result", style = MaterialTheme.typography.titleMedium)
@@ -2202,6 +2216,8 @@ private fun RecognitionWorkbenchScreen(
                     }
                 }
             }
+        }
+
         }
 
         if (state.lastActionMessage != null) {
