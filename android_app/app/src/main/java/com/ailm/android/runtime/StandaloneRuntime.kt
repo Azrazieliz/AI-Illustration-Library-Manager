@@ -1059,19 +1059,33 @@ object StandaloneRuntime {
     }
 
     private fun organizeAutonomousImage(imageId: Int, workflow: Map<String, Any>): Map<String, Any> {
-        val originalCharacter = workflow["original_character"] == true
-        val seriesName = workflow["accepted_series_name"]?.toString()?.trim().orEmpty()
-        if (seriesName.isBlank() && !originalCharacter) {
+        if (workflow["queued_for_review"] == true) {
             return mapOf(
                 "ok" to true,
                 "status" to "unchanged",
-                "message" to "No high-confidence canonical series assignment; file left in place.",
+                "message" to "Identity is below threshold; file remains in place for Review.",
             )
         }
-        val characterName = workflow["accepted_character_name"]?.toString()?.trim().orEmpty()
+
+        val originalCharacter = workflow["original_character"] == true
+        val resolvedCharacters = (workflow["resolved_characters"] as? List<*>)
+            ?.mapNotNull { raw ->
+                (raw as? Map<*, *>)?.entries
+                    ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
+                    ?.toMap()
+            }
+            .orEmpty()
+
+        if (!originalCharacter && resolvedCharacters.isEmpty()) {
+            return mapOf(
+                "ok" to true,
+                "status" to "unchanged",
+                "message" to "No high-confidence Character Knowledge identity; file left in place.",
+            )
+        }
+
         val record = repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
             ?: return mapOf("ok" to false, "status" to "missing", "message" to "Image record not found.")
-
         val roots = repository.listFolders(includeDisabled = false)
             .mapNotNull { it["folder_uri"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
         val root = roots
@@ -1083,37 +1097,83 @@ object StandaloneRuntime {
             .maxByOrNull(String::length)
             ?: roots.singleOrNull()
             ?: record.folderUri
-
         if (root.isBlank()) {
             return mapOf("ok" to false, "status" to "no_root", "message" to "No writable library root is available.")
         }
 
-        val folderName = if (originalCharacter) {
-            "Original Characters"
-        } else {
-            safeAutomationPathSegment(seriesName)
-        }
-        val targetFolder = storageProvider.listChildren(root)
-            .firstOrNull { it.isDirectory && it.name.equals(folderName, ignoreCase = true) }
-            ?.uri
-            ?: storageProvider.createFolder(root, folderName).takeIf { it.ok }?.uri
-            ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create folder '$folderName'.")
-
         val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
-        val prefix = when {
-            originalCharacter -> "Original Character"
-            characterName.isNotBlank() -> "${safeAutomationPathSegment(characterName)} - ${safeAutomationPathSegment(seriesName)}"
-            else -> safeAutomationPathSegment(seriesName)
+        val targetFolder: String
+        val relativeFolder: String
+        val prefix: String
+        val primarySeries: String
+        val primaryCharacter: String
+
+        if (originalCharacter) {
+            val folderName = "Original Characters"
+            targetFolder = getOrCreateAutomationFolder(root, folderName)
+                ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create Original Characters folder.")
+            relativeFolder = folderName
+            prefix = "Original Character"
+            primarySeries = ""
+            primaryCharacter = workflow["original_character_cluster_id"]?.toString().orEmpty()
+        } else {
+            val primary = resolvedCharacters.maxByOrNull {
+                (it["prominence"] as? Number)?.toDouble() ?: 0.0
+            } ?: resolvedCharacters.first()
+            primarySeries = primary["series_name"]?.toString()?.trim().orEmpty()
+            primaryCharacter = primary["canonical_name"]?.toString()?.trim().orEmpty()
+            if (primarySeries.isBlank() || primaryCharacter.isBlank()) {
+                return mapOf(
+                    "ok" to true,
+                    "status" to "unchanged",
+                    "message" to "Resolved character is missing canonical Character Knowledge path data.",
+                )
+            }
+
+            val seriesFolderName = safeAutomationPathSegment(primarySeries)
+            val seriesFolder = getOrCreateAutomationFolder(root, seriesFolderName)
+                ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create series folder '" + seriesFolderName + "'.")
+
+            val seriesCodes = resolvedCharacters
+                .mapNotNull { it["series_code"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                .distinct()
+            val singleCharacter = resolvedCharacters.size == 1
+            val intraSeriesGroup = resolvedCharacters.size > 1 && seriesCodes.size == 1
+
+            if (singleCharacter) {
+                val characterFolderName = safeAutomationPathSegment(primaryCharacter)
+                targetFolder = getOrCreateAutomationFolder(seriesFolder, characterFolderName)
+                    ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create character folder '" + characterFolderName + "'.")
+                relativeFolder = seriesFolderName + "/" + characterFolderName
+            } else if (intraSeriesGroup) {
+                targetFolder = seriesFolder
+                relativeFolder = seriesFolderName
+            } else {
+                // Inter-series images are owned physically by the most prominent
+                // character. Every other identity remains attached in Fusion and
+                // remains present in the multi-character filename.
+                val characterFolderName = safeAutomationPathSegment(primaryCharacter)
+                targetFolder = getOrCreateAutomationFolder(seriesFolder, characterFolderName)
+                    ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create primary character folder '" + characterFolderName + "'.")
+                relativeFolder = seriesFolderName + "/" + characterFolderName
+            }
+
+            val names = resolvedCharacters
+                .sortedBy { (it["subject_index"] as? Number)?.toInt() ?: Int.MAX_VALUE }
+                .mapNotNull { it["canonical_name"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                .map(::safeAutomationPathSegment)
+            prefix = names.joinToString(" - ") + " - " + safeAutomationPathSegment(primarySeries)
         }
+
         val sequence = nextAutomationSequenceNumber(targetFolder, prefix, extension)
-        val stem = "$prefix $sequence"
-        val targetName = if (extension.isBlank()) stem else "$stem.$extension"
+        val stem = prefix + " " + sequence
+        val targetName = if (extension.isBlank()) stem else stem + "." + extension
 
         if (record.folderUri == targetFolder && record.filename == targetName) {
             return mapOf(
                 "ok" to true,
                 "status" to "already_organized",
-                "folder" to folderName,
+                "folder" to relativeFolder,
                 "filename" to targetName,
             )
         }
@@ -1137,8 +1197,8 @@ object StandaloneRuntime {
             newFilename = targetName,
             newFolderUri = targetFolder,
             newParentUri = targetFolder,
-            newFolderName = folderName,
-            newRelativePath = "$folderName/$targetName",
+            newFolderName = relativeFolder.substringAfterLast('/'),
+            newRelativePath = relativeFolder + "/" + targetName,
             newModifiedAtMs = System.currentTimeMillis(),
             oldUri = record.uri,
         )
@@ -1153,14 +1213,23 @@ object StandaloneRuntime {
         return mapOf(
             "ok" to true,
             "status" to "organized",
-            "series" to seriesName,
-            "character" to characterName,
+            "series" to primarySeries,
+            "character" to primaryCharacter,
+            "characters" to resolvedCharacters,
             "original_character" to originalCharacter,
-            "folder" to folderName,
+            "folder" to relativeFolder,
             "filename" to targetName,
             "sequence" to sequence,
             "uri" to changed.uri,
         )
+    }
+
+    private fun getOrCreateAutomationFolder(parentUri: String, rawName: String): String? {
+        val name = safeAutomationPathSegment(rawName)
+        return storageProvider.listChildren(parentUri)
+            .firstOrNull { it.isDirectory && it.name.equals(name, ignoreCase = true) }
+            ?.uri
+            ?: storageProvider.createFolder(parentUri, name).takeIf { it.ok }?.uri
     }
 
     private fun nextAutomationSequenceNumber(targetFolder: String, prefix: String, extension: String): Int {
