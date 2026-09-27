@@ -1416,20 +1416,35 @@ class LocalAiManager(
         val stageRecords = mutableListOf<Map<String, Any>>()
         val stageOutputs = linkedMapOf<String, Map<String, Any>>()
         val taskIds = mutableListOf<String>()
+        val continueOnStageError = payload["continue_on_stage_error"].toBooleanValue(defaultValue = false)
         var dependencyTaskId = ""
         var finalStageModel: AiModelDescriptor? = null
+        var succeededStageCount = 0
 
         stages.forEachIndexed { index, stageType ->
             val stagePlan = executionPlanner.plan(stageType, requestedModelId, requestedVersion)
-            val stageModel = stagePlan.model ?: return mapOf(
-                "ok" to false,
-                "status" to "incompatible",
-                "pipeline_id" to pipelineId,
-                "pipeline_type" to pipelineType,
-                "task_ids" to taskIds,
-                "stages" to stageRecords,
-                "message" to "No installed ONNX or TensorFlow Lite model is compatible with '$stageType'",
-            )
+            val stageModel = stagePlan.model
+            if (stageModel == null) {
+                val missing = mapOf(
+                    "stage_type" to stageType,
+                    "status" to "incompatible",
+                    "message" to "No installed model is compatible with '$stageType'",
+                )
+                stageRecords += missing
+                if (continueOnStageError) {
+                    dependencyTaskId = ""
+                    return@forEachIndexed
+                }
+                return mapOf(
+                    "ok" to false,
+                    "status" to "incompatible",
+                    "pipeline_id" to pipelineId,
+                    "pipeline_type" to pipelineType,
+                    "task_ids" to taskIds,
+                    "stages" to stageRecords,
+                    "message" to missing["message"].toString(),
+                )
+            }
             val stageRuntimeHint = stagePlan.runtimeCandidates.firstOrNull().orEmpty()
                 .ifBlank { stageModel.requiredRuntime }
             val stagePayload = buildStagePayload(
@@ -1486,6 +1501,10 @@ class LocalAiManager(
             )
 
             if (completedTask.status != "succeeded") {
+                if (continueOnStageError) {
+                    dependencyTaskId = ""
+                    return@forEachIndexed
+                }
                 return mapOf(
                     "ok" to false,
                     "status" to completedTask.status,
@@ -1499,10 +1518,23 @@ class LocalAiManager(
             }
 
             stageOutputs[stageType] = completedTask.result
+            succeededStageCount += 1
             dependencyTaskId = completedTask.taskId
         }
 
-        val finalStage = stages.last()
+        if (succeededStageCount == 0 || finalStageModel == null) {
+            return mapOf(
+                "ok" to false,
+                "status" to "failed",
+                "pipeline_id" to pipelineId,
+                "pipeline_type" to pipelineType,
+                "task_ids" to taskIds,
+                "stages" to stageRecords,
+                "message" to "No automation stage completed successfully",
+            )
+        }
+
+        val finalStage = stages.lastOrNull { it in stageOutputs } ?: stageOutputs.keys.last()
         val finalStageOutput = stageOutputs[finalStage] ?: emptyMap()
         val cacheReceipt = persistPipelineOutputCache(
             pipelineId = pipelineId,
@@ -1512,14 +1544,16 @@ class LocalAiManager(
             stages = stageRecords,
             finalStageOutput = finalStageOutput,
         )
+        val failedStages = stageRecords.filter { it["status"]?.toString() != "succeeded" }
 
         return mapOf(
             "ok" to true,
-            "status" to "succeeded",
+            "status" to if (failedStages.isEmpty()) "succeeded" else "partial",
             "pipeline_id" to pipelineId,
             "pipeline_type" to pipelineType,
             "task_ids" to taskIds,
             "stages" to stageRecords,
+            "failed_stages" to failedStages,
             "result" to (finalStageOutput["result"] ?: finalStageOutput),
             "raw_result" to finalStageOutput,
             "cache" to cacheReceipt,
