@@ -976,13 +976,13 @@ object StandaloneRuntime {
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
-        val organization = if (response["ok"] == true) {
-            organizeAutonomousImage(imageId, workflow)
-        } else {
-            mapOf("ok" to false, "status" to "skipped", "message" to "Pipeline did not complete.")
-        }
+        val organization = organizeAutonomousImage(imageId, workflow)
+        val completedStages = (response["stage_outputs"] as? Map<*, *>)?.size ?: 0
+        val stageFailures = (response["stage_errors"] as? Map<*, *>)?.size ?: 0
         return response + mapOf(
             "automation_stages" to stages,
+            "automation_completed_stages" to completedStages,
+            "automation_stage_failures" to stageFailures,
             "workflow" to workflow,
             "organization" to organization,
         )
