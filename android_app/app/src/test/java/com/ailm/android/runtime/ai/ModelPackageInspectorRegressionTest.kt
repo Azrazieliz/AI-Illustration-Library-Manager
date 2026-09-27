@@ -441,18 +441,22 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
-    fun `PaddleOCR is importable while unresolved execution readiness stays explicit`() {
+    fun `PaddleOCR v5 detector recognizer and dictionary become execution ready together`() {
         withTempDir { root ->
             File(root, "det.onnx").writeText("fixture")
             File(root, "rec.onnx").writeText("fixture")
-            File(root, "dict.txt").writeText("a\nb\nc\n")
+            File(root, "dict.txt").writeText(List(18383) { index -> "char_$index" }.joinToString("\n"))
             val inspector = ModelPackageInspector { artifact, _ ->
                 when (artifact.name) {
                     "det.onnx" -> ModelArtifactBindings(
-                        inputs = listOf(ModelArtifactTensor("x", 0, "float32", listOf(1, 3, 640, 640))),
-                        outputs = listOf(ModelArtifactTensor("fetch_name_0", 0, "float32", listOf(1, 1, 640, 640))),
+                        inputs = listOf(ModelArtifactTensor("x", 0, "float32", listOf(-1, 3, -1, -1))),
+                        outputs = listOf(ModelArtifactTensor("fetch_name_0", 0, "float32", listOf(-1, 1, -1, -1))),
                     )
-                    else -> error("Unexpected primary artifact ${artifact.name}")
+                    "rec.onnx" -> ModelArtifactBindings(
+                        inputs = listOf(ModelArtifactTensor("x", 0, "float32", listOf(-1, 3, 48, -1))),
+                        outputs = listOf(ModelArtifactTensor("fetch_name_0", 0, "float32", listOf(-1, -1, 18385))),
+                    )
+                    else -> error("Unexpected artifact ${artifact.name}")
                 }
             }
 
@@ -460,9 +464,15 @@ class ModelPackageInspectorRegressionTest {
 
             assertTrue(result.valid)
             assertTrue(result.supportedTasks.contains("ocr"))
-            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
-            assertTrue(result.issues.any { it.code == "execution_metadata_missing" })
-            assertTrue(result.issues.any { it.code == "ocr_preprocessing_unresolved" })
+            assertTrue(result.metadata["execution_readiness"] == null)
+            assertFalse(result.issues.any { it.code.startsWith("ocr_") })
+            val dictionary = result.metadata["ocr_dictionary"] as Map<*, *>
+            assertEquals(0, dictionary["blank_index"])
+            assertEquals(1, dictionary["dictionary_offset"])
+            assertEquals(18384, dictionary["space_index"])
+            assertEquals("ctc_blank_plus_dictionary_plus_space", dictionary["mapping_status"])
+            val paddle = result.metadata["paddle_ocr"] as Map<*, *>
+            assertEquals("PP-OCRv5", paddle["family"])
         }
     }
 
