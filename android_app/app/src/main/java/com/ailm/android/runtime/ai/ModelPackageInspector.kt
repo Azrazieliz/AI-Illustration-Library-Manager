@@ -80,6 +80,15 @@ internal class ModelPackageInspector(
         val relativeFiles = files.map { it.relativeTo(packageRoot).invariantSeparatorsPath }
         val filesByName = files.groupBy { it.name.lowercase() }
 
+        inspectKnownNomicTextPackageEarly(
+            modelIdHint = modelIdHint,
+            packageRoot = packageRoot,
+            files = files,
+            filesByName = filesByName,
+            relativeFiles = relativeFiles,
+            issues = issues,
+        )?.let { return it }
+
         inspectKnownNsfwPackageEarly(
             modelIdHint = modelIdHint,
             packageRoot = packageRoot,
@@ -403,6 +412,173 @@ internal class ModelPackageInspector(
         )
     }
 
+    private fun inspectKnownNomicTextPackageEarly(
+        modelIdHint: String,
+        packageRoot: File,
+        files: List<File>,
+        filesByName: Map<String, List<File>>,
+        relativeFiles: List<String>,
+        issues: MutableList<ModelPackageIssue>,
+    ): ModelPackageInspection? {
+        val knownPackage = modelIdHint.contains("nomic-embed-text-v1.5", ignoreCase = true) ||
+            modelIdHint.contains("nomic_embed_text", ignoreCase = true)
+        if (!knownPackage) return null
+
+        val onnxArtifacts = files.filter { it.extension.equals("onnx", ignoreCase = true) }
+        val artifact = when {
+            onnxArtifacts.size == 1 -> onnxArtifacts.single()
+            else -> onnxArtifacts.firstOrNull { it.name.equals("model.onnx", ignoreCase = true) }
+        }
+        if (artifact == null) {
+            issues += ModelPackageIssue(
+                "model_artifact_missing",
+                "Known Nomic text package requires one unambiguous ONNX artifact.",
+            )
+            return ModelPackageInspection(
+                packageRoot = packageRoot,
+                artifact = null,
+                runtime = "",
+                supportedTasks = listOf("embedding_generation"),
+                capabilities = listOf("embedding_generation"),
+                metadata = mapOf("model_id" to modelIdHint),
+                files = relativeFiles,
+                issues = issues,
+            )
+        }
+
+        val bindings = runCatching { inspectArtifactBindings(artifact, AiRuntimeType.ONNX.raw) }.getOrElse { error ->
+            issues += ModelPackageIssue(
+                "tensor_metadata_unreadable",
+                "Unable to inspect ${artifact.name}: ${error.message ?: error.javaClass.simpleName}",
+            )
+            null
+        }
+        val inputIds = bindings?.inputs?.firstOrNull { it.name.equals("input_ids", ignoreCase = true) }
+        val tokenTypeIds = bindings?.inputs?.firstOrNull { it.name.equals("token_type_ids", ignoreCase = true) }
+        val attentionMask = bindings?.inputs?.firstOrNull { it.name.equals("attention_mask", ignoreCase = true) }
+        val output = bindings?.outputs?.firstOrNull()
+        val graphReady =
+            inputIds?.dataType == "int64" && inputIds.shape.size == 2 &&
+                tokenTypeIds?.dataType == "int64" && tokenTypeIds.shape.size == 2 &&
+                attentionMask?.dataType == "int64" && attentionMask.shape.size == 2 &&
+                output != null && output.dataType == "float32" && output.shape.size >= 2
+        if (!graphReady) {
+            issues += ModelPackageIssue(
+                "nomic_text_contract_incomplete",
+                "Known Nomic text package requires int64 input_ids, token_type_ids, attention_mask and a float embedding output.",
+            )
+        }
+
+        val vocabulary = filesByName["vocab.txt"]?.singleOrNull()
+            ?.readLines()
+            ?.map(String::trim)
+            ?.filter(String::isNotBlank)
+            .orEmpty()
+        val tokenizerReady = vocabulary.isNotEmpty()
+        if (!tokenizerReady) {
+            issues += ModelPackageIssue(
+                "nomic_text_tokenizer_unavailable",
+                "Nomic text package imported, but vocab.txt is unavailable; execution readiness remains blocked.",
+            )
+        }
+
+        val metadata = linkedMapOf<String, Any>(
+            "model_id" to modelIdHint,
+            "task" to "embedding_generation",
+            "supported_tasks" to listOf("embedding_generation"),
+            "package_inspection" to mapOf(
+                "artifact_path" to artifact.absolutePath,
+                "runtime" to AiRuntimeType.ONNX.raw,
+                "files" to relativeFiles,
+                "capabilities" to listOf("embedding_generation"),
+            ),
+        )
+
+        if (graphReady && tokenizerReady) {
+            metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
+                "embedding_generation" to mapOf(
+                    "inputs" to listOf(
+                        mapOf(
+                            "name" to inputIds!!.name,
+                            "source" to "text_ids",
+                            "data_type" to inputIds.dataType,
+                            "layout" to "sequence",
+                            "shape" to inputIds.shape,
+                        ),
+                        mapOf(
+                            "name" to tokenTypeIds!!.name,
+                            "source" to "token_type_ids",
+                            "data_type" to tokenTypeIds.dataType,
+                            "layout" to "sequence",
+                            "shape" to tokenTypeIds.shape,
+                        ),
+                        mapOf(
+                            "name" to attentionMask!!.name,
+                            "source" to "attention_mask",
+                            "data_type" to attentionMask.dataType,
+                            "layout" to "sequence",
+                            "shape" to attentionMask.shape,
+                        ),
+                    ),
+                    "outputs" to listOf(
+                        mapOf(
+                            "name" to output!!.name,
+                            "index" to output.index,
+                            "data_type" to output.dataType,
+                            "shape" to output.shape,
+                        ),
+                    ),
+                    "output_decoder" to mapOf(
+                        "type" to "embedding",
+                        "output_name" to output.name,
+                        "pooling" to "mean_masked",
+                        "hidden_dimension" to 768,
+                        "embedding_dimension" to 768,
+                        "normalization" to "l2",
+                    ),
+                    "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0f),
+                    "tokenizer" to mapOf(
+                        "type" to "wordpiece",
+                        "vocabulary" to vocabulary,
+                        "unknown_token" to "[UNK]",
+                        "start_token" to "[CLS]",
+                        "end_token" to "[SEP]",
+                        "pad_token" to "[PAD]",
+                        "max_length" to 8192,
+                        "normalizer" to "lowercase",
+                        "pre_tokenizer" to "whitespace",
+                        "model_type" to "wordpiece",
+                    ),
+                    "image_preprocessing" to mapOf("enabled" to false),
+                ),
+            )
+        } else {
+            metadata["execution_readiness"] = mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to buildList {
+                    if (!graphReady) add("nomic_text_contract_incomplete")
+                    if (!tokenizerReady) add("nomic_text_tokenizer_unavailable")
+                },
+            )
+            issues += ModelPackageIssue(
+                "execution_metadata_missing",
+                "Nomic text package is importable but execution metadata is incomplete.",
+            )
+        }
+
+        return ModelPackageInspection(
+            packageRoot = packageRoot,
+            artifact = artifact,
+            runtime = AiRuntimeType.ONNX.raw,
+            supportedTasks = listOf("embedding_generation"),
+            capabilities = listOf("embedding_generation"),
+            metadata = metadata,
+            files = relativeFiles,
+            issues = issues,
+        )
+    }
+
     private fun inspectKnownNsfwPackageEarly(
         modelIdHint: String,
         packageRoot: File,
@@ -447,19 +623,17 @@ internal class ModelPackageInspector(
         val input = bindings?.inputs?.singleOrNull { tensor ->
             tensor.dataType == "float32" &&
                 tensor.shape.size == 4 &&
-                tensor.shape[1] == 3 &&
-                tensor.shape[2] == 224 &&
-                tensor.shape[3] == 224
+                (tensor.shape.getOrNull(1) == 3 || tensor.shape.lastOrNull() == 3)
         }
         val output = bindings?.outputs?.singleOrNull { tensor ->
             tensor.dataType == "float32" &&
-                tensor.shape.size == 2 &&
+                tensor.shape.isNotEmpty() &&
                 tensor.shape.lastOrNull() == 5
         }
         if (input == null || output == null) {
             issues += ModelPackageIssue(
                 "nsfw_graph_incompatible",
-                "Known NSFW classifier requires float32 image input [B,3,224,224] and float32 logits output [B,5].",
+                "Known NSFW classifier requires one float32 rank-4 RGB image input and one float32 output whose final dimension is 5.",
             )
         }
 
@@ -517,7 +691,7 @@ internal class ModelPackageInspector(
                             "name" to input.name,
                             "source" to "image",
                             "data_type" to input.dataType,
-                            "layout" to "nchw",
+                            "layout" to (inferImageLayout(input.shape) ?: "nchw"),
                             "shape" to input.shape,
                         ),
                     ),
