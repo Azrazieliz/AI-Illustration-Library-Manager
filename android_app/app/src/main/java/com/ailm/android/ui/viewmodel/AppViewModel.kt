@@ -1352,15 +1352,19 @@ class AppViewModel : ViewModel() {
             }
 
             val ok = result["ok"].asBooleanOrFalse()
+            val resultMessage = result["message"]?.toString()?.trim().orEmpty()
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
                     aiLastPipelineResult = result,
                     lastActionMessage = if (ok) {
                         "${humanTaskName(normalizedTaskType)} completed for image #$imageId."
                     } else {
-                        "${humanTaskName(normalizedTaskType)} failed for image #$imageId."
+                        buildString {
+                            append("${humanTaskName(normalizedTaskType)} failed for image #$imageId")
+                            if (resultMessage.isNotBlank()) append(": ").append(resultMessage)
+                        }
                     },
-                    errorMessage = null,
+                    errorMessage = if (ok) null else resultMessage.takeIf(String::isNotBlank),
                 )
             }
 
