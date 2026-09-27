@@ -15,6 +15,11 @@ class AiWorkflowCoordinator(
         val stages = collectStages(response)
         val accepted = mutableListOf<String>()
         val reviewReasons = mutableListOf<String>()
+        response["failed_stages"].mapList().forEach { failed ->
+            val stage = failed.optText("stage_type").ifBlank { "stage" }
+            val message = failed.optText("message").ifBlank { failed.optText("status") }
+            reviewReasons += "Automation stage failed: $stage${if (message.isBlank()) "" else " ($message)"}"
+        }
         val profile = readProfile(imageId)
         if (!profile.optBoolean("manual_override", false) && profile.optJSONObject("normalization")?.optBoolean("manual_override", false) != true) {
             stages["ocr"]?.resultMap()?.optText("text")?.takeIf { it.isNotBlank() }?.let { profile.put("ocr", it) }
@@ -136,12 +141,30 @@ class AiWorkflowCoordinator(
 
     private fun collectStages(response: Map<String, Any>): Map<String, Map<String, Any>> {
         val stages = linkedMapOf<String, Map<String, Any>>()
+
+        val explicitOutputs = response["stage_outputs"] as? Map<*, *>
+        explicitOutputs?.forEach { (stageKey, rawOutput) ->
+            val stageType = stageKey?.toString()?.trim().orEmpty()
+            val output = (rawOutput as? Map<*, *>)
+                ?.entries
+                ?.filter { it.key != null && it.value != null }
+                ?.associate { it.key.toString() to it.value as Any }
+                .orEmpty()
+            if (stageType.isNotBlank() && output.isNotEmpty()) {
+                stages[stageType] = if (output["task_type"] == null) {
+                    output + mapOf("task_type" to stageType)
+                } else {
+                    output
+                }
+            }
+        }
+
         fun visit(value: Any?) {
             when (value) {
                 is Map<*, *> -> {
                     val map = value.entries.filter { it.key != null && it.value != null }.associate { it.key.toString() to it.value as Any }
                     val type = map["task_type"]?.toString()?.trim().orEmpty()
-                    if (type.isNotBlank()) stages[type] = map
+                    if (type.isNotBlank()) stages.putIfAbsent(type, map)
                     map.values.forEach(::visit)
                 }
                 is List<*> -> value.forEach(::visit)
