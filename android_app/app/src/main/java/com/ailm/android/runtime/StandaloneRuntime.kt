@@ -1022,8 +1022,9 @@ object StandaloneRuntime {
     }
 
     private fun organizeAutonomousImage(imageId: Int, workflow: Map<String, Any>): Map<String, Any> {
+        val originalCharacter = workflow["original_character"] == true
         val seriesName = workflow["accepted_series_name"]?.toString()?.trim().orEmpty()
-        if (seriesName.isBlank()) {
+        if (seriesName.isBlank() && !originalCharacter) {
             return mapOf(
                 "ok" to true,
                 "status" to "unchanged",
@@ -1050,19 +1051,25 @@ object StandaloneRuntime {
             return mapOf("ok" to false, "status" to "no_root", "message" to "No writable library root is available.")
         }
 
-        val folderName = safeAutomationPathSegment(seriesName)
+        val folderName = if (originalCharacter) {
+            "Original Characters"
+        } else {
+            safeAutomationPathSegment(seriesName)
+        }
         val targetFolder = storageProvider.listChildren(root)
             .firstOrNull { it.isDirectory && it.name.equals(folderName, ignoreCase = true) }
             ?.uri
             ?: storageProvider.createFolder(root, folderName).takeIf { it.ok }?.uri
-            ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create series folder '$folderName'.")
+            ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create folder '$folderName'.")
 
         val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
-        val stem = buildList {
-            add(safeAutomationPathSegment(seriesName))
-            if (characterName.isNotBlank()) add(safeAutomationPathSegment(characterName))
-            add(imageId.toString().padStart(8, '0'))
-        }.joinToString(" - ")
+        val prefix = when {
+            originalCharacter -> "Original Character"
+            characterName.isNotBlank() -> "${safeAutomationPathSegment(characterName)} - ${safeAutomationPathSegment(seriesName)}"
+            else -> safeAutomationPathSegment(seriesName)
+        }
+        val sequence = nextAutomationSequenceNumber(targetFolder, prefix, extension)
+        val stem = "$prefix $sequence"
         val targetName = if (extension.isBlank()) stem else "$stem.$extension"
 
         if (record.folderUri == targetFolder && record.filename == targetName) {
@@ -1111,10 +1118,25 @@ object StandaloneRuntime {
             "status" to "organized",
             "series" to seriesName,
             "character" to characterName,
+            "original_character" to originalCharacter,
             "folder" to folderName,
             "filename" to targetName,
+            "sequence" to sequence,
             "uri" to changed.uri,
         )
+    }
+
+    private fun nextAutomationSequenceNumber(targetFolder: String, prefix: String, extension: String): Int {
+        val escapedPrefix = Regex.escape(prefix)
+        val escapedExtension = extension.takeIf(String::isNotBlank)?.let { "\\.${Regex.escape(it)}" }.orEmpty()
+        val pattern = Regex("^$escapedPrefix\\s+(\\d+)$escapedExtension$", RegexOption.IGNORE_CASE)
+        return storageProvider.listChildren(targetFolder)
+            .asSequence()
+            .filter { !it.isDirectory }
+            .mapNotNull { node -> pattern.matchEntire(node.name)?.groupValues?.getOrNull(1)?.toIntOrNull() }
+            .maxOrNull()
+            ?.plus(1)
+            ?: 1
     }
 
     private fun safeAutomationPathSegment(raw: String): String {
