@@ -1595,47 +1595,206 @@ internal class ModelPackageInspector(
         files: List<File>,
         issues: MutableList<ModelPackageIssue>,
     ) {
-        val roles = metadata["model_artifacts"].asMapList().mapNotNull { it["role"]?.toString() }.toSet()
+        val roleEntries = metadata["model_artifacts"].asMapList()
+        val roles = roleEntries.mapNotNull { it["role"]?.toString() }.toSet()
         if (!setOf("detector", "recognizer", "dictionary_decoder").all(roles::contains)) return
+
+        val detector = files.firstOrNull { it.name.equals("det.onnx", ignoreCase = true) || it.name.equals("detector.onnx", ignoreCase = true) }
+        val recognizer = files.firstOrNull { it.name.equals("rec.onnx", ignoreCase = true) || it.name.equals("recognizer.onnx", ignoreCase = true) }
         val dictionary = files.firstOrNull { it.name.equals("dict.txt", ignoreCase = true) }
-        val entryCount = dictionary?.readLines()?.size ?: 0
+        if (detector == null || recognizer == null || dictionary == null) {
+            issues += ModelPackageIssue(
+                "ocr_package_incomplete",
+                "PaddleOCR requires detector, recognizer, and dictionary artifacts.",
+            )
+            metadata["execution_readiness"] = mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to listOf("ocr_package_incomplete"),
+            )
+            return
+        }
+
+        val detectorBindings = runCatching { inspectArtifactBindings(detector, AiRuntimeType.ONNX.raw) }.getOrElse { error ->
+            issues += ModelPackageIssue(
+                "tensor_metadata_unreadable",
+                "Unable to inspect PaddleOCR detector: ${error.message ?: error.javaClass.simpleName}",
+            )
+            null
+        }
+        val recognizerBindings = runCatching { inspectArtifactBindings(recognizer, AiRuntimeType.ONNX.raw) }.getOrElse { error ->
+            issues += ModelPackageIssue(
+                "tensor_metadata_unreadable",
+                "Unable to inspect PaddleOCR recognizer: ${error.message ?: error.javaClass.simpleName}",
+            )
+            null
+        }
+
+        val detectorInput = detectorBindings?.inputs?.singleOrNull { it.name == "x" }
+        val detectorOutput = detectorBindings?.outputs?.singleOrNull { it.name == "fetch_name_0" }
+        val recognizerInput = recognizerBindings?.inputs?.singleOrNull { it.name == "x" }
+        val recognizerOutput = recognizerBindings?.outputs?.singleOrNull { it.name == "fetch_name_0" }
+
+        val detectorReady = detectorInput?.dataType == "float32" &&
+            detectorInput.shape.size == 4 &&
+            detectorInput.shape[1] in setOf(-1, 3) &&
+            detectorOutput?.dataType == "float32" &&
+            detectorOutput.shape.size == 4 &&
+            detectorOutput.shape[1] in setOf(-1, 1)
+
+        val recognizerReady = recognizerInput?.dataType == "float32" &&
+            recognizerInput.shape.size == 4 &&
+            recognizerInput.shape[1] in setOf(-1, 3) &&
+            recognizerInput.shape[2] in setOf(-1, 48) &&
+            recognizerOutput?.dataType == "float32" &&
+            recognizerOutput.shape.size == 3 &&
+            recognizerOutput.shape.lastOrNull() == 18385
+
+        val dictionaryLines = dictionary.readLines()
+        val dictionaryReady = dictionaryLines.size == 18383
+        val blockers = buildList {
+            if (!detectorReady) add("ocr_detector_graph_incompatible")
+            if (!recognizerReady) add("ocr_recognizer_graph_incompatible")
+            if (!dictionaryReady) add("ocr_dictionary_incompatible")
+        }
+
         metadata["ocr_graph_contract"] = mapOf(
             "detector" to mapOf(
-                "input" to mapOf("name" to "x", "data_type" to "float32", "shape" to listOf(-1, 3, -1, -1)),
-                "output" to mapOf("name" to "fetch_name_0", "data_type" to "float32", "shape" to listOf(-1, 1, -1, -1)),
+                "input" to mapOf(
+                    "name" to (detectorInput?.name ?: "x"),
+                    "data_type" to (detectorInput?.dataType ?: "float32"),
+                    "shape" to (detectorInput?.shape ?: listOf(-1, 3, -1, -1)),
+                ),
+                "output" to mapOf(
+                    "name" to (detectorOutput?.name ?: "fetch_name_0"),
+                    "data_type" to (detectorOutput?.dataType ?: "float32"),
+                    "shape" to (detectorOutput?.shape ?: listOf(-1, 1, -1, -1)),
+                ),
             ),
             "recognizer" to mapOf(
-                "input" to mapOf("name" to "x", "data_type" to "float32", "shape" to listOf(-1, 3, 48, -1)),
-                "output" to mapOf("name" to "fetch_name_0", "data_type" to "float32", "shape" to listOf(-1, -1, 18385)),
+                "input" to mapOf(
+                    "name" to (recognizerInput?.name ?: "x"),
+                    "data_type" to (recognizerInput?.dataType ?: "float32"),
+                    "shape" to (recognizerInput?.shape ?: listOf(-1, 3, 48, -1)),
+                ),
+                "output" to mapOf(
+                    "name" to (recognizerOutput?.name ?: "fetch_name_0"),
+                    "data_type" to (recognizerOutput?.dataType ?: "float32"),
+                    "shape" to (recognizerOutput?.shape ?: listOf(-1, -1, 18385)),
+                ),
             ),
         )
+
         metadata["ocr_dictionary"] = mapOf(
-            "path" to dictionary?.relativeTo(packageRoot)?.invariantSeparatorsPath.orEmpty(),
-            "entry_count" to entryCount,
+            "path" to dictionary.relativeTo(packageRoot).invariantSeparatorsPath,
+            "absolute_path" to dictionary.absolutePath,
+            "entry_count" to dictionaryLines.size,
             "recognizer_class_count" to 18385,
-            "blank_index" to null,
-            "dictionary_offset" to null,
-            "mapping_status" to "unresolved",
+            "blank_index" to 0,
+            "dictionary_offset" to 1,
+            "append_space_char" to true,
+            "space_index" to 18384,
+            "mapping_status" to if (dictionaryReady) "ctc_blank_plus_dictionary_plus_space" else "unresolved",
         )
-        issues += ModelPackageIssue(
-            "ocr_preprocessing_unresolved",
-            "PaddleOCR detector and recognizer preprocessing is not declared by this package.",
+
+        metadata["paddle_ocr"] = mapOf(
+            "family" to "PP-OCRv5",
+            "detector_path" to detector.absolutePath,
+            "recognizer_path" to recognizer.absolutePath,
+            "dictionary_path" to dictionary.absolutePath,
+            "detector_preprocessing" to mapOf(
+                "limit_side_len" to 960,
+                "limit_type" to "max",
+                "stride" to 32,
+                "color_space" to "bgr",
+                "scale" to (1f / 255f),
+                "mean" to listOf(0.485f, 0.456f, 0.406f),
+                "std" to listOf(0.229f, 0.224f, 0.225f),
+            ),
+            "detector_postprocessing" to mapOf(
+                "type" to "db",
+                "thresh" to 0.3f,
+                "box_thresh" to 0.6f,
+                "max_candidates" to 1000,
+                "unclip_ratio" to 1.5f,
+                "score_mode" to "fast",
+                "box_type" to "quad",
+            ),
+            "recognizer_preprocessing" to mapOf(
+                "height" to 48,
+                "max_width" to 320,
+                "channels" to 3,
+                "color_space" to "bgr",
+                "scale" to (1f / 255f),
+                "mean" to listOf(0.5f, 0.5f, 0.5f),
+                "std" to listOf(0.5f, 0.5f, 0.5f),
+                "padding" to true,
+            ),
+            "ctc" to mapOf(
+                "blank_index" to 0,
+                "dictionary_offset" to 1,
+                "append_space_char" to true,
+                "space_index" to 18384,
+                "class_count" to 18385,
+                "remove_duplicates" to true,
+            ),
         )
-        issues += ModelPackageIssue(
-            "ocr_detector_postprocessing_unresolved",
-            "PaddleOCR detector family and postprocessing parameters are not established by this package.",
-        )
-        issues += ModelPackageIssue(
-            "ocr_ctc_mapping_unresolved",
-            "PaddleOCR dict.txt has $entryCount entries for 18385 recognizer classes; blank and special-token offsets are not established by this package.",
-        )
-        metadata["execution_readiness"] = mapOf(
-            "ready" to false,
-            "stage" to "imported_not_executable",
-            "blockers" to listOf(
-                "ocr_preprocessing_unresolved",
-                "ocr_detector_postprocessing_unresolved",
-                "ocr_ctc_mapping_unresolved",
+
+        if (blockers.isNotEmpty()) {
+            blockers.forEach { blocker ->
+                issues += ModelPackageIssue(
+                    blocker,
+                    "PaddleOCR package does not match the expected PP-OCRv5 detector/recognizer/dictionary execution contract.",
+                )
+            }
+            metadata["execution_readiness"] = mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to blockers,
+            )
+            return
+        }
+
+        metadata.remove("execution_readiness")
+        metadata[INFERENCE_CONTRACTS_KEY] = metadata[INFERENCE_CONTRACTS_KEY].asStringMap().orEmpty() + mapOf(
+            "ocr" to mapOf(
+                "tokenizer" to mapOf("type" to "none"),
+                "image_preprocessing" to mapOf(
+                    "enabled" to true,
+                    "width" to 960,
+                    "height" to 960,
+                    "channels" to 3,
+                    "color_space" to "rgb",
+                    "resize_mode" to "stretch",
+                    "scale" to (1f / 255f),
+                    "mean" to listOf(0.485f, 0.456f, 0.406f),
+                    "std" to listOf(0.229f, 0.224f, 0.225f),
+                ),
+                "inputs" to listOf(
+                    mapOf(
+                        "name" to detectorInput!!.name,
+                        "source" to "image",
+                        "data_type" to detectorInput.dataType,
+                        "layout" to "nchw",
+                        "shape" to detectorInput.shape,
+                    ),
+                ),
+                "outputs" to listOf(
+                    mapOf(
+                        "name" to detectorOutput!!.name,
+                        "index" to detectorOutput.index,
+                        "data_type" to detectorOutput.dataType,
+                        "shape" to detectorOutput.shape,
+                    ),
+                ),
+                "output_decoder" to mapOf(
+                    "type" to "tokens",
+                    "output_name" to detectorOutput.name,
+                ),
+                "confidence_scoring" to mapOf(
+                    "type" to "identity",
+                    "threshold" to 0f,
+                ),
             ),
         )
     }
