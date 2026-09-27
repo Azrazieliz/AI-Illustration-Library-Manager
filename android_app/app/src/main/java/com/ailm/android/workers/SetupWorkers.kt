@@ -108,7 +108,12 @@ class LibraryAutomationWorker(
                 setForeground(foregroundInfo(processed, imageIds.size, "Processing image ${processed + 1} of ${imageIds.size}"))
 
                 val result = StandaloneRuntime.runAutonomousImageWorkflow(mapOf("image_id" to imageId))
-                if (result["ok"] != true) {
+                val workflow = result["workflow"] as? Map<*, *>
+                val organization = result["organization"] as? Map<*, *>
+                val needsReview = workflow?.get("queued_for_review") == true
+                val organizationFailed = organization?.get("ok") == false &&
+                    organization["status"]?.toString() !in setOf("skipped", "unchanged")
+                if (result["ok"] != true || needsReview || organizationFailed) {
                     failed += 1
                 }
                 processed += 1
