@@ -2373,7 +2373,12 @@ private fun AiModelManagerScreen(
 
     val activeGlobalModelId = state.aiSettings["active_model_id"]?.toString().orEmpty()
     val activeGlobalModelVersion = state.aiSettings["active_model_version"]?.toString().orEmpty()
-    val taskCapabilities = state.aiInstalledModels
+    val executionReadyModels = state.aiInstalledModels.filter { model ->
+        val metadata = model["metadata"] as? Map<*, *>
+        val readiness = metadata?.get("execution_readiness") as? Map<*, *>
+        readiness?.get("ready") != false
+    }
+    val taskCapabilities = executionReadyModels
         .flatMap { model -> (model["supported_tasks"] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) } ?: emptyList() }
         .distinct()
         .sorted()
@@ -2490,8 +2495,17 @@ private fun AiModelManagerScreen(
                     "failed" -> "Verification failed"
                     else -> "Not verified"
                 }
-                val isActive = listedId == activeGlobalModelId &&
+                val metadata = model["metadata"] as? Map<*, *>
+                val readiness = metadata?.get("execution_readiness") as? Map<*, *>
+                val executionReady = readiness?.get("ready") != false
+                val isActive = executionReady &&
+                    listedId == activeGlobalModelId &&
                     (activeGlobalModelVersion.isBlank() || activeGlobalModelVersion == listedVersion)
+                val stateLabel = when {
+                    isActive -> "Selected (session)"
+                    !executionReady -> "Imported / not execution-ready"
+                    else -> "Ready"
+                }
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier
@@ -2501,7 +2515,7 @@ private fun AiModelManagerScreen(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text("${model["display_name"] ?: listedId} (${listedVersion.ifBlank { "n/a" }})")
-                        Text("Status: $verificationLabel | State: ${if (isActive) "Active" else "Ready"}")
+                        Text("Status: $verificationLabel | State: $stateLabel")
                         Text("Size: ${humanBytes(model["size_bytes"].asLongNullable() ?: 0L)}", style = MaterialTheme.typography.bodySmall)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { previewedModelKey = if (previewedModelKey == modelKey) "" else modelKey }) {
@@ -2513,12 +2527,25 @@ private fun AiModelManagerScreen(
                             Button(onClick = { onRemoveModel(listedId, listedVersion) }, enabled = listedId.isNotBlank()) {
                                 Text("Uninstall")
                             }
-                            Button(onClick = { onSetActiveModel(listedId, listedVersion, "") }, enabled = listedId.isNotBlank() && !isActive) {
-                                Text(if (isActive) "Active" else "Activate")
+                            Button(
+                                onClick = { onSetActiveModel(listedId, listedVersion, "") },
+                                enabled = listedId.isNotBlank() &&
+                                    !isActive &&
+                                    executionReady &&
+                                    verificationLabel == "Verified",
+                            ) {
+                                Text(if (isActive) "Selected" else "Activate")
                             }
                         }
                         AnimatedVisibility(visible = previewedModelKey == modelKey) {
-                            Text("Installed locally and ready to use.", style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                if (executionReady) {
+                                    "Installed locally. Runtime execution has not been initialized by selection."
+                                } else {
+                                    "Installed locally, but execution readiness is blocked by the package contract."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                     }
                 }
@@ -2530,7 +2557,7 @@ private fun AiModelManagerScreen(
             Text("Task assignments will appear when installed models report capabilities.")
         } else {
             taskCapabilities.forEach { taskType ->
-                val candidates = state.aiInstalledModels.filter { model ->
+                val candidates = executionReadyModels.filter { model ->
                     (model["supported_tasks"] as? List<*>)
                         ?.any { it?.toString()?.trim() == taskType }
                         ?: false
@@ -2588,9 +2615,15 @@ private fun AiModelManagerScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("AI Runtime", style = MaterialTheme.typography.titleMedium)
-                Text("Status: Ready")
-                Text("Configuration: Automatic")
-                Text("Installed Models: ${state.aiInstalledModels.size}")
+                Text(
+                    "Status: " + if (activeGlobalModelId.isNotBlank()) {
+                        "Session model selected; runtime not initialized"
+                    } else {
+                        "No session model selected"
+                    },
+                )
+                Text("Configuration: Manual selection")
+                Text("Installed Models: ${state.aiInstalledModels.size} (${executionReadyModels.size} execution-ready)")
                 Text(
                     "Capabilities Available: ${taskCapabilities.joinToString(", ") { it.replace('_', ' ').replaceFirstChar { letter -> letter.uppercase() } }}",
                     style = MaterialTheme.typography.bodySmall,
