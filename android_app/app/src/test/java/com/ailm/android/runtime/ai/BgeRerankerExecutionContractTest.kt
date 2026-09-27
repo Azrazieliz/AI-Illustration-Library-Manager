@@ -8,6 +8,39 @@ import org.junit.Test
 import java.io.File
 
 class BgeRerankerExecutionContractTest {
+    @Test
+    fun `file backed Unigram tokenizer materializes without import time JSON expansion`() {
+        val file = File.createTempFile("bge-tokenizer-", ".json")
+        try {
+            file.writeText(
+                """{"model":{"type":"Unigram","vocab":[["<s>",0.0],["<pad>",0.0],["</s>",0.0],["<unk>",0.0],["▁hello",-1.0],["▁world",-1.0]]}}""",
+            )
+            val tokenizer = TokenizerContract(
+                type = "unigram",
+                vocabulary = emptyList(),
+                unknownToken = "<unk>",
+                startToken = "<s>",
+                endToken = "</s>",
+                padToken = "<pad>",
+                maxLength = 8,
+                modelType = "Unigram",
+                normalizer = "precompiled",
+                preTokenizer = "metaspace",
+                pairTemplate = "xlm_roberta",
+                sourceFile = file.absolutePath,
+                sourceFormat = "hf_unigram_json",
+            )
+
+            val materialized = materializeTokenizerContract(tokenizer)
+
+            assertEquals(listOf("<s>", "<pad>", "</s>", "<unk>", "▁hello", "▁world"), materialized.vocabulary)
+            assertEquals(6, materialized.vocabularyScores.size)
+        } finally {
+            file.delete()
+        }
+    }
+
+
     private val packageDirectory = TestPackageFixtureResolver.resolvePackageDirectory(
         packageName = "BGE-Reranker-v2-m3",
         zipName = "BGE-Reranker-v2-m3.zip",
