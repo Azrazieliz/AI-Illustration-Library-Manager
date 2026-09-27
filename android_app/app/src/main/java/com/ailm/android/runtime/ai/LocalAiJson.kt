@@ -18,6 +18,10 @@ object LocalAiJson {
             return emptyMap()
         }
         if (normalized.trimStart().startsWith("{")) {
+            val platformParsed = runCatching { fromJsonObject(JSONObject(normalized)) }.getOrNull()
+            if (platformParsed != null) {
+                return platformParsed
+            }
             return decodeObjectFallback(normalized)
         }
         return runCatching { fromJsonObject(JSONObject(normalized)) }
