@@ -95,6 +95,7 @@ internal class ModelPackageInspector(
             modelIdHint = modelIdHint,
             packageRoot = packageRoot,
             files = files,
+            filesByName = filesByName,
             relativeFiles = relativeFiles,
             issues = issues,
         )?.let { return it }
@@ -466,29 +467,26 @@ internal class ModelPackageInspector(
         val inputIds = bindings?.inputs?.firstOrNull { it.name.equals("input_ids", ignoreCase = true) }
         val tokenTypeIds = bindings?.inputs?.firstOrNull { it.name.equals("token_type_ids", ignoreCase = true) }
         val attentionMask = bindings?.inputs?.firstOrNull { it.name.equals("attention_mask", ignoreCase = true) }
-        val output = bindings?.outputs?.firstOrNull()
+        val output = bindings?.outputs?.firstOrNull { it.name.equals("last_hidden_state", ignoreCase = true) }
+            ?: bindings?.outputs?.firstOrNull()
         val graphReady =
             inputIds?.dataType == "int64" && inputIds.shape.size == 2 &&
                 tokenTypeIds?.dataType == "int64" && tokenTypeIds.shape.size == 2 &&
                 attentionMask?.dataType == "int64" && attentionMask.shape.size == 2 &&
-                output != null && output.dataType == "float32" && output.shape.size >= 2
+                output != null && output.dataType == "float32" &&
+                output.shape.size == 3 && output.shape.lastOrNull() == 768
         if (!graphReady) {
             issues += ModelPackageIssue(
                 "nomic_text_contract_incomplete",
-                "Known Nomic text package requires int64 input_ids, token_type_ids, attention_mask and a float embedding output.",
+                "Nomic text requires int64 input_ids/token_type_ids/attention_mask and float last_hidden_state[...,768].",
             )
         }
 
-        val vocabulary = filesByName["vocab.txt"]?.singleOrNull()
-            ?.readLines()
-            ?.map(String::trim)
-            ?.filter(String::isNotBlank)
-            .orEmpty()
-        val tokenizerReady = vocabulary.isNotEmpty()
-        if (!tokenizerReady) {
+        val tokenizerFile = filesByName["tokenizer.json"]?.singleOrNull()
+        if (tokenizerFile == null) {
             issues += ModelPackageIssue(
                 "nomic_text_tokenizer_unavailable",
-                "Nomic text package imported, but vocab.txt is unavailable; execution readiness remains blocked.",
+                "Nomic text requires the distributed tokenizer.json.",
             )
         }
 
@@ -504,7 +502,7 @@ internal class ModelPackageInspector(
             ),
         )
 
-        if (graphReady && tokenizerReady) {
+        if (graphReady && tokenizerFile != null) {
             metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
                 "embedding_generation" to mapOf(
                     "inputs" to listOf(
@@ -549,15 +547,16 @@ internal class ModelPackageInspector(
                     "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0f),
                     "tokenizer" to mapOf(
                         "type" to "wordpiece",
-                        "vocabulary" to vocabulary,
+                        "source_file" to tokenizerFile.absolutePath,
+                        "source_format" to "hf_wordpiece_json",
                         "unknown_token" to "[UNK]",
                         "start_token" to "[CLS]",
                         "end_token" to "[SEP]",
                         "pad_token" to "[PAD]",
                         "max_length" to 8192,
                         "normalizer" to "lowercase",
-                        "pre_tokenizer" to "whitespace",
-                        "model_type" to "wordpiece",
+                        "pre_tokenizer" to "bert",
+                        "model_type" to "WordPiece",
                     ),
                     "image_preprocessing" to mapOf("enabled" to false),
                 ),
@@ -568,7 +567,7 @@ internal class ModelPackageInspector(
                 "stage" to "imported_not_executable",
                 "blockers" to buildList {
                     if (!graphReady) add("nomic_text_contract_incomplete")
-                    if (!tokenizerReady) add("nomic_text_tokenizer_unavailable")
+                    if (tokenizerFile == null) add("nomic_text_tokenizer_unavailable")
                 },
             )
             issues += ModelPackageIssue(
@@ -593,6 +592,7 @@ internal class ModelPackageInspector(
         modelIdHint: String,
         packageRoot: File,
         files: List<File>,
+        filesByName: Map<String, List<File>>,
         relativeFiles: List<String>,
         issues: MutableList<ModelPackageIssue>,
     ): ModelPackageInspection? {
@@ -603,7 +603,10 @@ internal class ModelPackageInspector(
         val onnxArtifacts = files.filter { it.extension.equals("onnx", ignoreCase = true) }
         val artifact = when {
             onnxArtifacts.size == 1 -> onnxArtifacts.single()
-            else -> onnxArtifacts.firstOrNull { it.name.equals("model.onnx", ignoreCase = true) }
+            else -> onnxArtifacts.firstOrNull {
+                it.name.equals("model.onnx", ignoreCase = true) ||
+                    it.name.equals("model_int8.onnx", ignoreCase = true)
+            }
         }
         if (artifact == null) {
             issues += ModelPackageIssue(
@@ -635,23 +638,22 @@ internal class ModelPackageInspector(
         val graphReady =
             inputIds?.dataType == "int64" && inputIds.shape.size == 2 &&
                 attentionMask?.dataType == "int64" && attentionMask.shape.size == 2 &&
-                logits?.dataType == "float32" && logits.shape.isNotEmpty() && logits.shape.lastOrNull() == 1
+                logits?.dataType == "float32" && logits.shape.size == 2 && logits.shape.lastOrNull() == 1
 
         if (!graphReady) {
             issues += ModelPackageIssue(
                 "bge_reranking_graph_incompatible",
-                "BGE reranker graph does not expose the expected int64 input_ids/attention_mask and scalar float logits contract.",
+                "BGE reranker requires int64 rank-2 input_ids/attention_mask and float logits [B,1].",
             )
         }
 
-        issues += ModelPackageIssue(
-            "bge_tokenizer_deferred",
-            "BGE tokenizer loading is deferred until execution readiness is implemented; the package remains importable.",
-        )
-        issues += ModelPackageIssue(
-            "execution_metadata_missing",
-            "BGE reranker package is imported, but execution metadata is intentionally deferred.",
-        )
+        val tokenizerFile = filesByName["tokenizer.json"]?.singleOrNull()
+        if (tokenizerFile == null) {
+            issues += ModelPackageIssue(
+                "bge_reranking_tokenizer_missing",
+                "BGE reranker requires the distributed tokenizer.json.",
+            )
+        }
 
         val metadata = linkedMapOf<String, Any>(
             "model_id" to modelIdHint,
@@ -663,15 +665,73 @@ internal class ModelPackageInspector(
                 "files" to relativeFiles,
                 "capabilities" to listOf("text_reranking"),
             ),
-            "execution_readiness" to mapOf(
+        )
+
+        if (graphReady && tokenizerFile != null) {
+            metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
+                "text_reranking" to mapOf(
+                    "inputs" to listOf(
+                        mapOf(
+                            "name" to inputIds!!.name,
+                            "source" to "text_ids",
+                            "data_type" to "int64",
+                            "layout" to "sequence",
+                            "shape" to inputIds.shape,
+                            "payload_key" to "query",
+                        ),
+                        mapOf(
+                            "name" to attentionMask!!.name,
+                            "source" to "attention_mask",
+                            "data_type" to "int64",
+                            "layout" to "sequence",
+                            "shape" to attentionMask.shape,
+                        ),
+                    ),
+                    "outputs" to listOf(
+                        mapOf(
+                            "name" to logits!!.name,
+                            "index" to logits.index,
+                            "data_type" to "float32",
+                            "shape" to logits.shape,
+                        ),
+                    ),
+                    "output_decoder" to mapOf(
+                        "type" to "reranking",
+                        "output_name" to logits.name,
+                        "hidden_dimension" to 1,
+                    ),
+                    "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0f),
+                    "tokenizer" to mapOf(
+                        "type" to "unigram",
+                        "source_file" to tokenizerFile.absolutePath,
+                        "source_format" to "hf_unigram_json",
+                        "unknown_token" to "<unk>",
+                        "start_token" to "<s>",
+                        "end_token" to "</s>",
+                        "pad_token" to "<pad>",
+                        "max_length" to 8192,
+                        "model_type" to "Unigram",
+                        "normalizer" to "precompiled",
+                        "pre_tokenizer" to "metaspace",
+                        "pair_template" to "xlm_roberta",
+                    ),
+                    "image_preprocessing" to mapOf("enabled" to false),
+                ),
+            )
+        } else {
+            metadata["execution_readiness"] = mapOf(
                 "ready" to false,
                 "stage" to "imported_not_executable",
                 "blockers" to buildList {
-                    add("bge_tokenizer_deferred")
                     if (!graphReady) add("bge_reranking_graph_incompatible")
+                    if (tokenizerFile == null) add("bge_reranking_tokenizer_missing")
                 },
-            ),
-        )
+            )
+            issues += ModelPackageIssue(
+                "execution_metadata_missing",
+                "BGE reranker package is importable but execution metadata is incomplete.",
+            )
+        }
 
         return ModelPackageInspection(
             packageRoot = packageRoot,
