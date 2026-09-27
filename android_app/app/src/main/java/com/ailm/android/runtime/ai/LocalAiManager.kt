@@ -125,29 +125,10 @@ class LocalAiManager(
             bootstrapNativeBackends()
             providerPackageManager.discover()
             bootstrapAssetCapabilities()
-            migrateLegacyActiveModelSelections()
+            settingsManager.getSettings()
             executionScheduler.start()
             initialized = true
         }
-    }
-
-    private fun migrateLegacyActiveModelSelections() {
-        val settings = settingsManager.getSettings()
-        if (settings.extra[ACTIVE_MODEL_STATE_VERSION_KEY]?.toString() == ACTIVE_MODEL_STATE_VERSION) {
-            return
-        }
-
-        val reset = linkedMapOf<String, Any>()
-        settings.extra.keys
-            .filter { key ->
-                key == "active_model_id" ||
-                    key == "active_model_version" ||
-                    key.startsWith("active_model_id.") ||
-                    key.startsWith("active_model_version.")
-            }
-            .forEach { key -> reset[key] = "" }
-        reset[ACTIVE_MODEL_STATE_VERSION_KEY] = ACTIVE_MODEL_STATE_VERSION
-        settingsManager.updateSettings(reset)
     }
 
     fun executionChain(): Map<String, Any> {
@@ -2013,8 +1994,6 @@ class LocalAiManager(
     }
 
     companion object {
-        private const val ACTIVE_MODEL_STATE_VERSION_KEY = "active_model_state_version"
-        private const val ACTIVE_MODEL_STATE_VERSION = "2"
         private const val TAG = "AilmLocalAiManager"
         private const val DEFAULT_SEMANTIC_TIMEOUT_MS = 7_500L
         private const val DEFAULT_PIPELINE_STAGE_TIMEOUT_MS = 12_000L
