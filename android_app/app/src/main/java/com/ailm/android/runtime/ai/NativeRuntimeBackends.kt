@@ -9,6 +9,8 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
 import org.tensorflow.lite.Interpreter
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -454,11 +456,22 @@ internal class LlamaCppBackend(
             "captioning" ->
                 "Describe the image accurately in one concise sentence. Mention the main subject, appearance, clothing, pose, and setting when visible. Return only the caption."
             "series_recognition" ->
-                "Identify the most likely franchise, anime, game, manga, or series represented by this image. Return only one canonical series title. If you cannot identify it reliably, return UNKNOWN." + context
-            "character_recognition" ->
-                "Identify the most likely named fictional character represented by this image. Return only one canonical character name. If you cannot identify the character reliably, return UNKNOWN." + context
+                "Series identity is not an autonomous source of truth. This diagnostic task may suggest a title, but automation derives series from resolved Character Knowledge. Return only one title or UNKNOWN." + context
+            "character_recognition" -> {
+                val taxonomy = payload["character_taxonomy_context"]?.toString()?.trim().orEmpty()
+                """
+                Analyze every visually distinct character/person in the image. Do NOT guess character names or series.
+                Resolve only directly visible physical attributes to the supplied canonical taxonomy IDs.
+                Return strict JSON only in this form:
+                {"subjects":[{"subject_index":0,"prominence":0.0,"attributes":[{"id":"HC001","confidence":0.0}]}]}
+                prominence is 0..1 and indicates visual prominence. confidence is 0..1.
+                Omit any attribute that is hidden, ambiguous, perspective-dependent, or not safely distinguishable.
+                Use only IDs listed below. Never invent an ID, shade, body measurement, character, or series.
+                Taxonomy:
+                """.trimIndent() + "\n" + taxonomy + context
+            }
             "tag_prediction" ->
-                "Return a concise comma-separated list of visually observable tags for this image. Include useful appearance, outfit, pose, expression, environment, framing, and action tags. Do not explain." + context
+                "Return a concise comma-separated list of visually observable illustration tags only. Include current outfit, visible weapon, pose, expression, eye/mouth state, environment, framing, action and props when visible. Do not infer permanent character identity and do not explain." + context
             "normalization" ->
                 "Normalize the supplied context into concise canonical wording. Preserve meaning and do not invent facts. Return only the normalized text." + context
             else -> payload["text"]?.toString()?.trim().orEmpty().ifBlank { userPrompt }
@@ -469,14 +482,16 @@ internal class LlamaCppBackend(
         val clean = generated.trim()
         return when (taskType) {
             "captioning" -> mapOf("caption" to clean)
-            "series_recognition", "character_recognition" -> {
+            "character_recognition" -> parseCharacterObservationJson(clean)
+            "series_recognition" -> {
                 val top = clean.lineSequence().firstOrNull()?.trim()?.trim('"', '\'', '.', ',').orEmpty()
                     .ifBlank { "UNKNOWN" }
-                val confidence = if (top.equals("UNKNOWN", ignoreCase = true)) 0.0 else 0.80
+                val confidence = if (top.equals("UNKNOWN", ignoreCase = true)) 0.0 else 0.50
                 mapOf(
                     "top_match" to top,
                     "confidence" to confidence,
                     "candidates" to listOf(mapOf("name" to top, "confidence" to confidence)),
+                    "diagnostic_only" to true,
                 )
             }
             "tag_prediction" -> {
@@ -492,6 +507,58 @@ internal class LlamaCppBackend(
             "normalization" -> mapOf("text" to clean)
             "prompt_generation" -> mapOf("prompt" to clean)
             else -> mapOf("text" to clean)
+        }
+    }
+
+    private fun parseCharacterObservationJson(generated: String): Map<String, Any> {
+        val candidate = generated
+            .substringAfter('`', generated)
+            .replace("json\n", "", ignoreCase = true)
+            .trim()
+            .let { text ->
+                val start = text.indexOf('{')
+                val end = text.lastIndexOf('}')
+                if (start >= 0 && end > start) text.substring(start, end + 1) else text
+            }
+        return runCatching {
+            val root = JSONObject(candidate)
+            val subjectsArray = root.optJSONArray("subjects") ?: JSONArray()
+            val subjects = buildList {
+                for (index in 0 until subjectsArray.length()) {
+                    val subject = subjectsArray.optJSONObject(index) ?: continue
+                    val attributesArray = subject.optJSONArray("attributes") ?: JSONArray()
+                    val attributes = buildList {
+                        for (attrIndex in 0 until attributesArray.length()) {
+                            val attribute = attributesArray.optJSONObject(attrIndex) ?: continue
+                            val id = attribute.optString("id").trim()
+                            if (id.isBlank()) continue
+                            add(
+                                mapOf(
+                                    "id" to id,
+                                    "confidence" to attribute.optDouble("confidence", 0.70).coerceIn(0.0, 1.0),
+                                ),
+                            )
+                        }
+                    }
+                    add(
+                        mapOf(
+                            "subject_index" to subject.optInt("subject_index", index),
+                            "prominence" to subject.optDouble("prominence", 1.0).coerceIn(0.0, 1.0),
+                            "attributes" to attributes,
+                        ),
+                    )
+                }
+            }
+            mapOf(
+                "subjects" to subjects,
+                "raw_observation_json" to candidate,
+            )
+        }.getOrElse {
+            mapOf(
+                "subjects" to emptyList<Map<String, Any>>(),
+                "raw_observation_json" to generated.trim(),
+                "parse_error" to (it.message ?: it.javaClass.simpleName),
+            )
         }
     }
 
