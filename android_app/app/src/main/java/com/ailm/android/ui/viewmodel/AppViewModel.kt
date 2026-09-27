@@ -810,11 +810,15 @@ class AppViewModel : ViewModel() {
 
         runIoAction {
             val sourcePath = copyDocumentToAppStorage(context, uri, "models")
-            importLocalAiModelInternal(
-                form = form + mapOf("source_uri" to uri.toString()),
-                modelId = normalizedModelId,
-                sourcePath = sourcePath,
-            )
+            try {
+                importLocalAiModelInternal(
+                    form = form + mapOf("source_uri" to uri.toString()),
+                    modelId = normalizedModelId,
+                    sourcePath = sourcePath,
+                )
+            } finally {
+                File(sourcePath).deleteRecursively()
+            }
         }
     }
 
@@ -827,11 +831,15 @@ class AppViewModel : ViewModel() {
 
         runIoAction {
             val sourcePath = copyDocumentTreeToAppStorage(context, uri, "models")
-            importLocalAiModelInternal(
-                form = form + mapOf("source_uri" to uri.toString()),
-                modelId = normalizedModelId,
-                sourcePath = sourcePath,
-            )
+            try {
+                importLocalAiModelInternal(
+                    form = form + mapOf("source_uri" to uri.toString()),
+                    modelId = normalizedModelId,
+                    sourcePath = sourcePath,
+                )
+            } finally {
+                File(sourcePath).deleteRecursively()
+            }
         }
     }
 
@@ -911,33 +919,29 @@ class AppViewModel : ViewModel() {
                     },
                 )
             }
-            refreshLocalAiStateInternal()
+            // Keep successful activation session-scoped. A full settings refresh would
+            // intentionally discard it because persistent active-model state is disabled until
+            // runtime initialization is proven crash-safe.
         }
     }
 
     fun clearActiveAiModel(taskType: String = "") {
         val normalizedTaskType = normalizeTaskType(taskType)
-        val keySuffix = if (normalizedTaskType.isBlank()) "" else ".${normalizedTaskType}"
-        val payload = mapOf<String, Any>(
-            "active_model_id$keySuffix" to "",
-            "active_model_version$keySuffix" to "",
+        val suffix = if (normalizedTaskType.isBlank()) "" else ".$normalizedTaskType"
+        val keysToClear = setOf(
+            "active_model_id$suffix",
+            "active_model_version$suffix",
         )
-
-        runIoAction {
-            val updated = StandaloneRuntime.updateAiSettings(payload)
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    aiSettings = updated,
-                    lastActionMessage = if (normalizedTaskType.isBlank()) {
-                        "Cleared active model selection."
-                    } else {
-                        "Cleared active model selection for $normalizedTaskType."
-                    },
-                    errorMessage = null,
-                )
-            }
-            refreshLocalAiStateInternal()
-        }
+        val updated = _uiState.value.aiSettings.filterKeys { it !in keysToClear }
+        _uiState.value = _uiState.value.copy(
+            aiSettings = updated,
+            lastActionMessage = if (normalizedTaskType.isBlank()) {
+                "Cleared session model selection."
+            } else {
+                "Cleared session model selection for $normalizedTaskType."
+            },
+            errorMessage = null,
+        )
     }
 
     fun importFusionDatabasePayload(payload: String, format: String = "json", replaceExisting: Boolean = false) {
@@ -2045,7 +2049,22 @@ class AppViewModel : ViewModel() {
             executionChain = runCatching { StandaloneRuntime.localAiExecutionChain() }.getOrElse { fallback.aiExecutionChain },
             hardwareProfile = runCatching { StandaloneRuntime.latestAiHardwareProfile() }.getOrElse { fallback.aiHardwareProfile },
             backends = runCatching { StandaloneRuntime.listAiBackends() }.getOrElse { fallback.aiBackends },
-            settings = runCatching { StandaloneRuntime.aiSettings() }.getOrElse { fallback.aiSettings },
+            settings = runCatching {
+                val persisted = StandaloneRuntime.aiSettings()
+                    .filterKeys { key ->
+                        key != "active_model_id" &&
+                            key != "active_model_version" &&
+                            !key.startsWith("active_model_id.") &&
+                            !key.startsWith("active_model_version.")
+                    }
+                val sessionActive = fallback.aiSettings.filterKeys { key ->
+                    key == "active_model_id" ||
+                        key == "active_model_version" ||
+                        key.startsWith("active_model_id.") ||
+                        key.startsWith("active_model_version.")
+                }
+                persisted + sessionActive
+            }.getOrElse { fallback.aiSettings },
             availableModels = runCatching { StandaloneRuntime.listAvailableAiModels() }.getOrElse { fallback.aiAvailableModels },
             installedModels = runCatching { StandaloneRuntime.listInstalledAiModels() }.getOrElse { fallback.aiInstalledModels },
             tasks = runCatching { StandaloneRuntime.listAiTasks(limit = 250) }.getOrElse { fallback.aiTasks },
