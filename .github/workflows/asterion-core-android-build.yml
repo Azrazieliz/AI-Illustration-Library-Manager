@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - standalone-android
+      - asterion-core-freeze-validation
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -20,18 +21,58 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Run inspector regression tests and build debug APK
+      - name: Compile Android unit tests
         working-directory: android_app
         run: |
           chmod +x gradlew
-          ./gradlew :app:compileDebugUnitTestKotlin
+          ./gradlew :app:compileDebugUnitTestKotlin --stacktrace
+
+      - name: Run focused multi-artifact regression
+        working-directory: android_app
+        run: |
+          ./gradlew :app:testDebugUnitTest \
+            --tests "com.ailm.android.runtime.ai.ModelPackageInspectorMultiArtifactRegressionTest" \
+            --stacktrace
+
+      - name: Run ModelPackageInspector regressions
+        working-directory: android_app
+        run: |
           ./gradlew :app:testDebugUnitTest \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorTest" \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorRegressionTest" \
             --stacktrace
+
+      - name: Run relevant model runtime contract tests
+        working-directory: android_app
+        run: |
+          ./gradlew :app:testDebugUnitTest \
+            --tests "com.ailm.android.runtime.ai.BuffaloLExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.Florence2ExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.AestheticScoringExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.PaddleOcrExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.QwenLlamaCppContractTest" \
+            --tests "com.ailm.android.runtime.ai.NomicTextExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.NomicVisionExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.BgeRerankerExecutionContractTest" \
+            --tests "com.ailm.android.runtime.ai.NsfwOnnxContractTest" \
+            --stacktrace
+
+      - name: Run all Android unit tests
+        working-directory: android_app
+        run: |
+          ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        working-directory: android_app
+        run: |
           ./gradlew :app:assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Compile release APK
+        working-directory: android_app
+        run: |
+          ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: AsterionCore-debug-apk
