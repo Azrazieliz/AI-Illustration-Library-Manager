@@ -1,0 +1,580 @@
+package com.ailm.android.runtime
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Locale
+
+/**
+ * Immutable runtime copy of externally authored Asterion Knowledge.
+ *
+ * Normal automation only reads this database. The only mutation entry points
+ * replace whole externally supplied Knowledge releases. Fusion learning and
+ * review corrections never write here.
+ */
+internal class KnowledgeDatabase(
+    context: Context,
+) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
+
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.setForeignKeyConstraintsEnabled(true)
+        db.execSQL("PRAGMA foreign_keys = ON")
+    }
+
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_releases (
+                release_kind TEXT PRIMARY KEY,
+                source_name TEXT NOT NULL,
+                imported_at_ms INTEGER NOT NULL,
+                entry_count INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_series (
+                series_code TEXT PRIMARY KEY,
+                canonical_name TEXT NOT NULL,
+                franchise TEXT NOT NULL DEFAULT '',
+                aliases_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_series_name ON knowledge_series(canonical_name COLLATE NOCASE)")
+
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_tags (
+                tag_id TEXT PRIMARY KEY,
+                canonical_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                parent_tag_id TEXT,
+                aliases_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_tags_name ON knowledge_tags(canonical_name COLLATE NOCASE)")
+        db.execSQL("CREATE INDEX idx_knowledge_tags_category ON knowledge_tags(category)")
+        db.execSQL("CREATE INDEX idx_knowledge_tags_parent ON knowledge_tags(parent_tag_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_characters (
+                character_id TEXT PRIMARY KEY,
+                parent_character_id TEXT,
+                identity_group_id TEXT NOT NULL DEFAULT '',
+                entry_type TEXT NOT NULL DEFAULT 'identity',
+                canonical_name TEXT NOT NULL,
+                primary_series_code TEXT NOT NULL,
+                aliases_json TEXT NOT NULL DEFAULT '[]',
+                attributes_json TEXT NOT NULL DEFAULT '[]',
+                canonical_weapons_json TEXT NOT NULL DEFAULT '[]',
+                canonical_outfits_json TEXT NOT NULL DEFAULT '[]',
+                sheet_asset_id TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(parent_character_id) REFERENCES knowledge_characters(character_id)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT,
+                FOREIGN KEY(primary_series_code) REFERENCES knowledge_series(series_code)
+                    ON UPDATE RESTRICT ON DELETE RESTRICT
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_characters_name ON knowledge_characters(canonical_name COLLATE NOCASE)")
+        db.execSQL("CREATE INDEX idx_knowledge_characters_series ON knowledge_characters(primary_series_code)")
+        db.execSQL("CREATE INDEX idx_knowledge_characters_parent ON knowledge_characters(parent_character_id)")
+        db.execSQL("CREATE INDEX idx_knowledge_characters_group ON knowledge_characters(identity_group_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_character_features (
+                character_id TEXT NOT NULL,
+                feature_id TEXT NOT NULL,
+                feature_kind TEXT NOT NULL,
+                canonical_weight REAL NOT NULL DEFAULT 1.0,
+                PRIMARY KEY(character_id, feature_id, feature_kind),
+                FOREIGN KEY(character_id) REFERENCES knowledge_characters(character_id)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_character_features_feature ON knowledge_character_features(feature_id)")
+        db.execSQL("CREATE INDEX idx_knowledge_character_features_character ON knowledge_character_features(character_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_character_sheets (
+                sheet_asset_id TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL UNIQUE,
+                archive_name TEXT NOT NULL DEFAULT '',
+                asset_path TEXT NOT NULL,
+                sha256 TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(character_id) REFERENCES knowledge_characters(character_id)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion == newVersion) return
+        listOf(
+            "knowledge_character_sheets",
+            "knowledge_character_features",
+            "knowledge_characters",
+            "knowledge_tags",
+            "knowledge_series",
+            "knowledge_releases",
+        ).forEach { table -> db.execSQL("DROP TABLE IF EXISTS $table") }
+        onCreate(db)
+    }
+
+    fun replaceReferenceKnowledge(bundle: ReferenceKnowledgeBundle, sourceName: String) {
+        val db = writableDatabase
+        val now = System.currentTimeMillis()
+        db.beginTransaction()
+        try {
+            // A new external taxonomy release invalidates character knowledge.
+            // This prevents an old Character release from silently pointing at
+            // changed IDs after the taxonomy is replaced.
+            db.delete("knowledge_character_sheets", null, null)
+            db.delete("knowledge_character_features", null, null)
+            db.delete("knowledge_characters", null, null)
+            db.delete("knowledge_tags", null, null)
+            db.delete("knowledge_series", null, null)
+
+            bundle.series.forEach { entry ->
+                db.insertOrThrow(
+                    "knowledge_series",
+                    null,
+                    ContentValues().apply {
+                        put("series_code", entry.code)
+                        put("canonical_name", entry.name)
+                        put("franchise", entry.franchise)
+                        put("aliases_json", JSONArray(entry.aliases).toString())
+                    },
+                )
+            }
+            bundle.tags.forEach { entry ->
+                db.insertOrThrow(
+                    "knowledge_tags",
+                    null,
+                    ContentValues().apply {
+                        put("tag_id", entry.id)
+                        put("canonical_name", entry.name)
+                        put("category", entry.category)
+                        put("parent_tag_id", entry.parentId.takeIf(String::isNotBlank))
+                        put("aliases_json", JSONArray(entry.aliases).toString())
+                    },
+                )
+            }
+            db.delete("knowledge_releases", "release_kind = ?", arrayOf("characters"))
+            upsertRelease(db, "taxonomy", sourceName, now, bundle.series.size + bundle.tags.size)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun replaceCharacterKnowledge(entries: List<KnowledgeCharacterEntry>, sourceName: String) {
+        val issues = validateCharacterRelease(entries)
+        require(issues.isEmpty()) { issues.joinToString("; ") }
+
+        val db = writableDatabase
+        val now = System.currentTimeMillis()
+        db.beginTransaction()
+        try {
+            db.delete("knowledge_character_sheets", null, null)
+            db.delete("knowledge_character_features", null, null)
+            db.delete("knowledge_characters", null, null)
+
+            val ordered = entries.sortedWith(
+                compareBy<KnowledgeCharacterEntry> { it.parentCharacterId.isNotBlank() }
+                    .thenBy { it.characterId },
+            )
+            ordered.forEach { entry ->
+                db.insertOrThrow(
+                    "knowledge_characters",
+                    null,
+                    ContentValues().apply {
+                        put("character_id", entry.characterId)
+                        put("parent_character_id", entry.parentCharacterId.takeIf(String::isNotBlank))
+                        put("identity_group_id", entry.identityGroupId)
+                        put("entry_type", entry.entryType)
+                        put("canonical_name", entry.canonicalName)
+                        put("primary_series_code", entry.primarySeriesCode)
+                        put("aliases_json", JSONArray(entry.aliases).toString())
+                        put("attributes_json", JSONArray(entry.attributeIds).toString())
+                        put("canonical_weapons_json", JSONArray(entry.weaponIds).toString())
+                        put("canonical_outfits_json", JSONArray(entry.outfitIds).toString())
+                        put("sheet_asset_id", entry.sheetAssetId)
+                        put("metadata_json", JSONObject(entry.metadata).toString())
+                    },
+                )
+                entry.attributeIds.distinct().forEach { id ->
+                    insertCharacterFeature(db, entry.characterId, id, "attribute", featureWeight(id))
+                }
+                entry.weaponIds.distinct().forEach { id ->
+                    insertCharacterFeature(db, entry.characterId, id, "weapon", 1.55)
+                }
+                entry.outfitIds.distinct().forEach { id ->
+                    insertCharacterFeature(db, entry.characterId, id, "outfit", 1.20)
+                }
+            }
+            upsertRelease(db, "characters", sourceName, now, entries.size)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun attachCharacterSheet(
+        characterId: String,
+        sheetAssetId: String,
+        archiveName: String,
+        assetPath: String,
+        sha256: String,
+        metadata: Map<String, Any> = emptyMap(),
+    ) {
+        require(getCharacter(characterId) != null) { "Unknown character_id '" + characterId + "'." }
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.insertWithOnConflict(
+                "knowledge_character_sheets",
+                null,
+                ContentValues().apply {
+                    put("sheet_asset_id", sheetAssetId)
+                    put("character_id", characterId)
+                    put("archive_name", archiveName)
+                    put("asset_path", assetPath)
+                    put("sha256", sha256)
+                    put("metadata_json", JSONObject(metadata).toString())
+                },
+                SQLiteDatabase.CONFLICT_REPLACE,
+            )
+            db.execSQL(
+                "UPDATE knowledge_characters SET sheet_asset_id = ? WHERE character_id = ?",
+                arrayOf(sheetAssetId, characterId),
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun hasCharacters(): Boolean = readableDatabase.rawQuery(
+        "SELECT EXISTS(SELECT 1 FROM knowledge_characters LIMIT 1)",
+        emptyArray(),
+    ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+
+    fun getCharacter(characterId: String): KnowledgeCharacterEntry? = readableDatabase.rawQuery(
+        """
+        SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
+               canonical_name, primary_series_code, aliases_json, attributes_json,
+               canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
+        FROM knowledge_characters
+        WHERE character_id = ?
+        LIMIT 1
+        """.trimIndent(),
+        arrayOf(characterId),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.toKnowledgeCharacter() else null }
+
+    fun resolveCharacter(value: String): KnowledgeCharacterEntry? {
+        val needle = value.trim()
+        if (needle.isBlank()) return null
+        getCharacter(needle)?.let { return it }
+        readableDatabase.rawQuery(
+            """
+            SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
+                   canonical_name, primary_series_code, aliases_json, attributes_json,
+                   canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
+            FROM knowledge_characters
+            WHERE LOWER(canonical_name) = LOWER(?)
+            """.trimIndent(),
+            arrayOf(needle),
+        ).use { cursor -> if (cursor.moveToFirst()) return cursor.toKnowledgeCharacter() }
+
+        readableDatabase.rawQuery(
+            """
+            SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
+                   canonical_name, primary_series_code, aliases_json, attributes_json,
+                   canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
+            FROM knowledge_characters
+            """.trimIndent(),
+            emptyArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (jsonStringList(cursor.getString(6)).any { it.equals(needle, ignoreCase = true) }) {
+                    return cursor.toKnowledgeCharacter()
+                }
+            }
+        }
+        return null
+    }
+
+    fun seriesByCode(seriesCode: String): ReferenceSeriesEntry? = readableDatabase.rawQuery(
+        "SELECT series_code, canonical_name, franchise, aliases_json FROM knowledge_series WHERE series_code = ? LIMIT 1",
+        arrayOf(seriesCode),
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else ReferenceSeriesEntry(
+            cursor.getString(0), cursor.getString(1), cursor.getString(2), jsonStringList(cursor.getString(3)),
+        )
+    }
+
+    fun resolveSeries(value: String): ReferenceSeriesEntry? {
+        val needle = value.trim()
+        if (needle.isBlank()) return null
+        readableDatabase.rawQuery(
+            "SELECT series_code, canonical_name, franchise, aliases_json FROM knowledge_series WHERE series_code = ? OR LOWER(canonical_name) = LOWER(?)",
+            arrayOf(needle, needle),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                return ReferenceSeriesEntry(cursor.getString(0), cursor.getString(1), cursor.getString(2), jsonStringList(cursor.getString(3)))
+            }
+        }
+        readableDatabase.rawQuery(
+            "SELECT series_code, canonical_name, franchise, aliases_json FROM knowledge_series",
+            emptyArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val aliases = jsonStringList(cursor.getString(3))
+                if (aliases.any { it.equals(needle, ignoreCase = true) }) {
+                    return ReferenceSeriesEntry(cursor.getString(0), cursor.getString(1), cursor.getString(2), aliases)
+                }
+            }
+        }
+        return null
+    }
+
+    fun resolveTag(value: String): ReferenceTagEntry? {
+        val needle = value.trim()
+        if (needle.isBlank()) return null
+        readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags WHERE tag_id = ? OR LOWER(canonical_name) = LOWER(?)",
+            arrayOf(needle, needle),
+        ).use { cursor -> if (cursor.moveToFirst()) return cursor.toReferenceTag() }
+
+        readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags",
+            emptyArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                if (jsonStringList(cursor.getString(4)).any { it.equals(needle, ignoreCase = true) }) {
+                    return cursor.toReferenceTag()
+                }
+            }
+        }
+        return null
+    }
+
+    fun taxonomyPromptContext(): String {
+        val prefixes = listOf("HC", "HL", "HS", "EC", "ES", "EP", "ET", "SC", "BH", "BB", "BS", "BT", "SX", "AG", "SP", "SA")
+        val grouped = linkedMapOf<String, MutableList<String>>()
+        readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category FROM knowledge_tags ORDER BY category, tag_id",
+            emptyArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                if (prefixes.none { id.startsWith(it, ignoreCase = true) }) continue
+                val category = cursor.getString(2).ifBlank { id.takeWhile(Char::isLetter) }
+                grouped.getOrPut(category) { mutableListOf() } += id + "=" + cursor.getString(1)
+            }
+        }
+        return grouped.entries.joinToString("\n") { (category, entries) ->
+            category + ":[" + entries.joinToString("|") + "]"
+        }
+    }
+
+    fun rankByFeatures(observed: Map<String, Double>, limit: Int = 80): List<KnowledgeCandidate> {
+        if (observed.isEmpty()) return emptyList()
+        val ids = observed.keys.map(String::trim).filter(String::isNotBlank).distinct()
+        if (ids.isEmpty()) return emptyList()
+        val placeholders = ids.joinToString(",") { "?" }
+        val sql = """
+            SELECT f.character_id, SUM(f.canonical_weight) AS matched_weight
+            FROM knowledge_character_features f
+            WHERE f.feature_id IN ($placeholders)
+            GROUP BY f.character_id
+            ORDER BY matched_weight DESC
+            LIMIT ?
+        """.trimIndent()
+        val args = (ids + limit.toString()).toTypedArray()
+        val raw = mutableListOf<String>()
+        readableDatabase.rawQuery(sql, args).use { cursor ->
+            while (cursor.moveToNext()) raw += cursor.getString(0)
+        }
+        return raw.mapNotNull { characterId ->
+            val profile = getCharacter(characterId) ?: return@mapNotNull null
+            val featureIds = (profile.attributeIds + profile.weaponIds + profile.outfitIds).toSet()
+            val matched = observed.entries.sumOf { (id, confidence) ->
+                if (id in featureIds) featureWeight(id) * confidence.coerceIn(0.0, 1.0) else 0.0
+            }
+            val available = observed.entries.sumOf { (id, confidence) ->
+                featureWeight(id) * confidence.coerceIn(0.0, 1.0)
+            }.coerceAtLeast(0.0001)
+            KnowledgeCandidate(profile, (matched / available).coerceIn(0.0, 1.0))
+        }.sortedByDescending(KnowledgeCandidate::attributeScore)
+    }
+
+    fun validateCharacterRelease(entries: List<KnowledgeCharacterEntry>): List<String> {
+        val issues = mutableListOf<String>()
+        val ids = linkedSetOf<String>()
+        entries.forEach { entry ->
+            if (!entry.characterId.matches(Regex("^CH\\d{6}(?:-\\d+)?$"))) {
+                issues += "Invalid character_id '" + entry.characterId + "'. Expected CHxxxxxx or CHxxxxxx-n."
+            }
+            if (!ids.add(entry.characterId.lowercase(Locale.US))) {
+                issues += "Duplicate character_id '" + entry.characterId + "'."
+            }
+            if (entry.canonicalName.isBlank()) issues += entry.characterId + ": canonical_name is required."
+            if (seriesByCode(entry.primarySeriesCode) == null) {
+                issues += entry.characterId + ": unknown series '" + entry.primarySeriesCode + "'."
+            }
+            if (entry.parentCharacterId.isNotBlank() && entry.entryType != "transformation") {
+                issues += entry.characterId + ": parent_character_id requires entry_type=transformation."
+            }
+            (entry.attributeIds + entry.weaponIds + entry.outfitIds).distinct().forEach { featureId ->
+                if (resolveTag(featureId) == null) {
+                    issues += entry.characterId + ": unknown Knowledge feature '" + featureId + "'."
+                }
+            }
+        }
+
+        val entryIds = entries.map { it.characterId }.toSet()
+        entries.filter { it.parentCharacterId.isNotBlank() }.forEach { entry ->
+            if (entry.parentCharacterId !in entryIds) {
+                issues += entry.characterId + ": missing transformation parent '" + entry.parentCharacterId + "'."
+            }
+        }
+
+        val aliasOwners = linkedMapOf<String, String>()
+        entries.forEach { entry ->
+            (entry.aliases + entry.canonicalName).forEach { raw ->
+                val alias = raw.trim().lowercase(Locale.US)
+                if (alias.isBlank()) return@forEach
+                val previous = aliasOwners.putIfAbsent(alias, entry.characterId)
+                if (previous != null && previous != entry.characterId) {
+                    issues += "Alias collision '" + raw + "' between " + previous + " and " + entry.characterId + "."
+                }
+            }
+        }
+        return issues.distinct()
+    }
+
+    private fun insertCharacterFeature(
+        db: SQLiteDatabase,
+        characterId: String,
+        featureId: String,
+        kind: String,
+        weight: Double,
+    ) {
+        db.insertOrThrow(
+            "knowledge_character_features",
+            null,
+            ContentValues().apply {
+                put("character_id", characterId)
+                put("feature_id", featureId)
+                put("feature_kind", kind)
+                put("canonical_weight", weight)
+            },
+        )
+    }
+
+    private fun upsertRelease(db: SQLiteDatabase, kind: String, sourceName: String, now: Long, count: Int) {
+        db.insertWithOnConflict(
+            "knowledge_releases",
+            null,
+            ContentValues().apply {
+                put("release_kind", kind)
+                put("source_name", sourceName)
+                put("imported_at_ms", now)
+                put("entry_count", count)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    private fun android.database.Cursor.toKnowledgeCharacter(): KnowledgeCharacterEntry = KnowledgeCharacterEntry(
+        characterId = getString(0),
+        parentCharacterId = getString(1).orEmpty(),
+        identityGroupId = getString(2).orEmpty(),
+        entryType = getString(3).orEmpty().ifBlank { "identity" },
+        canonicalName = getString(4),
+        primarySeriesCode = getString(5),
+        aliases = jsonStringList(getString(6)),
+        attributeIds = jsonStringList(getString(7)),
+        weaponIds = jsonStringList(getString(8)),
+        outfitIds = jsonStringList(getString(9)),
+        sheetAssetId = getString(10).orEmpty(),
+        metadata = jsonObjectMap(getString(11)),
+    )
+
+    private fun android.database.Cursor.toReferenceTag(): ReferenceTagEntry = ReferenceTagEntry(
+        id = getString(0),
+        name = getString(1),
+        category = getString(2),
+        parentId = getString(3).orEmpty(),
+        aliases = jsonStringList(getString(4)),
+    )
+
+    private fun jsonStringList(raw: String?): List<String> = runCatching {
+        val array = JSONArray(raw.orEmpty())
+        (0 until array.length()).mapNotNull { array.optString(it).trim().takeIf(String::isNotBlank) }
+    }.getOrDefault(emptyList())
+
+    private fun jsonObjectMap(raw: String?): Map<String, Any> = runCatching {
+        val obj = JSONObject(raw.orEmpty())
+        buildMap {
+            obj.keys().forEach { key -> obj.opt(key)?.let { put(key, it) } }
+        }
+    }.getOrDefault(emptyMap())
+
+    companion object {
+        private const val DB_NAME = "asterion_knowledge.sqlite"
+        private const val DB_VERSION = 1
+
+        fun featureWeight(id: String): Double = when {
+            id.startsWith("WP", ignoreCase = true) -> 1.55
+            id.startsWith("SP", ignoreCase = true) || id.startsWith("SA", ignoreCase = true) -> 1.45
+            id.startsWith("HS", ignoreCase = true) -> 1.35
+            id.startsWith("HC", ignoreCase = true) -> 1.30
+            id.startsWith("EC", ignoreCase = true) -> 1.25
+            id.startsWith("HL", ignoreCase = true) -> 1.15
+            id.startsWith("OF", ignoreCase = true) -> 1.15
+            id.startsWith("SC", ignoreCase = true) -> 0.90
+            id.startsWith("BT", ignoreCase = true) || id.startsWith("BB", ignoreCase = true) -> 0.85
+            id.startsWith("BS", ignoreCase = true) -> 0.60
+            id.startsWith("BH", ignoreCase = true) -> 0.50
+            id.startsWith("AG", ignoreCase = true) -> 0.50
+            else -> 0.75
+        }
+    }
+}
+
+internal data class KnowledgeCharacterEntry(
+    val characterId: String,
+    val parentCharacterId: String = "",
+    val identityGroupId: String = "",
+    val entryType: String = "identity",
+    val canonicalName: String,
+    val primarySeriesCode: String,
+    val aliases: List<String> = emptyList(),
+    val attributeIds: List<String> = emptyList(),
+    val weaponIds: List<String> = emptyList(),
+    val outfitIds: List<String> = emptyList(),
+    val sheetAssetId: String = "",
+    val metadata: Map<String, Any> = emptyMap(),
+)
+
+internal data class KnowledgeCandidate(
+    val character: KnowledgeCharacterEntry,
+    val attributeScore: Double,
+)
