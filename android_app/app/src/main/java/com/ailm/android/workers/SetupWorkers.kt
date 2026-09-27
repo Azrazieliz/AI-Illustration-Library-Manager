@@ -140,22 +140,6 @@ class LibraryAutomationWorker(
         }
     }
 
-    override fun onStopped() {
-        runCatching {
-            StandaloneRuntime.initialize(applicationContext)
-            val current = StandaloneRuntime.automationStatus()
-            StandaloneRuntime.updateAutomationStatus(
-                status = "stopped",
-                total = (current["automation_total"] as? Number)?.toInt() ?: 0,
-                processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
-                failed = (current["automation_failed"] as? Number)?.toInt() ?: 0,
-                currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
-                message = "Automation stopped.",
-            )
-        }
-        super.onStopped()
-    }
-
     private fun foregroundInfo(processed: Int, total: Int, text: String): ForegroundInfo {
         val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
