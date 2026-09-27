@@ -814,15 +814,16 @@ class LocalAiManager(
         }
 
         val suffix = if (taskType.isBlank()) "" else ".$taskType"
-        val settingsPayload = linkedMapOf<String, Any>(
-            "active_model_id$suffix" to model.modelId,
-            "active_model_version$suffix" to model.version,
-        )
-        val settings = settingsManager.updateSettings(settingsPayload).toMap()
+        val settings = settingsManager.getSettings().toMap().toMutableMap().apply {
+            this["active_model_id$suffix"] = model.modelId
+            this["active_model_version$suffix"] = model.version
+        }
 
         return mapOf(
             "ok" to true,
-            "status" to "activated",
+            "status" to "selected",
+            "activation_scope" to "session",
+            "runtime_initialized" to false,
             "model_id" to model.modelId,
             "version" to model.version,
             "task_type" to taskType,
