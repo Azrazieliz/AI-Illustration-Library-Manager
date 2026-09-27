@@ -30,8 +30,26 @@ class AiWorkflowCoordinator(
             writeProfile(imageId, profile)
         }
 
-        acceptRecognition(imageId, stages["character_recognition"], FusionDatabaseSchema.TABLE_CHARACTERS, "character_id", "canonical_name", FusionDatabaseSchema.TABLE_IMAGE_CHARACTERS, accepted, reviewReasons)
-        acceptRecognition(imageId, stages["series_recognition"], FusionDatabaseSchema.TABLE_SERIES, "series_code", "canonical_title", FusionDatabaseSchema.TABLE_IMAGE_SERIES, accepted, reviewReasons)
+        val acceptedCharacter = acceptRecognition(
+            imageId,
+            stages["character_recognition"],
+            FusionDatabaseSchema.TABLE_CHARACTERS,
+            "character_id",
+            "canonical_name",
+            FusionDatabaseSchema.TABLE_IMAGE_CHARACTERS,
+            accepted,
+            reviewReasons,
+        )
+        val acceptedSeries = acceptRecognition(
+            imageId,
+            stages["series_recognition"],
+            FusionDatabaseSchema.TABLE_SERIES,
+            "series_code",
+            "canonical_title",
+            FusionDatabaseSchema.TABLE_IMAGE_SERIES,
+            accepted,
+            reviewReasons,
+        )
 
         val tags = stages["tag_prediction"]?.resultMap()?.stringList("tags").orEmpty()
         if (tags.isNotEmpty()) {
@@ -40,9 +58,24 @@ class AiWorkflowCoordinator(
             accepted += "tag_prediction"
         }
 
+        stages["aesthetic_scoring"]?.resultMap()?.get("aesthetic_score")?.let { score ->
+            profile.put("aesthetic_score", score)
+            profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
+            writeProfile(imageId, profile)
+        }
+
         if (reviewReasons.isNotEmpty()) queueReview(imageId, reviewReasons.joinToString("; "))
         repository.rebuildSearchIndex()
-        return mapOf("accepted" to accepted.isNotEmpty(), "accepted_stages" to accepted.distinct(), "queued_for_review" to reviewReasons.isNotEmpty(), "review_reasons" to reviewReasons)
+        return mapOf(
+            "accepted" to accepted.isNotEmpty(),
+            "accepted_stages" to accepted.distinct(),
+            "accepted_series_code" to acceptedSeries?.first.orEmpty(),
+            "accepted_series_name" to acceptedSeries?.second.orEmpty(),
+            "accepted_character_id" to acceptedCharacter?.first.orEmpty(),
+            "accepted_character_name" to acceptedCharacter?.second.orEmpty(),
+            "queued_for_review" to reviewReasons.isNotEmpty(),
+            "review_reasons" to reviewReasons,
+        )
     }
 
     private fun acceptRecognition(
@@ -54,18 +87,18 @@ class AiWorkflowCoordinator(
         linkTable: String,
         accepted: MutableList<String>,
         reviewReasons: MutableList<String>,
-    ) {
-        val result = stage?.resultMap() ?: return
+    ): Pair<String, String>? {
+        val result = stage?.resultMap() ?: return null
         val candidate = result["candidates"].mapList().firstOrNull() ?: mapOf("name" to result.optText("top_match"), "confidence" to 0.0)
         val name = candidate.optText("name").ifBlank { result.optText("top_match") }
         val confidence = candidate["confidence"].asDouble()
         if (name.isBlank() || confidence < ACCEPTANCE_THRESHOLD) {
             if (name.isNotBlank()) reviewReasons += "Low-confidence recognition: $name (${formatConfidence(confidence)})"
-            return
+            return null
         }
         val entityId = resolveEntityId(entityTable, entityIdColumn, entityNameColumn, name) ?: run {
             reviewReasons += "Unresolved canonical recognition: $name"
-            return
+            return null
         }
         val values = ContentValues().apply {
             put("image_id", imageId)
@@ -76,6 +109,7 @@ class AiWorkflowCoordinator(
         }
         database.writableDatabase.insertWithOnConflict(linkTable, null, values, SQLiteDatabase.CONFLICT_IGNORE)
         accepted += stage["task_type"]?.toString().orEmpty()
+        return entityId to name
     }
 
     private fun linkTag(imageId: Int, rawTag: String) {
