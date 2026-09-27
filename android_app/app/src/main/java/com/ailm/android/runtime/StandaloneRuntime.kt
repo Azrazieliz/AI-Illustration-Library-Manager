@@ -996,9 +996,17 @@ object StandaloneRuntime {
                 readiness?.get("ready") != false
             }
             .flatMap { model ->
-                (model["supported_tasks"] as? List<*>)
+                val declared = (model["supported_tasks"] as? List<*>)
                     ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
                     .orEmpty()
+                val metadata = model["metadata"] as? Map<*, *>
+                val llama = metadata?.get("llama_cpp") as? Map<*, *>
+                val implicit = if (llama?.get("multimodal") == true) {
+                    listOf("captioning", "series_recognition", "character_recognition", "tag_prediction", "normalization")
+                } else {
+                    emptyList()
+                }
+                declared + implicit
             }
             .map { it.trim().lowercase().replace('-', '_').replace(' ', '_') }
             .toSet()
