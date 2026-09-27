@@ -430,8 +430,14 @@ class LocalAiManager(
             )
 
             val validation = validationService.validateModelDescriptor(descriptor)
-            if (!validation.valid) {
-                val reason = validation.issues.joinToString(" | ") { issue ->
+            val executionReadinessBlocked =
+                inspection.metadata["execution_readiness"].toStringMap()["ready"] == false
+            val blockingValidationIssues = validation.issues.filter { issue ->
+                issue.severity == "error" &&
+                    !(executionReadinessBlocked && issue.code == "inference_contract_invalid")
+            }
+            if (blockingValidationIssues.isNotEmpty()) {
+                val reason = blockingValidationIssues.joinToString(" | ") { issue ->
                     "descriptor_validation_failed:${issue.code}:${issue.message}"
                 }
                 repository.updateInstallRun(
