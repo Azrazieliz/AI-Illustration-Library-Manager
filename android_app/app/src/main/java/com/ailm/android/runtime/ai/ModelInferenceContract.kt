@@ -7,6 +7,7 @@ import android.net.Uri
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
 /**
@@ -236,6 +237,8 @@ internal data class TokenizerContract(
     val vocabularyScores: List<Float> = emptyList(),
     val pairTemplate: String = "",
     val bpeMerges: List<String> = emptyList(),
+    val sourceFile: String = "",
+    val sourceFormat: String = "",
 ) {
     companion object {
         fun parse(raw: Map<String, Any>?, taskType: String): TokenizerContract {
@@ -245,8 +248,13 @@ internal data class TokenizerContract(
                 "Tokenizer type '$type' is unsupported for '$taskType'"
             }
             val vocabulary = value["vocabulary"].stringList()
-            if (type != "none" && vocabulary.isEmpty()) {
-                throw ModelInferenceContractException("Tokenizer '$type' for '$taskType' must define vocabulary")
+            val sourceFile = value["source_file"].text()
+            val sourceFormat = value["source_format"].text()
+            if (type != "none" && vocabulary.isEmpty() && sourceFile.isBlank()) {
+                throw ModelInferenceContractException("Tokenizer '$type' for '$taskType' must define vocabulary or source_file")
+            }
+            if (sourceFile.isNotBlank() && !File(sourceFile).isFile) {
+                throw ModelInferenceContractException("Tokenizer source_file for '$taskType' does not exist: $sourceFile")
             }
             return TokenizerContract(
                 type = type,
@@ -262,6 +270,8 @@ internal data class TokenizerContract(
                 vocabularyScores = value["vocabulary_scores"].floatList(),
                 pairTemplate = value["pair_template"].text(),
                 bpeMerges = value["bpe_merges"].stringList(),
+                sourceFile = sourceFile,
+                sourceFormat = sourceFormat,
             )
         }
     }
@@ -520,7 +530,7 @@ internal class ModelInputPreprocessor(
         val encodedText = contract.inputs.any { it.source in setOf("text_ids", "attention_mask", "token_type_ids") }
             .takeIf { it }
             ?.let { tokenizer ->
-                val modelTokenizer = ModelTokenizer(contract.tokenizer)
+                val modelTokenizer = ModelTokenizer(materializeTokenizerContract(contract.tokenizer))
                 if (contract.taskType == "text_reranking") {
                     modelTokenizer.encodePair(readPairValue(payload, "query"), readPairValue(payload, "document"), sequenceLength(contract))
                 } else {
@@ -851,6 +861,124 @@ data class TokenizedText(
     val mask: List<Int>,
     val typeIds: List<Int>,
 )
+
+private val TOKENIZER_FILE_CACHE = ConcurrentHashMap<String, TokenizerContract>()
+
+internal fun materializeTokenizerContract(contract: TokenizerContract): TokenizerContract {
+    if (contract.type == "none" || contract.vocabulary.isNotEmpty()) return contract
+    val sourcePath = contract.sourceFile.trim()
+    require(sourcePath.isNotBlank()) { "Tokenizer '${contract.type}' has no inline vocabulary or source_file" }
+    return TOKENIZER_FILE_CACHE.getOrPut(sourcePath) {
+        val source = File(sourcePath)
+        require(source.isFile) { "Tokenizer source file does not exist: $sourcePath" }
+        val text = source.readText()
+        val vocabStart = findTokenizerVocabValueStart(text)
+        require(vocabStart >= 0) { "Tokenizer source file is missing model.vocab: $sourcePath" }
+        when (contract.sourceFormat.ifBlank { contract.type }.lowercase()) {
+            "hf_wordpiece_json", "wordpiece" -> {
+                require(text[vocabStart] == '{') { "WordPiece tokenizer model.vocab must be a JSON object" }
+                val end = findMatchingJsonDelimiter(text, vocabStart, '{', '}')
+                val entries = Regex("\"((?:\\\\.|[^\"\\\\])*)\"\\s*:\\s*(\\d+)")
+                    .findAll(text.substring(vocabStart + 1, end))
+                    .map { match -> decodeJsonStringBody(match.groupValues[1]) to match.groupValues[2].toInt() }
+                    .toList()
+                require(entries.isNotEmpty()) { "WordPiece tokenizer vocabulary is empty" }
+                val maxId = entries.maxOf { it.second }
+                val vocabulary = MutableList(maxId + 1) { contract.unknownToken }
+                entries.forEach { (token, id) -> if (id in vocabulary.indices) vocabulary[id] = token }
+                contract.copy(vocabulary = vocabulary)
+            }
+            "hf_unigram_json", "unigram" -> {
+                require(text[vocabStart] == '[') { "Unigram tokenizer model.vocab must be a JSON array" }
+                val end = findMatchingJsonDelimiter(text, vocabStart, '[', ']')
+                val pairPattern = Regex(
+                    "\\[\\s*\"((?:\\\\.|[^\"\\\\])*)\"\\s*,\\s*" +
+                        "(-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?)\\s*\\]",
+                )
+                val pairs = pairPattern.findAll(text.substring(vocabStart + 1, end))
+                    .map { match -> decodeJsonStringBody(match.groupValues[1]) to match.groupValues[2].toFloat() }
+                    .toList()
+                require(pairs.isNotEmpty()) { "Unigram tokenizer vocabulary is empty" }
+                contract.copy(
+                    vocabulary = pairs.map { it.first },
+                    vocabularyScores = pairs.map { it.second },
+                )
+            }
+            else -> throw ModelInferenceContractException(
+                "Unsupported tokenizer source_format '${contract.sourceFormat}' for '${contract.type}'",
+            )
+        }
+    }
+}
+
+private fun findTokenizerVocabValueStart(text: String): Int {
+    val modelIndex = text.indexOf("\"model\"")
+    if (modelIndex < 0) return -1
+    val vocabIndex = text.indexOf("\"vocab\"", startIndex = modelIndex)
+    if (vocabIndex < 0) return -1
+    val colon = text.indexOf(':', startIndex = vocabIndex + 7)
+    if (colon < 0) return -1
+    var cursor = colon + 1
+    while (cursor < text.length && text[cursor].isWhitespace()) cursor += 1
+    return cursor.takeIf { it < text.length } ?: -1
+}
+
+private fun findMatchingJsonDelimiter(text: String, start: Int, open: Char, close: Char): Int {
+    var depth = 0
+    var inString = false
+    var escaped = false
+    for (index in start until text.length) {
+        val ch = text[index]
+        if (inString) {
+            if (escaped) {
+                escaped = false
+            } else if (ch == '\\') {
+                escaped = true
+            } else if (ch == '"') {
+                inString = false
+            }
+            continue
+        }
+        if (ch == '"') {
+            inString = true
+            continue
+        }
+        if (ch == open) depth += 1
+        if (ch == close) {
+            depth -= 1
+            if (depth == 0) return index
+        }
+    }
+    throw ModelInferenceContractException("Tokenizer JSON contains an unterminated vocabulary value")
+}
+
+private fun decodeJsonStringBody(body: String): String {
+    if ('\\' !in body) return body
+    val out = StringBuilder(body.length)
+    var index = 0
+    while (index < body.length) {
+        val ch = body[index++]
+        if (ch != '\\' || index >= body.length) {
+            out.append(ch)
+            continue
+        }
+        when (val escaped = body[index++]) {
+            '"', '\\', '/' -> out.append(escaped)
+            'b' -> out.append('\b')
+            'f' -> out.append('\u000C')
+            'n' -> out.append('\n')
+            'r' -> out.append('\r')
+            't' -> out.append('\t')
+            'u' -> {
+                require(index + 4 <= body.length) { "Invalid JSON unicode escape in tokenizer vocabulary" }
+                out.append(body.substring(index, index + 4).toInt(16).toChar())
+                index += 4
+            }
+            else -> out.append(escaped)
+        }
+    }
+    return out.toString()
+}
 
 internal class ModelTokenizer(
     private val contract: TokenizerContract,
