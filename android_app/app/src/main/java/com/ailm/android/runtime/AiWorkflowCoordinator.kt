@@ -56,9 +56,15 @@ class AiWorkflowCoordinator(
 
         val tags = stages["tag_prediction"]?.resultMap()?.stringList("tags").orEmpty()
         if (tags.isNotEmpty()) {
-            repository.setTags(imageId, tags)
-            tags.forEach { tag -> linkTag(imageId, tag) }
-            accepted += "tag_prediction"
+            val canonicalTags = tags.mapNotNull { tag -> linkCanonicalTag(imageId, tag) }.distinct()
+            if (canonicalTags.isNotEmpty()) {
+                repository.setTags(imageId, canonicalTags)
+                accepted += "tag_prediction"
+            }
+            profile.put("raw_predicted_tags", JSONArray(tags))
+            profile.put("canonical_tags", JSONArray(canonicalTags))
+            profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
+            writeProfile(imageId, profile)
         }
 
         stages["aesthetic_scoring"]?.resultMap()?.get("aesthetic_score")?.let { score ->
@@ -115,30 +121,48 @@ class AiWorkflowCoordinator(
         return entityId to name
     }
 
-    private fun linkTag(imageId: Int, rawTag: String) {
+    private fun linkCanonicalTag(imageId: Int, rawTag: String): String? {
         val tag = rawTag.trim()
-        if (tag.isBlank()) return
-        val tagId = resolveEntityId(FusionDatabaseSchema.TABLE_TAGS, "tag_id", "canonical_name", tag)
-            ?: "ai-tag:${tag.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')}".also { id ->
-                val values = ContentValues().apply {
-                    put("tag_id", id)
-                    put("canonical_name", tag)
-                    put("category", "ai")
-                    put("parent_tag_id", "")
-                    put("metadata_json", JSONObject(mapOf("source" to "ai", "confidence" to 0.8)).toString())
-                    put("created_at_ms", System.currentTimeMillis())
-                    put("updated_at_ms", System.currentTimeMillis())
-                }
-                database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_TAGS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
-            }
+        if (tag.isBlank()) return null
+        val resolved = resolveTagEntry(tag) ?: return null
         val values = ContentValues().apply {
             put("image_id", imageId)
-            put("tag_id", tagId)
+            put("tag_id", resolved.first)
             put("confidence", 0.8)
             put("source", "ai")
             put("added_at_ms", System.currentTimeMillis())
         }
-        database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_IMAGE_TAGS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+        database.writableDatabase.insertWithOnConflict(
+            FusionDatabaseSchema.TABLE_IMAGE_TAGS,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
+        return resolved.second
+    }
+
+    private fun resolveTagEntry(name: String): Pair<String, String>? {
+        val normalized = name.trim()
+        if (normalized.isBlank()) return null
+        database.readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name FROM ${FusionDatabaseSchema.TABLE_TAGS} WHERE LOWER(canonical_name) = LOWER(?) LIMIT 1",
+            arrayOf(normalized),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) return cursor.getString(0) to cursor.getString(1)
+        }
+        database.readableDatabase.rawQuery(
+            """
+            SELECT t.tag_id, t.canonical_name
+            FROM ${FusionDatabaseSchema.TABLE_TAG_ALIASES} a
+            JOIN ${FusionDatabaseSchema.TABLE_TAGS} t ON t.tag_id = a.tag_id
+            WHERE LOWER(a.alias_value) = LOWER(?)
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(normalized),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) return cursor.getString(0) to cursor.getString(1)
+        }
+        return null
     }
 
     private fun resolveEntityId(table: String, idColumn: String, nameColumn: String, name: String): String? {
