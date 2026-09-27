@@ -762,7 +762,17 @@ class LocalAiExecutionPlanner(
             else -> 0
         } - (concurrentTasks.coerceAtLeast(0) * 3).coerceAtMost(12)
         val fallbackPenalty = if (model.metadata["builtin"] == true || model.requiredRuntime.equals(AiRuntimeType.CUSTOM.raw, ignoreCase = true)) -40 else 0
-        return capabilityScore + quantizationScore + memoryScore + benchmarkScore + contextScore + backendScore + deviceScore + fallbackPenalty
+        val modelIdentity = (model.modelId + " " + model.displayName + " " + model.installPath).lowercase()
+        val imageEmbeddingPreference = if (AiTaskTypes.normalize(taskType) == "embedding_generation") {
+            when {
+                "nomic" in modelIdentity && "vision" in modelIdentity -> 30
+                "nomic" in modelIdentity && "text" in modelIdentity -> -20
+                else -> 0
+            }
+        } else {
+            0
+        }
+        return capabilityScore + quantizationScore + memoryScore + benchmarkScore + contextScore + backendScore + deviceScore + fallbackPenalty + imageEmbeddingPreference
     }
 
     private fun hasExecutableBackend(model: AiModelDescriptor): Boolean = providersFor(model).isNotEmpty()
