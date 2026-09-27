@@ -28,8 +28,16 @@ internal data class ModelPackageInspection(
     }
 
     val valid: Boolean
-        get() = artifact != null && runtime.isNotBlank() && supportedTasks.isNotEmpty() &&
-            issues.none { it.code !in NON_BLOCKING_IMPORT_ISSUES && it.code !in setOf("tensor_input_missing") }
+        get() {
+            val executionReadinessBlocked =
+                metadata["execution_readiness"].asStringMap()?.get("ready") == false
+            return artifact != null && runtime.isNotBlank() && supportedTasks.isNotEmpty() &&
+                issues.none { issue ->
+                    issue.code !in NON_BLOCKING_IMPORT_ISSUES &&
+                        issue.code != "tensor_input_missing" &&
+                        !(executionReadinessBlocked && issue.code == "execution_metadata_missing")
+                }
+        }
 
     fun toMap(): Map<String, Any> = mapOf(
         "valid" to valid,
@@ -820,7 +828,8 @@ internal class ModelPackageInspector(
             buffaloEmbed?.let { artifacts += mapOf("path" to it.relativeTo(packageRoot).invariantSeparatorsPath, "role" to "face_embedding") }
             if (artifacts.isNotEmpty()) {
                 result["model_artifacts"] = artifacts
-                result["task"] = "face_feature_extraction"
+                result["task"] = "face_detection"
+                result["buffalo_l_composite_capability"] = "face_feature_extraction"
                 return result
             }
         }
@@ -838,7 +847,8 @@ internal class ModelPackageInspector(
         }
         if (insight.size >= 3) {
             result["model_artifacts"] = insight
-            result["task"] = "face_feature_extraction"
+            result["task"] = "face_detection"
+            result["buffalo_l_composite_capability"] = "face_feature_extraction"
             return result
         }
 
@@ -958,6 +968,15 @@ internal class ModelPackageInspector(
         issues += ModelPackageIssue(
             "ocr_ctc_mapping_unresolved",
             "PaddleOCR dict.txt has $entryCount entries for 18385 recognizer classes; blank and special-token offsets are not established by this package.",
+        )
+        metadata["execution_readiness"] = mapOf(
+            "ready" to false,
+            "stage" to "imported_not_executable",
+            "blockers" to listOf(
+                "ocr_preprocessing_unresolved",
+                "ocr_detector_postprocessing_unresolved",
+                "ocr_ctc_mapping_unresolved",
+            ),
         )
     }
 
@@ -1250,6 +1269,10 @@ internal class ModelPackageInspector(
         if (tasks.none { it == "embedding_generation" } || bindings.inputs.isEmpty() || bindings.outputs.isEmpty()) {
             return
         }
+        val modelId = metadata["model_id"]?.toString().orEmpty().lowercase()
+        if (!modelId.contains("nomic-embed-vision")) {
+            return
+        }
         val imageInput = bindings.inputs.firstOrNull { it.shape.size == 4 }
         val output = bindings.outputs.firstOrNull()
         if (imageInput == null || output == null) {
@@ -1492,6 +1515,11 @@ internal class ModelPackageInspector(
             issues += ModelPackageIssue(
                 "preprocessing_contract_unresolved",
                 "Aesthetic predictor package does not declare exact external image preprocessing, and the ONNX graph does not establish it at the package contract boundary.",
+            )
+            metadata["execution_readiness"] = mapOf(
+                "ready" to false,
+                "stage" to "imported_not_executable",
+                "blockers" to listOf("preprocessing_contract_unresolved"),
             )
         }
         metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
