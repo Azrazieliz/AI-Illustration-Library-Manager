@@ -2973,27 +2973,21 @@ private fun FusionDatabaseScreen(
     onNavigate: (AppDestination) -> Unit,
 ) {
     LaunchedEffect(Unit) { onRefresh() }
+    var showDiagnostics by rememberSaveable { mutableStateOf(false) }
+
     val status = state.lastMaintenanceResult.takeIf {
         it["kind"]?.toString() == "fusion_management"
     } ?: emptyMap()
-    val validation = status["validation"] as? Map<*, *>
-    val logicalCounts = status["logical_table_counts"] as? Map<*, *>
     val automationTasks = state.aiTasks
-    val runningTask = automationTasks.firstOrNull { task -> task["status"]?.toString() == "running" }
-    val lastTask = automationTasks.maxByOrNull { task -> task["updated_at_ms"].asLongNullable() ?: 0L }
-    val lastSuccessfulTask = automationTasks
-        .filter { task -> task["status"]?.toString() == "succeeded" }
-        .maxByOrNull { task -> task["finished_at_ms"].asLongNullable() ?: 0L }
-    val pendingTasks = automationTasks.count { task -> task["status"]?.toString() in setOf("pending", "paused") }
-    val completedTasks = automationTasks.count { task -> task["status"]?.toString() == "succeeded" }
-    val failedTasks = automationTasks.filter { task -> task["status"]?.toString() == "failed" }
+    val runningTasks = automationTasks.count { it["status"]?.toString() == "running" }
+    val pendingTasks = automationTasks.count { it["status"]?.toString() in setOf("pending", "paused") }
+    val failedTasks = automationTasks.filter { it["status"]?.toString() == "failed" }
     val knowledgeChanged = state.knowledgeAutomationStatus?.contains("Knowledge changed", ignoreCase = true) == true
-    val automationEnabled = state.aiOverview["queue_paused"]?.toString() != "true"
     val fusionNeedsRebuild = status["rebuild_required"] == true || knowledgeChanged
-    val fusionHealthy = status["database_health"]?.toString() == "Healthy" && !fusionNeedsRebuild
     val automationStatus = when {
-        runningTask != null -> "Running"
+        runningTasks > 0 -> "Running"
         failedTasks.isNotEmpty() -> "Needs attention"
+        pendingTasks > 0 -> "Queued"
         else -> "Idle"
     }
 
@@ -3001,88 +2995,96 @@ private fun FusionDatabaseScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Fusion Management", style = MaterialTheme.typography.headlineMedium)
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("Fusion Status", style = MaterialTheme.typography.titleMedium)
-                Text("Fusion Version: ${status["fusion_version"] ?: "Loading"}")
-                Text("Database Status: ${status["database_status"] ?: "Loading"}")
-                Text("Knowledge Packs: ${if (state.knowledgePacks.isEmpty()) "None installed" else "Healthy (${state.knowledgePacks.size} loaded)"}")
-                Text("Fusion Database: ${status["database_health"] ?: "Loading"}")
-                Text("Automation: $automationStatus")
-                Text("Search Index: ${status["search_index_status"] ?: "Loading"}")
-                Text("SQLite Health: ${status["sqlite_health"] ?: "Loading"}")
-                Text("Last Build: ${formatFusionTimestamp(status["last_build_ms"].asLongNullable() ?: 0L)}")
-                Text("Last Optimization: ${formatFusionTimestamp(status["last_optimization_ms"].asLongNullable() ?: 0L)}")
-                Text("Last Export: ${formatFusionTimestamp(status["exported_at_ms"].asLongNullable() ?: 0L)}")
-                Text("Rebuild Required: ${if (fusionNeedsRebuild) "Yes" else "No"}")
-            }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Fusion", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "Database and automation health",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("Fusion Statistics", style = MaterialTheme.typography.titleMedium)
-                Text("Knowledge Packs Loaded: ${state.knowledgePacks.size}")
-                Text("Fusion Entries: ${status["fusion_entries"] ?: "Loading"}")
-                Text("Search Index: ${status["search_index_status"] ?: "Loading"}")
-                Text("Embedding Index: ${status["embedding_index_status"] ?: "Loading"}")
-                Text("Cache: ${status["cache_status"] ?: "Loading"}")
-                if (!logicalCounts.isNullOrEmpty()) {
-                    Text("Logical Tables: ${logicalCounts.size}", style = MaterialTheme.typography.bodySmall)
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("Overview", style = MaterialTheme.typography.titleMedium)
+                Text("Database · ${status["database_health"] ?: status["database_status"] ?: "Loading"}")
+                Text("Automation · $automationStatus")
+                Text("Knowledge packs · ${state.knowledgePacks.size}")
+                Text("Search index · ${status["search_index_status"] ?: "Loading"}")
+                if (fusionNeedsRebuild) {
+                    AsterionStatusNotice("Fusion rebuild recommended.")
                 }
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("Automation Status", style = MaterialTheme.typography.titleMedium)
-                Text("Automation Enabled: ${if (automationEnabled) "Yes" else "No"}")
-                Text("Automation Idle: ${if (automationStatus == "Idle") "Yes" else "No"}")
-                Text("Knowledge Changed: ${if (knowledgeChanged) "Yes" else "No"}")
-                Text("Fusion Needs Rebuild: ${if (fusionNeedsRebuild) "Yes" else "No"}")
-                Text("Fusion Healthy: ${if (fusionHealthy) "Yes" else "No"}")
-                Text("Last Automation: ${formatFusionTimestamp(lastTask?.get("updated_at_ms").asLongNullable() ?: 0L)}")
-                Text("Last Rebuild: ${formatFusionTimestamp(status["last_build_ms"].asLongNullable() ?: 0L)}")
-                Text("Pending Tasks: $pendingTasks")
-                Text("Completed Tasks: $completedTasks")
-                Text("Failed Tasks: ${failedTasks.size}")
-                if (failedTasks.isNotEmpty()) {
-                    Text("Last Error: ${failedTasks.first()["error_message"] ?: "Task failed"}", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Text("Last Error: None", style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text("Health", style = MaterialTheme.typography.titleMedium)
-                Text("Database Integrity: ${status["database_integrity"] ?: "Loading"}")
-                Text("Index Integrity: ${status["index_integrity"] ?: "Loading"}")
-                Text("FTS Integrity: ${status["fts_integrity"] ?: "Loading"}")
-                Text("Missing References: ${status["missing_references"] ?: "Loading"}")
-                Text("Orphan Entries: ${status["orphan_entries"] ?: "Loading"}")
-                Text("Corrupted Records: ${status["corrupted_records"] ?: "Loading"}")
-                Text("Automation Consistency: ${if (failedTasks.isEmpty()) "Consistent" else "Needs attention"}")
-                Text("Knowledge Consistency: ${status["knowledge_consistency"] ?: "Loading"}")
-            }
-        }
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onRefresh) { Text("Refresh Status") }
-            Button(onClick = onExport) { Text("Export") }
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Button(onClick = onRebuild) { Text("Rebuild") }
+            Button(onClick = onRefresh) { Text("Refresh") }
+            TextButton(onClick = onExport) { Text("Export") }
         }
+
+        AssistChip(
+            onClick = { showDiagnostics = !showDiagnostics },
+            label = { Text(if (showDiagnostics) "Hide diagnostics" else "Diagnostics") },
+        )
+
+        AnimatedVisibility(visible = showDiagnostics) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("Database", style = MaterialTheme.typography.titleSmall)
+                        Text("Version: ${status["fusion_version"] ?: "Loading"}")
+                        Text("SQLite: ${status["sqlite_health"] ?: "Loading"}")
+                        Text("Integrity: ${status["database_integrity"] ?: "Loading"}")
+                        Text("Index integrity: ${status["index_integrity"] ?: "Loading"}")
+                        Text("FTS integrity: ${status["fts_integrity"] ?: "Loading"}")
+                        Text("Missing references: ${status["missing_references"] ?: "Loading"}")
+                        Text("Orphans: ${status["orphan_entries"] ?: "Loading"}")
+                        Text("Corrupted records: ${status["corrupted_records"] ?: "Loading"}")
+                    }
+                }
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("Maintenance", style = MaterialTheme.typography.titleSmall)
+                        Text("Last build: ${formatFusionTimestamp(status["last_build_ms"].asLongNullable() ?: 0L)}")
+                        Text("Last optimization: ${formatFusionTimestamp(status["last_optimization_ms"].asLongNullable() ?: 0L)}")
+                        Text("Last export: ${formatFusionTimestamp(status["exported_at_ms"].asLongNullable() ?: 0L)}")
+                        Text("Pending tasks: $pendingTasks")
+                        Text("Failed tasks: ${failedTasks.size}")
+                        failedTasks.firstOrNull()?.get("error_message")?.toString()?.takeIf { it.isNotBlank() }?.let {
+                            AsterionStatusNotice(it, isError = true)
+                        }
+                    }
+                }
+            }
+        }
+
         if (status["logical_content_preserved"] == false) {
-            Text("Rebuild aborted because logical Fusion row counts changed. No rebuild changes were committed.")
+            AsterionStatusNotice(
+                "Rebuild was aborted because logical Fusion row counts changed.",
+                isError = true,
+            )
         }
-        state.lastActionMessage?.let { message -> AsterionStatusNotice(message) }
-        state.errorMessage?.let { message -> AsterionStatusNotice(message, isError = true) }
-        Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+        state.lastActionMessage?.let { AsterionStatusNotice(it) }
+        state.errorMessage?.let { AsterionStatusNotice(it, isError = true) }
+
+        TextButton(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
     }
 }
 
