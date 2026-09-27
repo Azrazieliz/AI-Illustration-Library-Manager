@@ -33,7 +33,7 @@ object StandaloneRuntime {
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
     )
-    private val autonomousImageStages = listOf(
+    private val autonomousImageStageCandidates = listOf(
         "character_recognition",
         "series_recognition",
         "ocr",
@@ -42,6 +42,7 @@ object StandaloneRuntime {
         "embedding_generation",
         "normalization",
         "nsfw_classification",
+        "aesthetic_scoring",
     )
 
     private val stateMutex = Mutex()
@@ -50,6 +51,7 @@ object StandaloneRuntime {
     @Volatile
     private var initialized = false
     private lateinit var storageProvider: StorageProvider
+    private lateinit var database: LocalDatabase
     private lateinit var repository: LocalRepository
     private lateinit var localAiManager: LocalAiManager
     private val knowledgeRepository: KnowledgeRepository by lazy { KnowledgeRepository() }
@@ -118,12 +120,12 @@ object StandaloneRuntime {
                 if (!initialized) {
                     appContext = context.applicationContext
                     storageProvider = SafStorageProvider(context.applicationContext)
-                    val localDatabase = LocalDatabase(context.applicationContext)
-                    repository = LocalRepository(localDatabase)
-                    aiWorkflowCoordinator = AiWorkflowCoordinator(localDatabase, repository)
+                    database = LocalDatabase(context.applicationContext)
+                    repository = LocalRepository(database)
+                    aiWorkflowCoordinator = AiWorkflowCoordinator(database, repository)
                     localAiManager = LocalAiManager(
                         context = context.applicationContext,
-                        database = localDatabase,
+                        database = database,
                         scope = runtimeScope,
                     )
                     localAiManager.initialize()
@@ -484,11 +486,40 @@ object StandaloneRuntime {
 
     fun importKnowledgePackDocuments(uris: List<Uri>): List<Map<String, Any>> {
         ensureInitialized()
+        if (uris.isEmpty()) return emptyList()
+
+        val referenceResults = mutableListOf<Map<String, Any>>()
+        val ordinaryUris = mutableListOf<Uri>()
+        uris.distinct().forEach { uri ->
+            val filename = safeKnowledgePackFileName(uri)
+            if (filename.lowercase().endsWith(".zip")) {
+                val result = runCatching {
+                    appContext.contentResolver.openInputStream(uri)?.use { input ->
+                        ReferenceKnowledgeImporter(database).importZip(input, filename)
+                    } ?: mapOf("ok" to false, "message" to "Unable to open reference knowledge archive.", "filename" to filename)
+                }.getOrElse { error ->
+                    mapOf(
+                        "ok" to false,
+                        "message" to (error.message ?: "Reference knowledge archive import failed."),
+                        "filename" to filename,
+                    )
+                }
+                referenceResults += result
+                if (result["ok"] == true) {
+                    repository.rebuildSearchIndex()
+                }
+            } else {
+                ordinaryUris += uri
+            }
+        }
+
+        if (ordinaryUris.isEmpty()) return referenceResults
+
         val directory = knowledgePackDirectory()
-        val temporaryPacks = uris.distinct().map { uri ->
+        val temporaryPacks = ordinaryUris.map { uri ->
             copyKnowledgePackToTemporaryFile(uri, directory)?.let { temporary ->
                 uri to temporary
-            } ?: return listOf(
+            } ?: return referenceResults + listOf(
                 mapOf(
                     "ok" to false,
                     "message" to "Unable to read selected Knowledge Pack.",
@@ -532,7 +563,7 @@ object StandaloneRuntime {
                 val destination = availableKnowledgePackFile(directory, pack.filename)
                 try {
                     temporaryPacks[index].second.copyTo(destination, overwrite = false)
-                } catch (error: Throwable) {
+                } catch (_: Throwable) {
                     results += mapOf(
                         "ok" to false,
                         "message" to "Unable to install Knowledge Pack.",
@@ -565,7 +596,7 @@ object StandaloneRuntime {
                 }
             }
 
-            return results
+            return referenceResults + results
         } finally {
             temporaryPacks.forEach { (_, temporary) -> temporary.delete() }
         }
