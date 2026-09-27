@@ -376,7 +376,7 @@ class LocalAiManager(
             }
 
             val extractionDirectory = File(appContext.filesDir, "model-packages/$installId")
-            val inspection = packageInspector.inspect(sourceFile, extractionDirectory)
+            val inspection = packageInspector.inspect(sourceFile, extractionDirectory, modelIdHint = modelId)
             if (!inspection.valid) {
                 val issueSummary = inspection.issues.joinToString("; ") { "${it.code}: ${it.message}" }
                 val errorMessage = "Model package inspection failed: $issueSummary"

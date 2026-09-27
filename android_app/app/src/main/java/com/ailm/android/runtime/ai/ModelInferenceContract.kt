@@ -140,6 +140,9 @@ internal data class ModelInferenceContract(
                     ),
                 )
             }
+            if (AiRuntimeType.fromRaw(model.requiredRuntime) == AiRuntimeType.LLAMA_CPP) {
+                return llamaCppValidationIssues(model)
+            }
             return model.supportedTasks.mapNotNull { rawTask ->
                 val taskType = AiTaskTypes.normalize(rawTask)
                 runCatching { resolve(model, taskType) }.exceptionOrNull()?.let { error ->
@@ -149,6 +152,48 @@ internal data class ModelInferenceContract(
                     )
                 }
             }
+        }
+
+        private fun llamaCppValidationIssues(model: AiModelDescriptor): List<AiValidationIssue> {
+            val issues = mutableListOf<AiValidationIssue>()
+            model.supportedTasks.forEach { rawTask ->
+                val taskType = AiTaskTypes.normalize(rawTask)
+                if (taskType !in setOf("text_generation", "prompt_generation")) {
+                    issues += AiValidationIssue(
+                        code = "inference_contract_invalid",
+                        message = "${taskType}: LLAMA_CPP supports text_generation or prompt_generation through its native execution contract",
+                    )
+                }
+            }
+
+            val metadata = model.metadata["llama_cpp"] as? Map<*, *>
+            if (metadata == null) {
+                issues += AiValidationIssue(
+                    code = "inference_contract_invalid",
+                    message = "llama_cpp: Model ${model.modelId}@${model.version} is missing metadata.llama_cpp",
+                )
+                return issues
+            }
+
+            val textOnly = metadata["text_only"] == true
+            val multimodal = metadata["multimodal"] == true
+            if (!textOnly && !multimodal) {
+                issues += AiValidationIssue(
+                    code = "inference_contract_invalid",
+                    message = "llama_cpp: metadata.llama_cpp must declare text_only=true or multimodal=true",
+                )
+            }
+            if (multimodal) {
+                val rolePaths = model.metadata["artifact_paths_by_role"] as? Map<*, *>
+                val projectorPath = rolePaths?.get("vision_projector")?.toString()?.trim().orEmpty()
+                if (projectorPath.isBlank()) {
+                    issues += AiValidationIssue(
+                        code = "inference_contract_invalid",
+                        message = "text_generation: LLAMA_CPP multimodal models require artifact_paths_by_role.vision_projector",
+                    )
+                }
+            }
+            return issues
         }
 
         private fun validateDecoder(taskType: String, decoderType: String) {

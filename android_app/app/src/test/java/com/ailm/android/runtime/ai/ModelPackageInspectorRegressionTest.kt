@@ -192,6 +192,61 @@ class ModelPackageInspectorRegressionTest {
         }
     }
 
+    @Test
+    fun `Nomic vision model id hint resolves embedding generation instead of generic inference`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("ONNX")
+            File(root, "config.json").writeText("""{"architectures":["NomicVisionModel"]}""")
+
+            val result = ModelPackageInspector().inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-vision-v1.5",
+            )
+
+            assertTrue(result.supportedTasks.contains("embedding_generation"))
+            assertFalse(result.issues.any { it.code == "execution_task_missing" })
+            assertEquals(
+                "primary_ai_illustration_generation_asterioncore_nomic-embed-vision-v1.5",
+                result.metadata["model_id"],
+            )
+        }
+    }
+
+    @Test
+    fun `Nomic text model id hint resolves embedding generation with generic artifact name`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("ONNX")
+            File(root, "config.json").writeText("{}")
+
+            val result = ModelPackageInspector().inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-text-v1.5",
+            )
+
+            assertTrue(result.supportedTasks.contains("embedding_generation"))
+            assertFalse(result.issues.any { it.code == "execution_task_missing" })
+        }
+    }
+
+    @Test
+    fun `BGE reranker model id hint resolves reranking with generic artifact name`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("ONNX")
+            File(root, "config.json").writeText("{}")
+
+            val result = ModelPackageInspector().inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_bge-reranker-v2-m3",
+            )
+
+            assertTrue(result.supportedTasks.contains("text_reranking"))
+            assertFalse(result.issues.any { it.code == "execution_task_missing" })
+        }
+    }
+
     // =====================================================
     // Regression Tests for Fix C: Aesthetic Model Detection
     // =====================================================

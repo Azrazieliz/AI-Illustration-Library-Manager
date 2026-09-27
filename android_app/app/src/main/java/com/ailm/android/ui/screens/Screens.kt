@@ -1836,13 +1836,13 @@ private fun ImageViewerScreen(
                                             val threshold = 120f
                                             val idx = findCurrentIndex()
                                             when {
-                                                swipeAccumLocal > threshold && idx > 0 -> {
-                                                    val prev = sourceRows[idx - 1]
-                                                    onSelectImage(prev)
-                                                }
-                                                swipeAccumLocal < -threshold && idx >= 0 && idx < sourceRows.size - 1 -> {
+                                                swipeAccumLocal > threshold && idx >= 0 && idx < sourceRows.size - 1 -> {
                                                     val next = sourceRows[idx + 1]
                                                     onSelectImage(next)
+                                                }
+                                                swipeAccumLocal < -threshold && idx > 0 -> {
+                                                    val prev = sourceRows[idx - 1]
+                                                    onSelectImage(prev)
                                                 }
                                             }
                                         }

@@ -45,7 +45,7 @@ internal data class ModelPackageInspection(
 
 /** Reads a distributed model package without assigning meanings that its files do not declare. */
 internal class ModelPackageInspector {
-    fun inspect(source: File, extractionDirectory: File): ModelPackageInspection {
+    fun inspect(source: File, extractionDirectory: File, modelIdHint: String = ""): ModelPackageInspection {
         val issues = mutableListOf<ModelPackageIssue>()
         val packageRoot = materializePackage(source, extractionDirectory, issues)
         if (packageRoot == null) {
@@ -68,7 +68,9 @@ internal class ModelPackageInspector {
         val relativeFiles = files.map { it.relativeTo(packageRoot).invariantSeparatorsPath }
         val filesByName = files.groupBy { it.name.lowercase() }
         val metadataFiles = readMetadataFiles(filesByName, issues)
-        val packageMetadata = mergeMetadata(metadataFiles)
+        val packageMetadata = mergeMetadata(metadataFiles).toMutableMap().apply {
+            if (modelIdHint.isNotBlank()) putIfAbsent("model_id", modelIdHint)
+        }
         val normalizedMetadata = normalizeKnownPackageStructure(packageRoot, files, packageMetadata).toMutableMap()
         addBuffaloLReadiness(normalizedMetadata, files, issues)
         addPaddleOcrReadiness(normalizedMetadata, packageRoot, files, issues)
@@ -97,7 +99,7 @@ internal class ModelPackageInspector {
         
         // Infer default capability from runtime when no explicit capability/task is declared
         val inferredCapabilities = if (declaredCapabilities.isEmpty() && declaredTasks.isEmpty() && runtime.isNotBlank()) {
-            listOf(inferCapabilityFromModel(artifact ?: source, normalizedMetadata, filesByName, runtime))
+            listOf(inferCapabilityFromModel(source, artifact, normalizedMetadata, filesByName, runtime))
         } else {
             emptyList()
         }
@@ -1827,15 +1829,43 @@ internal class ModelPackageInspector {
         }
     }
 
-    private fun inferCapabilityFromModel(source: File, metadata: Map<String, Any>, filesByName: Map<String, List<File>>, runtime: String): String {
-        val modelName = source.nameWithoutExtension.lowercase()
+    private fun inferCapabilityFromModel(
+        source: File,
+        artifact: File?,
+        metadata: Map<String, Any>,
+        filesByName: Map<String, List<File>>,
+        runtime: String,
+    ): String {
+        val identity = listOfNotNull(
+            source.name,
+            source.nameWithoutExtension,
+            artifact?.name,
+            artifact?.nameWithoutExtension,
+            metadata["model_id"]?.toString(),
+            metadata["_name_or_path"]?.toString(),
+            metadata["name"]?.toString(),
+            metadata["display_name"]?.toString(),
+            metadata["model_type"]?.toString(),
+            metadata["architectures"]?.toString(),
+        ).joinToString(" ").lowercase()
         val description = metadata["description"]?.toString()?.lowercase().orEmpty() +
             metadata["task"]?.toString()?.lowercase().orEmpty() +
             metadata["tags"].asMapList().joinToString(" ") { it["name"]?.toString().orEmpty() }.lowercase()
-        val combined = "$modelName $description"
+        val combined = "$identity $description"
 
         if (combined.contains("reranker") || combined.contains("reranking") || combined.contains("bge-reranker")) {
             return "text_reranking"
+        }
+
+        if (
+            combined.contains("nomic-embed-vision") ||
+            combined.contains("nomic_embed_vision") ||
+            combined.contains("nomicvisionmodel") ||
+            combined.contains("nomic-embed-text") ||
+            combined.contains("nomic_embed_text") ||
+            (combined.contains("nomic") && combined.contains("embed"))
+        ) {
+            return "embedding_generation"
         }
 
         if (combined.contains("aesthetic") || combined.contains("aesthetic_predictor") || combined.contains("beauty")) {

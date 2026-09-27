@@ -41,6 +41,35 @@ class QwenLlamaCppContractTest {
     }
 
     @Test
+    fun `llama cpp descriptor validation uses native contract instead of tensor contract`() {
+        assertTrue(ModelInferenceContract.validationIssues(qwenModel()).isEmpty())
+        assertTrue(ModelInferenceContract.validationIssues(qwenVlModel()).isEmpty())
+    }
+
+    @Test
+    fun `llama cpp multimodal descriptor validation still requires projector role`() {
+        val model = qwenVlModel().copy(metadata = qwenVlModel().metadata - "artifact_paths_by_role")
+        val issues = ModelInferenceContract.validationIssues(model)
+
+        assertTrue(issues.any { issue ->
+            issue.code == "inference_contract_invalid" &&
+                issue.message.contains("vision_projector")
+        })
+    }
+
+    @Test
+    fun `onnx descriptor still requires tensor inference contract`() {
+        val model = qwenModel().copy(
+            requiredRuntime = "onnx",
+            supportedRuntimes = listOf("onnx"),
+            installPath = "qwen.onnx",
+            metadata = emptyMap(),
+        )
+
+        assertTrue(ModelInferenceContract.validationIssues(model).any { it.code == "inference_contract_invalid" })
+    }
+
+    @Test
     fun `text request uses native generation and preserves utf8 output`() {
         val bridge = FakeLlamaBridge(generated = "你好, Qwen")
         val backend = LlamaCppBackend({ _, _ -> qwenModel() }, context = nullContext(), bridge = bridge)

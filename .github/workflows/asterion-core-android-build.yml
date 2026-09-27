@@ -20,7 +20,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Run inspector regression tests and build debug APK
+      - name: Run model import regressions and build debug APK
         working-directory: android_app
         run: |
           chmod +x gradlew
@@ -28,6 +28,8 @@ jobs:
           ./gradlew :app:testDebugUnitTest \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorTest" \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorRegressionTest" \
+            --tests "com.ailm.android.runtime.ai.QwenLlamaCppContractTest" \
+            --tests "com.ailm.android.runtime.ai.NomicVisionExecutionContractTest" \
             --stacktrace
           ./gradlew :app:assembleDebug --stacktrace
 
