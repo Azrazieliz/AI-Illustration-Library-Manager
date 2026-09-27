@@ -1399,7 +1399,7 @@ private fun LibraryBrowserScreen(
 
         item(span = { GridItemSpan(maxLineSpan) }) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp)) {
-                Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+                TextButton(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
                 Button(onClick = { onNavigate(AppDestination.Search) }) { Text("Search") }
             }
         }
@@ -2199,7 +2199,7 @@ private fun RecognitionWorkbenchScreen(
         }
 
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
+            TextButton(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
             Button(onClick = { onNavigate(AppDestination.PluginManager) }) { Text("Models") }
             Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
         }
@@ -2255,7 +2255,7 @@ private fun AiTaskFilterScreen(
         }
 
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
+            TextButton(onClick = { onNavigate(AppDestination.RecognitionResults) }) { Text("Recognition") }
             Button(onClick = { onNavigate(AppDestination.Automation) }) { Text("Automation") }
             Button(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
         }
@@ -2613,6 +2613,12 @@ private fun AiModelManagerScreen(
             }
         }
 
+        AssistChip(
+            onClick = { showTaskAssignments = !showTaskAssignments },
+            label = { Text(if (showTaskAssignments) "Hide task assignments" else "Task assignments") },
+        )
+        AnimatedVisibility(visible = showTaskAssignments) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("AI Tasks", style = MaterialTheme.typography.titleMedium)
         if (taskCapabilities.isEmpty()) {
             Text("Task assignments will appear when installed models report capabilities.")
@@ -2692,6 +2698,15 @@ private fun AiModelManagerScreen(
             }
         }
 
+            }
+        }
+
+        AssistChip(
+            onClick = { showResourceTools = !showResourceTools },
+            label = { Text(if (showResourceTools) "Hide resources" else "Knowledge & Fusion") },
+        )
+        AnimatedVisibility(visible = showResourceTools) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Knowledge Management", style = MaterialTheme.typography.titleMedium)
@@ -2780,6 +2795,15 @@ private fun AiModelManagerScreen(
             }
         }
 
+            }
+        }
+
+        AssistChip(
+            onClick = { showInstallHistory = !showInstallHistory },
+            label = { Text(if (showInstallHistory) "Hide history" else "Import history") },
+        )
+        AnimatedVisibility(visible = showInstallHistory) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Install and Import Runs", style = MaterialTheme.typography.titleMedium)
         if (state.aiInstallRuns.isEmpty()) {
             Text("No install runs recorded yet.")
@@ -2800,6 +2824,9 @@ private fun AiModelManagerScreen(
                         }
                     }
                 }
+            }
+        }
+
             }
         }
 
