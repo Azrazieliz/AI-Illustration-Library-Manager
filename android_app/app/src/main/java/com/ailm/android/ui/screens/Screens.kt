@@ -3264,242 +3264,262 @@ private fun SearchScreen(
     var sortBy by rememberSaveable { mutableStateOf("import_order") }
     var sortDirection by rememberSaveable { mutableStateOf("desc") }
     var sortMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var showAdvanced by rememberSaveable { mutableStateOf(mode == "advanced") }
     var recentQueries by rememberSaveable { mutableStateOf(emptyList<String>()) }
-    var savedQueries by rememberSaveable { mutableStateOf(emptyList<String>()) }
 
     val results = state.searchResults.ifEmpty { state.images }
+
+    fun runPrimarySearch() {
+        val normalized = query.trim()
+        if (normalized.isBlank()) return
+        recentQueries = (listOf(normalized) + recentQueries.filterNot { it.equals(normalized, ignoreCase = true) }).take(6)
+        if (mode == "semantic") onSemanticSearch(normalized) else onSearchByFilename(normalized)
+    }
+
+    fun runAdvanced() {
+        val payload = mutableMapOf<String, Any>(
+            "query" to query,
+            "sort_by" to sortBy,
+            "sort_direction" to sortDirection,
+            "include_inactive" to includeInactive,
+            "page" to 1,
+            "page_size" to 0,
+        )
+        if (fullText.isNotBlank()) payload["full_text"] = fullText
+        if (collection.isNotBlank()) payload["collection"] = collection
+        val tags = tagsCsv.split(',', '|').map { it.trim() }.filter { it.isNotBlank() }
+        if (tags.isNotEmpty()) payload["tags"] = tags
+        if (taxonomyKey.isNotBlank() && taxonomyValue.isNotBlank()) {
+            payload["taxonomy_filters"] = mapOf(taxonomyKey.trim() to taxonomyValue.trim())
+        }
+        imageIdQuery.trim().toIntOrNull()?.let { payload["image_id"] = it }
+        onAdvancedSearch(payload)
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineMedium)
+        Text(if (mode == "semantic") "Semantic search" else "Search", style = MaterialTheme.typography.headlineMedium)
 
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            label = { Text("Search bar") },
+            label = { Text(if (mode == "semantic") "Describe what you want to find" else "Filename or keyword") },
         )
 
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                val normalized = query.trim()
-                if (normalized.isNotBlank()) {
-                    recentQueries = (listOf(normalized) + recentQueries.filterNot { it.equals(normalized, ignoreCase = true) }).take(8)
-                    onSearchByFilename(normalized)
-                }
-            }, enabled = query.isNotBlank()) {
-                Text("Search")
-            }
-            Button(onClick = onClearResults) {
-                Text("Reset")
-            }
-            AssistChip(onClick = { query = "" }, label = { Text("Clear field") })
-            AssistChip(onClick = {
-                val normalized = query.trim()
-                if (normalized.isNotBlank() && normalized !in savedQueries) {
-                    savedQueries = (savedQueries + normalized).take(8)
-                }
-            }, label = { Text("Save search") })
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(onClick = { runPrimarySearch() }, enabled = query.isNotBlank()) { Text("Search") }
+            TextButton(onClick = {
+                query = ""
+                imageIdQuery = ""
+                fullText = ""
+                collection = ""
+                tagsCsv = ""
+                taxonomyKey = ""
+                taxonomyValue = ""
+                includeInactive = false
+                onClearResults()
+            }) { Text("Clear") }
+            AssistChip(
+                onClick = { showAdvanced = !showAdvanced },
+                label = { Text(if (showAdvanced) "Hide filters" else "Filters") },
+            )
         }
 
-        if (recentQueries.isNotEmpty() || savedQueries.isNotEmpty()) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (recentQueries.isNotEmpty()) {
-                        Text("Recent searches", style = MaterialTheme.typography.titleSmall)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            recentQueries.forEach { recent ->
-                                AssistChip(onClick = { query = recent }, label = { Text(recent, maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                            }
-                        }
-                    }
-                    if (savedQueries.isNotEmpty()) {
-                        Text("Saved searches", style = MaterialTheme.typography.titleSmall)
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            savedQueries.forEach { saved ->
-                                AssistChip(onClick = { query = saved }, label = { Text(saved, maxLines = 1, overflow = TextOverflow.Ellipsis) })
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        OutlinedTextField(
-            value = imageIdQuery,
-            onValueChange = { imageIdQuery = it },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-            label = { Text("Search by image ID") },
-        )
-        Button(onClick = { onSearchByImageId(imageIdQuery) }) {
-            Text("Search ID")
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Sort menu", style = MaterialTheme.typography.titleSmall)
-                Button(onClick = { sortMenuExpanded = true }) {
-                    Text("Sort: $sortBy ($sortDirection)")
-                }
-                DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
-                    listOf("import_order", "filename", "date", "size", "resolution", "random").forEach { key ->
-                        DropdownMenuItem(
-                            text = { Text(key) },
-                            onClick = {
-                                sortBy = key
-                                sortMenuExpanded = false
-                            },
-                        )
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AssistChip(onClick = { sortDirection = "asc" }, label = { Text(if (sortDirection == "asc") "Direction: ASC" else "ASC") })
-                    AssistChip(onClick = { sortDirection = "desc" }, label = { Text(if (sortDirection == "desc") "Direction: DESC" else "DESC") })
-                }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Filter panel", style = MaterialTheme.typography.titleSmall)
-                OutlinedTextField(
-                    value = fullText,
-                    onValueChange = { fullText = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Full-text") },
-                )
-                OutlinedTextField(
-                    value = collection,
-                    onValueChange = { collection = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Collection (folder URI)") },
-                )
-                OutlinedTextField(
-                    value = tagsCsv,
-                    onValueChange = { tagsCsv = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Tags (comma or | separated)") },
-                )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = taxonomyKey,
-                        onValueChange = { taxonomyKey = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Taxonomy key") },
-                    )
-                    OutlinedTextField(
-                        value = taxonomyValue,
-                        onValueChange = { taxonomyValue = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Taxonomy value") },
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (recentQueries.isNotEmpty()) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                recentQueries.forEach { recent ->
                     AssistChip(
-                        onClick = { includeInactive = !includeInactive },
-                        label = { Text(if (includeInactive) "Include inactive: on" else "Include inactive: off") },
+                        onClick = { query = recent },
+                        label = { Text(recent, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     )
-                }
-
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
-                        val payload = mutableMapOf<String, Any>(
-                            "query" to query,
-                            "sort_by" to sortBy,
-                            "sort_direction" to sortDirection,
-                            "include_inactive" to includeInactive,
-                            "page" to 1,
-                            "page_size" to 0,
-                        )
-                        if (fullText.isNotBlank()) payload["full_text"] = fullText
-                        if (collection.isNotBlank()) payload["collection"] = collection
-
-                        val tags = tagsCsv
-                            .split(',', '|')
-                            .map { it.trim() }
-                            .filter { it.isNotBlank() }
-                        if (tags.isNotEmpty()) payload["tags"] = tags
-
-                        if (taxonomyKey.isNotBlank() && taxonomyValue.isNotBlank()) {
-                            payload["taxonomy_filters"] = mapOf(taxonomyKey.trim() to taxonomyValue.trim())
-                        }
-
-                        val imageId = imageIdQuery.trim().toIntOrNull()
-                        if (imageId != null) {
-                            payload["image_id"] = imageId
-                        }
-
-                        onAdvancedSearch(payload)
-                    }) {
-                        Text("Run advanced search")
-                    }
-                    if (mode == "semantic") {
-                        Button(onClick = { onSemanticSearch(query) }) {
-                            Text("Run semantic search")
-                        }
-                    }
                 }
             }
         }
 
-        Text("Results: ${results.size} | Sort: $sortBy ${sortDirection.uppercase()}", style = MaterialTheme.typography.labelLarge)
-        if (state.lastActionMessage != null) {
-            AsterionStatusNotice(state.lastActionMessage)
+        AnimatedVisibility(visible = showAdvanced) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Filters", style = MaterialTheme.typography.titleSmall)
+                    OutlinedTextField(
+                        value = imageIdQuery,
+                        onValueChange = { imageIdQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Image ID") },
+                    )
+                    OutlinedTextField(
+                        value = fullText,
+                        onValueChange = { fullText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Full text") },
+                    )
+                    OutlinedTextField(
+                        value = tagsCsv,
+                        onValueChange = { tagsCsv = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Tags") },
+                    )
+                    OutlinedTextField(
+                        value = collection,
+                        onValueChange = { collection = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Collection") },
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = taxonomyKey,
+                            onValueChange = { taxonomyKey = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("Taxonomy key") },
+                        )
+                        OutlinedTextField(
+                            value = taxonomyValue,
+                            onValueChange = { taxonomyValue = it },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            label = { Text("Value") },
+                        )
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Box {
+                            AssistChip(
+                                onClick = { sortMenuExpanded = true },
+                                label = { Text("Sort: $sortBy") },
+                            )
+                            DropdownMenu(
+                                expanded = sortMenuExpanded,
+                                onDismissRequest = { sortMenuExpanded = false },
+                            ) {
+                                listOf("import_order", "filename", "date", "size", "resolution", "random").forEach { key ->
+                                    DropdownMenuItem(
+                                        text = { Text(key.replace('_', ' ')) },
+                                        onClick = {
+                                            sortBy = key
+                                            sortMenuExpanded = false
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        AssistChip(
+                            onClick = { sortDirection = if (sortDirection == "asc") "desc" else "asc" },
+                            label = { Text(sortDirection.uppercase()) },
+                        )
+                        AssistChip(
+                            onClick = { includeInactive = !includeInactive },
+                            label = { Text(if (includeInactive) "Inactive included" else "Active only") },
+                        )
+                    }
+                    Button(onClick = { runAdvanced() }) { Text("Apply filters") }
+                }
+            }
         }
-        if (state.errorMessage != null) {
-            AsterionStatusNotice(message = state.errorMessage, isError = true)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("${results.size} results", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "$sortBy · ${sortDirection.uppercase()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
+
+        state.lastActionMessage?.let { AsterionStatusNotice(it) }
+        state.errorMessage?.let { AsterionStatusNotice(it, isError = true) }
 
         if (state.loading) {
-            AsterionProgressCard("Searching library", 0.35f, "Applying filters and preparing results.")
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
         if (results.isEmpty()) {
             AsterionEmptyState(
-                title = "No search results",
-                detail = "Try a broader term, clear a filter, or scan a library folder first.",
+                title = "No results",
+                detail = "Try a broader query or remove filters.",
             )
-        } else LazyColumn(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(bottom = 4.dp),
-        ) {
-            items(results) { item ->
-                val caption = item["filename"]?.toString().orEmpty().ifBlank { item["path"]?.toString().orEmpty() }
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenImage(item) },
-                ) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(caption.ifBlank { "Untitled" })
-                        Text(item["path"]?.toString().orEmpty(), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        val imageId = item.imageId()
-                        Text("ID: ${imageId ?: "n/a"}")
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 8.dp),
+            ) {
+                items(results) { item ->
+                    val caption = item["filename"]?.toString().orEmpty().ifBlank {
+                        item["path"]?.toString().orEmpty().ifBlank { "Untitled" }
+                    }
+                    val thumbnail = item["thumbnail_url"]?.toString()?.takeIf { it.isNotBlank() }
+                        ?: item["file_url"]?.toString()?.takeIf { it.isNotBlank() }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onOpenImage(item) },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (!thumbnail.isNullOrBlank()) {
+                                ImageTile(
+                                    model = thumbnail,
+                                    contentDescription = caption,
+                                    modifier = Modifier
+                                        .width(92.dp)
+                                        .height(72.dp),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            }
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(caption, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    item["path"]?.toString().orEmpty(),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                item.imageId()?.let {
+                                    Text(
+                                        "ID $it",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
-                Text("Dashboard")
-            }
-            Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) {
-                Text("Library")
-            }
+            TextButton(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
+            TextButton(onClick = { onNavigate(AppDestination.LibraryBrowser) }) { Text("Library") }
         }
     }
 }
