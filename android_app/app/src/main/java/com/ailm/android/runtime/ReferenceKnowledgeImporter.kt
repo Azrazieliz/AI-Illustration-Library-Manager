@@ -26,16 +26,58 @@ internal data class ReferenceTagEntry(
 internal data class ReferenceKnowledgeBundle(
     val series: List<ReferenceSeriesEntry>,
     val tags: List<ReferenceTagEntry>,
+    val characters: List<KnowledgeCharacterEntry> = emptyList(),
 )
 
 internal object ReferenceKnowledgeParser {
     fun parseDocuments(documents: Map<String, String>): ReferenceKnowledgeBundle {
         val series = linkedMapOf<String, ReferenceSeriesEntry>()
         val tags = linkedMapOf<String, ReferenceTagEntry>()
+        val characters = linkedMapOf<String, KnowledgeCharacterEntry>()
         documents.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (filename, raw) ->
             collectObjects(raw).forEach { obj ->
                 val canonicalName = obj.optString("canonical_name").trim()
+                    .ifBlank { obj.optString("character_name").trim() }
                 if (canonicalName.isBlank()) return@forEach
+
+                val characterId = obj.optString("character_id").trim()
+                if (characterId.isNotBlank()) {
+                    val primarySeries = obj.optString("primary_series_code").trim()
+                        .ifBlank { obj.optString("series_code").trim() }
+                    val attributes = linkedSetOf<String>().apply {
+                        addAll(stringList(obj.optJSONArray("attribute_ids")))
+                        val attributeObject = obj.optJSONObject("attributes")
+                        attributeObject?.keys()?.forEach { key ->
+                            when (val value = attributeObject.opt(key)) {
+                                is JSONArray -> addAll(stringList(value))
+                                is String -> value.trim().takeIf(String::isNotBlank)?.let(::add)
+                            }
+                        }
+                    }
+                    characters.putIfAbsent(
+                        characterId.lowercase(Locale.US),
+                        KnowledgeCharacterEntry(
+                            characterId = characterId,
+                            parentCharacterId = obj.optString("parent_character_id").trim(),
+                            identityGroupId = obj.optString("identity_group_id").trim(),
+                            entryType = obj.optString("entry_type").trim().ifBlank {
+                                if (obj.optString("parent_character_id").isNotBlank()) "transformation" else "identity"
+                            },
+                            canonicalName = canonicalName,
+                            primarySeriesCode = primarySeries,
+                            aliases = stringList(obj.optJSONArray("aliases")),
+                            attributeIds = attributes.toList(),
+                            weaponIds = stringList(obj.optJSONArray("canonical_weapon_ids"))
+                                .ifEmpty { stringList(obj.optJSONArray("weapon_ids")) },
+                            outfitIds = stringList(obj.optJSONArray("canonical_outfit_ids"))
+                                .ifEmpty { stringList(obj.optJSONArray("outfit_ids")) },
+                            sheetAssetId = obj.optString("sheet_asset_id").trim(),
+                            metadata = emptyMap(),
+                        ),
+                    )
+                    return@forEach
+                }
+
                 val seriesCode = obj.optString("series_code").trim()
                 if (seriesCode.isNotBlank()) {
                     series.putIfAbsent(
@@ -68,7 +110,11 @@ internal object ReferenceKnowledgeParser {
                 }
             }
         }
-        return ReferenceKnowledgeBundle(series.values.toList(), tags.values.toList())
+        return ReferenceKnowledgeBundle(
+            series = series.values.toList(),
+            tags = tags.values.toList(),
+            characters = characters.values.toList(),
+        )
     }
 
     private fun collectObjects(raw: String): List<JSONObject> {
@@ -126,7 +172,7 @@ internal object ReferenceKnowledgeParser {
 }
 
 internal class ReferenceKnowledgeImporter(
-    private val database: LocalDatabase,
+    private val knowledgeDatabase: KnowledgeDatabase,
 ) {
     fun importZip(input: InputStream, sourceName: String): Map<String, Any> {
         val documents = linkedMapOf<String, String>()
@@ -142,108 +188,43 @@ internal class ReferenceKnowledgeImporter(
         if (documents.isEmpty()) {
             return mapOf("ok" to false, "message" to "No JSON knowledge files were found in $sourceName.")
         }
-        return importBundle(ReferenceKnowledgeParser.parseDocuments(documents), sourceName)
-    }
 
-    private fun importBundle(bundle: ReferenceKnowledgeBundle, sourceName: String): Map<String, Any> {
-        val db = database.writableDatabase
-        var seriesInserted = 0
-        var tagsInserted = 0
-        var aliasesInserted = 0
-        val now = System.currentTimeMillis()
-
-        db.beginTransaction()
-        try {
-            bundle.series.forEachIndexed { index, entry ->
-                val values = ContentValues().apply {
-                    put("series_code", entry.code)
-                    putNull("franchise_id")
-                    putNull("parent_series_code")
-                    put("canonical_title", entry.name)
-                    put("localized_title", "")
-                    put("aliases_json", JSONArray(entry.aliases).toString())
-                    put("metadata_json", JSONObject(mapOf(
-                        "source" to "reference_knowledge_archive",
-                        "source_archive" to sourceName,
-                        "franchise" to entry.franchise,
-                    )).toString())
-                    put("workbook_row", index + 1)
-                    put("created_at_ms", now)
-                    put("updated_at_ms", now)
-                }
-                if (db.insertWithOnConflict(
-                        FusionDatabaseSchema.TABLE_SERIES,
-                        null,
-                        values,
-                        SQLiteDatabase.CONFLICT_IGNORE,
-                    ) != -1L
-                ) seriesInserted += 1
-            }
-
-            bundle.tags.forEachIndexed { index, entry ->
-                val values = ContentValues().apply {
-                    put("tag_id", entry.id)
-                    put("canonical_name", entry.name)
-                    put("category", entry.category)
-                    putNull("parent_tag_id")
-                    put("metadata_json", JSONObject(mapOf(
-                        "source" to "reference_knowledge_archive",
-                        "source_archive" to sourceName,
-                    )).toString())
-                    put("workbook_row", index + 1)
-                    put("created_at_ms", now)
-                    put("updated_at_ms", now)
-                }
-                if (db.insertWithOnConflict(
-                        FusionDatabaseSchema.TABLE_TAGS,
-                        null,
-                        values,
-                        SQLiteDatabase.CONFLICT_IGNORE,
-                    ) != -1L
-                ) tagsInserted += 1
-            }
-
-            bundle.tags.forEach { entry ->
-                if (entry.parentId.isNotBlank()) {
-                    db.execSQL(
-                        "UPDATE ${FusionDatabaseSchema.TABLE_TAGS} SET parent_tag_id = ? WHERE tag_id = ? AND EXISTS (SELECT 1 FROM ${FusionDatabaseSchema.TABLE_TAGS} WHERE tag_id = ?)",
-                        arrayOf(entry.parentId, entry.id, entry.parentId),
-                    )
-                }
-                entry.aliases.distinct().forEach { alias ->
-                    val aliasValues = ContentValues().apply {
-                        put("alias_id", "ref:${entry.id}:${alias.lowercase(Locale.US).replace(Regex("[^a-z0-9]+"), "-").trim('-')}")
-                        put("tag_id", entry.id)
-                        put("alias_value", alias)
-                        put("locale", "")
-                        put("created_at_ms", now)
-                    }
-                    if (db.insertWithOnConflict(
-                            FusionDatabaseSchema.TABLE_TAG_ALIASES,
-                            null,
-                            aliasValues,
-                            SQLiteDatabase.CONFLICT_IGNORE,
-                        ) != -1L
-                    ) aliasesInserted += 1
-                }
-            }
-
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
+        val bundle = ReferenceKnowledgeParser.parseDocuments(documents)
+        if (bundle.series.isEmpty() && bundle.tags.isEmpty() && bundle.characters.isEmpty()) {
+            return mapOf("ok" to false, "message" to "No supported Knowledge entries were found in $sourceName.")
         }
 
-        return mapOf(
-            "ok" to true,
-            "message" to "Reference knowledge imported.",
-            "kind" to "reference_knowledge_archive",
-            "source" to sourceName,
-            "series_entries" to bundle.series.size,
-            "tag_entries" to bundle.tags.size,
-            "series_inserted" to seriesInserted,
-            "tags_inserted" to tagsInserted,
-            "aliases_inserted" to aliasesInserted,
-            "characters_imported" to 0,
-        )
+        return runCatching {
+            if (bundle.series.isNotEmpty() || bundle.tags.isNotEmpty()) {
+                require(bundle.series.isNotEmpty() && bundle.tags.isNotEmpty()) {
+                    "A taxonomy release must contain both canonical series and taxonomy values."
+                }
+                knowledgeDatabase.replaceReferenceKnowledge(
+                    ReferenceKnowledgeBundle(bundle.series, bundle.tags),
+                    sourceName,
+                )
+            }
+            if (bundle.characters.isNotEmpty()) {
+                knowledgeDatabase.replaceCharacterKnowledge(bundle.characters, sourceName)
+            }
+            mapOf(
+                "ok" to true,
+                "message" to "Immutable Knowledge release imported.",
+                "kind" to "immutable_knowledge_release",
+                "source" to sourceName,
+                "series_entries" to bundle.series.size,
+                "tag_entries" to bundle.tags.size,
+                "character_entries" to bundle.characters.size,
+                "characters_imported" to bundle.characters.size,
+                "fusion_modified" to false,
+            )
+        }.getOrElse { error ->
+            mapOf(
+                "ok" to false,
+                "message" to (error.message ?: error.javaClass.simpleName),
+                "kind" to "immutable_knowledge_release",
+                "source" to sourceName,
+            )
+        }
     }
 }
