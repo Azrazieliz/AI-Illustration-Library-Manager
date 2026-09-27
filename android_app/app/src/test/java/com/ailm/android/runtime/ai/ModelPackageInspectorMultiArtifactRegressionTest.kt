@@ -15,7 +15,16 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
         val root = createTempDirectory("asterion-buffalo-role-aware-").toFile()
         try {
             writeBuffaloFixture(root)
+            val primaryBindings = ModelArtifactInspector.inspect(File(root, "det_10g.onnx"), AiRuntimeType.ONNX.raw)
+            val embeddingBindings = ModelArtifactInspector.inspect(File(root, "w600k_r50.onnx"), AiRuntimeType.ONNX.raw)
+            assertEquals(9, primaryBindings.outputs.size)
+            assertEquals(listOf("683"), embeddingBindings.outputs.map { it.name })
+
             val inspection = ModelPackageInspector().inspect(root, File(root, "extracted"))
+            assertFalse(
+                "All deterministic ONNX fixtures must be inspectable: ${inspection.issues}",
+                inspection.issues.any { it.code == "tensor_metadata_unreadable" },
+            )
 
             assertEquals("det_10g.onnx", inspection.artifact?.name)
             val paths = inspection.metadata["artifact_paths_by_role"] as Map<*, *>
@@ -44,9 +53,17 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
         val root = createTempDirectory("asterion-buffalo-invalid-role-").toFile()
         try {
             writeBuffaloFixture(root, faceEmbeddingOutput = "wrong_embedding_output")
+            val embeddingBindings = ModelArtifactInspector.inspect(File(root, "w600k_r50.onnx"), AiRuntimeType.ONNX.raw)
+            assertEquals(listOf("wrong_embedding_output"), embeddingBindings.outputs.map { it.name })
+
             val inspection = ModelPackageInspector().inspect(root, File(root, "extracted"))
+            assertFalse(
+                "The malformed role fixture must still have readable tensor metadata: ${inspection.issues}",
+                inspection.issues.any { it.code == "tensor_metadata_unreadable" },
+            )
 
             assertTrue(
+                "A wrong role-specific output must be rejected. issues=${inspection.issues}",
                 inspection.issues.any { issue ->
                     issue.code == "tensor_output_missing" &&
                         issue.message.startsWith("face_embedding") &&
