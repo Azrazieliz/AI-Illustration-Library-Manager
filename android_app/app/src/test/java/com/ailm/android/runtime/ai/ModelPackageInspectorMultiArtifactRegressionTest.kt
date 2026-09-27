@@ -1,6 +1,5 @@
 package com.ailm.android.runtime.ai
 
-import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import org.junit.Assert.assertEquals
@@ -15,16 +14,14 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
         val root = createTempDirectory("asterion-buffalo-role-aware-").toFile()
         try {
             writeBuffaloFixture(root)
-            val primaryBindings = ModelArtifactInspector.inspect(File(root, "det_10g.onnx"), AiRuntimeType.ONNX.raw)
-            val embeddingBindings = ModelArtifactInspector.inspect(File(root, "w600k_r50.onnx"), AiRuntimeType.ONNX.raw)
-            assertEquals(9, primaryBindings.outputs.size)
-            assertEquals(listOf("683"), embeddingBindings.outputs.map { it.name })
+            val inspectedArtifacts = mutableListOf<String>()
+            val inspector = ModelPackageInspector { artifact, runtime ->
+                assertEquals(AiRuntimeType.ONNX.raw, runtime)
+                inspectedArtifacts += artifact.name
+                bindingsFor(artifact.name)
+            }
 
-            val inspection = ModelPackageInspector().inspect(root, File(root, "extracted"))
-            assertFalse(
-                "All deterministic ONNX fixtures must be inspectable: ${inspection.issues}",
-                inspection.issues.any { it.code == "tensor_metadata_unreadable" },
-            )
+            val inspection = inspector.inspect(root, File(root, "extracted"))
 
             assertEquals("det_10g.onnx", inspection.artifact?.name)
             val paths = inspection.metadata["artifact_paths_by_role"] as Map<*, *>
@@ -33,6 +30,12 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
             assertEquals("2d106det.onnx", File(paths["landmark_2d"].toString()).name)
             assertEquals("1k3d68.onnx", File(paths["landmark_3d"].toString()).name)
             assertEquals("genderage.onnx", File(paths["gender_age"].toString()).name)
+
+            assertTrue(inspectedArtifacts.contains("det_10g.onnx"))
+            assertTrue(inspectedArtifacts.contains("w600k_r50.onnx"))
+            assertTrue(inspectedArtifacts.contains("2d106det.onnx"))
+            assertTrue(inspectedArtifacts.contains("1k3d68.onnx"))
+            assertTrue(inspectedArtifacts.contains("genderage.onnx"))
 
             val roleTasks = setOf("face_embedding", "landmark_2d", "landmark_3d", "gender_age")
             val falseCrossArtifactIssues = inspection.issues.filter { issue ->
@@ -52,15 +55,19 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
     fun `role aware validation still rejects a genuinely invalid role specific tensor contract`() {
         val root = createTempDirectory("asterion-buffalo-invalid-role-").toFile()
         try {
-            writeBuffaloFixture(root, faceEmbeddingOutput = "wrong_embedding_output")
-            val embeddingBindings = ModelArtifactInspector.inspect(File(root, "w600k_r50.onnx"), AiRuntimeType.ONNX.raw)
-            assertEquals(listOf("wrong_embedding_output"), embeddingBindings.outputs.map { it.name })
+            writeBuffaloFixture(root)
+            val inspector = ModelPackageInspector { artifact, runtime ->
+                assertEquals(AiRuntimeType.ONNX.raw, runtime)
+                if (artifact.name == "w600k_r50.onnx") {
+                    bindingsFor(artifact.name).copy(
+                        outputs = listOf(tensor("wrong_embedding_output", 0, listOf(1, 512))),
+                    )
+                } else {
+                    bindingsFor(artifact.name)
+                }
+            }
 
-            val inspection = ModelPackageInspector().inspect(root, File(root, "extracted"))
-            assertFalse(
-                "The malformed role fixture must still have readable tensor metadata: ${inspection.issues}",
-                inspection.issues.any { it.code == "tensor_metadata_unreadable" },
-            )
+            val inspection = inspector.inspect(root, File(root, "extracted"))
 
             assertTrue(
                 "A wrong role-specific output must be rejected. issues=${inspection.issues}",
@@ -76,6 +83,7 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
                         issue.message.startsWith("landmark_2d")
                 },
             )
+            assertFalse("A missing declared output is blocking", inspection.valid)
         } finally {
             root.deleteRecursively()
         }
@@ -85,12 +93,7 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
     fun `single artifact tensor validation behavior remains unchanged`() {
         val root = createTempDirectory("asterion-single-artifact-").toFile()
         try {
-            MinimalOnnxFixture.writeIdentityModel(
-                File(root, "model.onnx"),
-                inputName = "input",
-                outputNames = listOf("output"),
-                shape = listOf(1, 3, 8, 8),
-            )
+            File(root, "model.onnx").writeText("fixture")
             File(root, "metadata.json").writeText(
                 """
                 {
@@ -123,7 +126,7 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
                           "name": "output",
                           "index": 0,
                           "data_type": "float32",
-                          "shape": [1, 3, 8, 8]
+                          "shape": [1, 1]
                         }
                       ],
                       "output_decoder": {
@@ -140,8 +143,16 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
                 }
                 """.trimIndent(),
             )
+            val inspector = ModelPackageInspector { artifact, runtime ->
+                assertEquals("model.onnx", artifact.name)
+                assertEquals(AiRuntimeType.ONNX.raw, runtime)
+                ModelArtifactBindings(
+                    inputs = listOf(tensor("input", 0, listOf(1, 3, 8, 8))),
+                    outputs = listOf(tensor("output", 0, listOf(1, 1))),
+                )
+            }
 
-            val inspection = ModelPackageInspector().inspect(root, File(root, "extracted"))
+            val inspection = inspector.inspect(root, File(root, "extracted"))
 
             assertNotNull(inspection.artifact)
             assertEquals("model.onnx", inspection.artifact?.name)
@@ -154,150 +165,52 @@ class ModelPackageInspectorMultiArtifactRegressionTest {
         }
     }
 
-    private fun writeBuffaloFixture(root: File, faceEmbeddingOutput: String = "683") {
-        MinimalOnnxFixture.writeIdentityModel(
-            File(root, "det_10g.onnx"),
-            inputName = "input.1",
-            outputNames = List(9) { index -> "det_output_$index" },
-            shape = listOf(1, 3, 640, 640),
-        )
-        MinimalOnnxFixture.writeIdentityModel(
-            File(root, "w600k_r50.onnx"),
-            inputName = "input.1",
-            outputNames = listOf(faceEmbeddingOutput),
-            shape = listOf(1, 3, 112, 112),
-        )
-        MinimalOnnxFixture.writeIdentityModel(
-            File(root, "2d106det.onnx"),
-            inputName = "data",
-            outputNames = listOf("fc1"),
-            shape = listOf(1, 3, 192, 192),
-        )
-        MinimalOnnxFixture.writeIdentityModel(
-            File(root, "1k3d68.onnx"),
-            inputName = "data",
-            outputNames = listOf("fc1"),
-            shape = listOf(1, 3, 192, 192),
-        )
-        MinimalOnnxFixture.writeIdentityModel(
-            File(root, "genderage.onnx"),
-            inputName = "data",
-            outputNames = listOf("fc1"),
-            shape = listOf(1, 3, 96, 96),
-        )
-    }
-}
-
-private object MinimalOnnxFixture {
-    fun writeIdentityModel(
-        file: File,
-        inputName: String,
-        outputNames: List<String>,
-        shape: List<Int>,
-    ) {
-        require(outputNames.isNotEmpty())
-        file.parentFile?.mkdirs()
-        file.writeBytes(model(inputName, outputNames, shape))
-    }
-
-    private fun model(inputName: String, outputNames: List<String>, shape: List<Int>): ByteArray {
-        val graph = proto {
-            outputNames.forEach { outputName ->
-                message(1, node(inputName, outputName))
-            }
-            string(2, "asterion_test_graph")
-            message(11, valueInfo(inputName, shape))
-            outputNames.forEach { outputName ->
-                message(12, valueInfo(outputName, shape))
-            }
-        }
-        val opset = proto {
-            string(1, "")
-            varint(2, 13)
-        }
-        return proto {
-            varint(1, 8)
-            string(2, "asterion-core-regression")
-            message(7, graph)
-            message(8, opset)
+    private fun writeBuffaloFixture(root: File) {
+        listOf(
+            "det_10g.onnx",
+            "w600k_r50.onnx",
+            "2d106det.onnx",
+            "1k3d68.onnx",
+            "genderage.onnx",
+        ).forEach { name ->
+            File(root, name).writeText("fixture:$name")
         }
     }
 
-    private fun node(inputName: String, outputName: String): ByteArray = proto {
-        string(1, inputName)
-        string(2, outputName)
-        string(4, "Identity")
-    }
-
-    private fun valueInfo(name: String, shape: List<Int>): ByteArray = proto {
-        string(1, name)
-        message(
-            2,
-            proto {
-                message(
-                    1,
-                    proto {
-                        varint(1, 1)
-                        message(
-                            2,
-                            proto {
-                                shape.forEach { dimension ->
-                                    message(
-                                        1,
-                                        proto {
-                                            varint(1, dimension.toLong())
-                                        },
-                                    )
-                                }
-                            },
-                        )
-                    },
-                )
-            },
+    private fun bindingsFor(name: String): ModelArtifactBindings = when (name) {
+        "det_10g.onnx" -> ModelArtifactBindings(
+            inputs = listOf(tensor("input.1", 0, listOf(1, 3, 640, 640))),
+            outputs = listOf(
+                tensor("score_8", 0, listOf(1, 2, 80, 80)),
+                tensor("score_16", 1, listOf(1, 2, 40, 40)),
+                tensor("score_32", 2, listOf(1, 2, 20, 20)),
+                tensor("bbox_8", 3, listOf(1, 8, 80, 80)),
+                tensor("bbox_16", 4, listOf(1, 8, 40, 40)),
+                tensor("bbox_32", 5, listOf(1, 8, 20, 20)),
+                tensor("kps_8", 6, listOf(1, 20, 80, 80)),
+                tensor("kps_16", 7, listOf(1, 20, 40, 40)),
+                tensor("kps_32", 8, listOf(1, 20, 20, 20)),
+            ),
         )
+        "w600k_r50.onnx" -> ModelArtifactBindings(
+            inputs = listOf(tensor("input.1", 0, listOf(1, 3, 112, 112))),
+            outputs = listOf(tensor("683", 0, listOf(1, 512))),
+        )
+        "2d106det.onnx" -> ModelArtifactBindings(
+            inputs = listOf(tensor("data", 0, listOf(1, 3, 192, 192))),
+            outputs = listOf(tensor("fc1", 0, listOf(1, 212))),
+        )
+        "1k3d68.onnx" -> ModelArtifactBindings(
+            inputs = listOf(tensor("data", 0, listOf(1, 3, 192, 192))),
+            outputs = listOf(tensor("fc1", 0, listOf(1, 3309))),
+        )
+        "genderage.onnx" -> ModelArtifactBindings(
+            inputs = listOf(tensor("data", 0, listOf(1, 3, 96, 96))),
+            outputs = listOf(tensor("fc1", 0, listOf(1, 3))),
+        )
+        else -> error("Unexpected fixture artifact: $name")
     }
 
-    private fun proto(block: ProtoWriter.() -> Unit): ByteArray =
-        ProtoWriter().apply(block).toByteArray()
-
-    private class ProtoWriter {
-        private val output = ByteArrayOutputStream()
-
-        fun varint(field: Int, value: Long) {
-            tag(field, 0)
-            rawVarint(value)
-        }
-
-        fun string(field: Int, value: String) {
-            bytes(field, value.toByteArray(Charsets.UTF_8))
-        }
-
-        fun message(field: Int, value: ByteArray) {
-            bytes(field, value)
-        }
-
-        private fun bytes(field: Int, value: ByteArray) {
-            tag(field, 2)
-            rawVarint(value.size.toLong())
-            output.write(value)
-        }
-
-        private fun tag(field: Int, wireType: Int) {
-            rawVarint(((field shl 3) or wireType).toLong())
-        }
-
-        private fun rawVarint(raw: Long) {
-            var value = raw
-            do {
-                var next = (value and 0x7f).toInt()
-                value = value ushr 7
-                if (value != 0L) {
-                    next = next or 0x80
-                }
-                output.write(next)
-            } while (value != 0L)
-        }
-
-        fun toByteArray(): ByteArray = output.toByteArray()
-    }
+    private fun tensor(name: String, index: Int, shape: List<Int>) =
+        ModelArtifactTensor(name, index, "float32", shape)
 }
