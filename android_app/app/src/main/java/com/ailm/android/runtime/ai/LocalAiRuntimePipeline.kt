@@ -213,10 +213,35 @@ class LocalAiValidationService(
                         "File size ${file.length()} does not match expected ${model.sizeBytes}",
                     )
                 }
-                if (model.hashSha256.isNotBlank()) {
+                val packageHash = model.metadata["package_hash_sha256"]?.toString()?.trim().orEmpty()
+                val artifactHash = model.metadata["artifact_hash_sha256"]?.toString()?.trim().orEmpty()
+                val descriptorHash = model.hashSha256.trim()
+                val expectedArtifactHash = artifactHash.ifBlank {
+                    descriptorHash.takeUnless { hash ->
+                        packageHash.isNotBlank() && hash.equals(packageHash, ignoreCase = true)
+                    }.orEmpty()
+                }
+                if (expectedArtifactHash.isNotBlank()) {
                     val actual = sha256Hex(file)
-                    if (!actual.equals(model.hashSha256, ignoreCase = true)) {
-                        issues += AiValidationIssue("hash_mismatch", "Computed SHA-256 does not match registry hash")
+                    if (!actual.equals(expectedArtifactHash, ignoreCase = true)) {
+                        issues += AiValidationIssue("hash_mismatch", "Computed artifact SHA-256 does not match registry artifact hash")
+                    }
+                } else if (descriptorHash.isNotBlank() && packageHash.isNotBlank() &&
+                    descriptorHash.equals(packageHash, ignoreCase = true)
+                ) {
+                    val packageSource = model.metadata["package_source_path"]?.toString()?.trim().orEmpty()
+                    val packageFile = packageSource.takeIf(String::isNotBlank)?.let(::File)
+                    if (packageFile != null && packageFile.isFile) {
+                        val actualPackageHash = sha256Hex(packageFile)
+                        if (!actualPackageHash.equals(packageHash, ignoreCase = true)) {
+                            issues += AiValidationIssue("package_hash_mismatch", "Computed package SHA-256 does not match stored package hash")
+                        }
+                    } else {
+                        issues += AiValidationIssue(
+                            "artifact_hash_legacy_unavailable",
+                            "Legacy ZIP import has no stored artifact hash; file existence and size were verified, but artifact hash cannot be reconstructed without re-import.",
+                            severity = "warning",
+                        )
                     }
                 }
             }
