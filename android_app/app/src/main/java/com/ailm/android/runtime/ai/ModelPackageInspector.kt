@@ -786,12 +786,21 @@ internal class ModelPackageInspector(
             )
             null
         }
-        val input = bindings?.inputs?.singleOrNull { tensor ->
+        val input = bindings?.inputs?.firstOrNull { tensor ->
+            tensor.name.equals("pixel_values", ignoreCase = true) &&
+                tensor.dataType == "float32" &&
+                tensor.shape.size == 4
+        } ?: bindings?.inputs?.singleOrNull { tensor ->
             tensor.dataType == "float32" &&
                 tensor.shape.size == 4 &&
-                (tensor.shape.getOrNull(1) == 3 || tensor.shape.lastOrNull() == 3)
+                (tensor.shape.getOrNull(1) in setOf(-1, 3) || tensor.shape.lastOrNull() in setOf(-1, 3))
         }
-        val output = bindings?.outputs?.singleOrNull { tensor ->
+        val output = bindings?.outputs?.firstOrNull { tensor ->
+            tensor.name.equals("logits", ignoreCase = true) &&
+                tensor.dataType == "float32" &&
+                tensor.shape.isNotEmpty() &&
+                tensor.shape.lastOrNull() in setOf(-1, 5)
+        } ?: bindings?.outputs?.singleOrNull { tensor ->
             tensor.dataType == "float32" &&
                 tensor.shape.isNotEmpty() &&
                 tensor.shape.lastOrNull() == 5
@@ -2140,6 +2149,7 @@ internal class ModelPackageInspector(
     ) {
         if (metadata[INFERENCE_CONTRACTS_KEY].asStringMap()?.containsKey("aesthetic_scoring") == true) return
         if ("aesthetic_scoring" !in tasks) return
+
         val input = bindings.inputs.singleOrNull { it.name == "input" }
         val output = bindings.outputs.firstOrNull { it.name == "output" }
         if (input == null || output == null) {
@@ -2149,39 +2159,92 @@ internal class ModelPackageInspector(
             )
             return
         }
+
         val validInput = input.dataType == "float32" && input.shape.size == 4 &&
-            input.shape[1] == 3 && input.shape[2] == 384 && input.shape[3] == 384
-        val validOutput = output.dataType == "float32" && output.shape.size == 2 && output.shape[1] == 1
+            input.shape[1] in setOf(-1, 3) &&
+            input.shape[2] in setOf(-1, 384) &&
+            input.shape[3] in setOf(-1, 384)
+        val validOutput = output.dataType == "float32" &&
+            output.shape.size == 2 &&
+            output.shape[1] in setOf(-1, 1)
         if (!validInput || !validOutput) {
             issues += ModelPackageIssue(
                 "aesthetic_scoring_graph_incompatible",
-                "Aesthetic scoring requires float input 'input' with shape [B,3,384,384] and float output 'output' with shape [B,1].",
+                "Aesthetic Predictor v2.5 requires float input 'input' [B,3,384,384] and float output 'output' [B,1].",
             )
             return
         }
-        val preprocessingKnown = filesByName.keys.any {
-            it == "preprocessor_config.json" || it == "processor.json" || it == "preprocessing.json"
-        }
-        if (!preprocessingKnown) {
+
+        val modelId = metadata["model_id"]?.toString().orEmpty().lowercase()
+        val knownV25 = modelId.contains("aesthetic_predictor_v2.5") ||
+            modelId.contains("aesthetic-predictor-v2.5") ||
+            filesByName.keys.any { name ->
+                name == "aesthetic_predictor_v2_5.onnx" ||
+                    name == "aesthetic_predictor_v2.5.onnx"
+            }
+
+        if (!knownV25) {
             issues += ModelPackageIssue(
                 "preprocessing_contract_unresolved",
-                "Aesthetic predictor package does not declare exact external image preprocessing, and the ONNX graph does not establish it at the package contract boundary.",
+                "Aesthetic scoring graph matches the expected shape, but this package is not identified as Aesthetic Predictor v2.5 so its external preprocessing is not assumed.",
             )
             metadata["execution_readiness"] = mapOf(
                 "ready" to false,
                 "stage" to "imported_not_executable",
                 "blockers" to listOf("preprocessing_contract_unresolved"),
             )
+            return
         }
+
+        metadata["aesthetic_preprocessing_profile"] = mapOf(
+            "family" to "siglip-so400m-patch14-384",
+            "width" to 384,
+            "height" to 384,
+            "scale" to (1f / 255f),
+            "mean" to listOf(0.5f, 0.5f, 0.5f),
+            "std" to listOf(0.5f, 0.5f, 0.5f),
+            "source" to "upstream_aesthetic_predictor_v2.5_siglip_profile",
+        )
+        metadata.remove("execution_readiness")
+
         metadata[INFERENCE_CONTRACTS_KEY] = mapOf(
             "aesthetic_scoring" to mapOf(
+                "tokenizer" to mapOf("type" to "none"),
                 "inputs" to listOf(
-                    mapOf("name" to input.name, "source" to "image", "data_type" to "float32", "layout" to "nchw", "shape" to input.shape, "payload_key" to "image_uri"),
+                    mapOf(
+                        "name" to input.name,
+                        "source" to "image",
+                        "data_type" to "float32",
+                        "layout" to "nchw",
+                        "shape" to input.shape,
+                        "payload_key" to "image_uri",
+                    ),
                 ),
-                "outputs" to listOf(mapOf("name" to output.name, "index" to output.index, "data_type" to "float32", "shape" to output.shape)),
-                "output_decoder" to mapOf("type" to "regression", "output_name" to output.name, "hidden_dimension" to 1),
+                "outputs" to listOf(
+                    mapOf(
+                        "name" to output.name,
+                        "index" to output.index,
+                        "data_type" to "float32",
+                        "shape" to output.shape,
+                    ),
+                ),
+                "output_decoder" to mapOf(
+                    "type" to "regression",
+                    "output_name" to output.name,
+                    "hidden_dimension" to 1,
+                ),
                 "confidence_scoring" to mapOf("type" to "identity", "threshold" to 0f),
-                "image_preprocessing" to mapOf("enabled" to false),
+                "image_preprocessing" to mapOf(
+                    "enabled" to true,
+                    "width" to 384,
+                    "height" to 384,
+                    "channels" to 3,
+                    "color_space" to "rgb",
+                    "resize_mode" to "stretch",
+                    "scale" to (1f / 255f),
+                    "mean" to listOf(0.5f, 0.5f, 0.5f),
+                    "std" to listOf(0.5f, 0.5f, 0.5f),
+                ),
             ),
         )
     }
