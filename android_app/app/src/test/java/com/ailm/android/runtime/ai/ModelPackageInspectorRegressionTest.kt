@@ -301,6 +301,40 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
+    fun `Nomic text known-package path ignores deeply nested tokenizer metadata during import`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            File(root, "vocab.txt").writeText("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nhello\n")
+            val deeplyNested = buildString {
+                repeat(5000) { append("{\"x\":") }
+                append("0")
+                repeat(5000) { append("}") }
+            }
+            File(root, "tokenizer.json").writeText(deeplyNested)
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(
+                        ModelArtifactTensor("input_ids", 0, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("token_type_ids", 1, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("attention_mask", 2, "int64", listOf(1, -1)),
+                    ),
+                    outputs = listOf(ModelArtifactTensor("last_hidden_state", 0, "float32", listOf(1, -1, 768))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-text-v1.5",
+            )
+
+            assertTrue(result.valid)
+            assertTrue(result.supportedTasks.contains("embedding_generation"))
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+        }
+    }
+
+    @Test
     fun `BGE tokenizer with UTF-8 BOM remains valid package metadata and builds reranking contract`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
@@ -438,8 +472,8 @@ class ModelPackageInspectorRegressionTest {
             File(root, "preprocessor_config.json").writeText(preprocessorRaw)
             val inspector = ModelPackageInspector { _, _ ->
                 ModelArtifactBindings(
-                    inputs = listOf(ModelArtifactTensor("pixel_values", 0, "float32", listOf(1, 3, 224, 224))),
-                    outputs = listOf(ModelArtifactTensor("logits", 0, "float32", listOf(1, 5))),
+                    inputs = listOf(ModelArtifactTensor("pixel_values", 0, "float32", listOf(1, 224, 224, 3))),
+                    outputs = listOf(ModelArtifactTensor("logits", 0, "float32", listOf(5))),
                 )
             }
 
