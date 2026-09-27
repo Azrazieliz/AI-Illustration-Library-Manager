@@ -248,8 +248,8 @@ internal data class TokenizerContract(
                 "Tokenizer type '$type' is unsupported for '$taskType'"
             }
             val vocabulary = value["vocabulary"].stringList()
-            val sourceFile = value["source_file"].text()
-            val sourceFormat = value["source_format"].text()
+            val sourceFile = value["source_file"]?.toString()?.trim().orEmpty()
+            val sourceFormat = value["source_format"]?.toString()?.trim().orEmpty()
             if (type != "none" && vocabulary.isEmpty() && sourceFile.isBlank()) {
                 throw ModelInferenceContractException("Tokenizer '$type' for '$taskType' must define vocabulary or source_file")
             }
