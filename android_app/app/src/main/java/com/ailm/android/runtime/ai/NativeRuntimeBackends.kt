@@ -80,6 +80,14 @@ class OnnxRuntimeBackend(
 
     override suspend fun execute(request: AiExecutionRequest, reporter: AiProgressReporter): AiExecutionResult {
         val registeredModel = modelResolver(request.modelId, request.version) ?: return unavailable("Model is not installed")
+        if (AiTaskTypes.normalize(request.taskType) == "ocr" && registeredModel.metadata["paddle_ocr"] != null) {
+            return PaddleOcrRuntime(context).execute(
+                model = registeredModel,
+                request = request,
+                reporter = reporter,
+                runtimeId = runtimeId,
+            )
+        }
         if (isFlorenceStage3Request(registeredModel, request)) {
             return try {
                 reporter.report(0.15, "Preparing Florence Stage 4 decoder-with-past generation inputs")
