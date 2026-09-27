@@ -1811,7 +1811,7 @@ private fun ImageViewerScreen(
         val positionLabel = if (currentIndex >= 0) "${currentIndex + 1} / ${sourceRows.size}" else ""
 
         fun finishSwipe() {
-            val threshold = 72f
+            val threshold = 44f
             val idx = sourceRows.indexOfFirst { it.imageId() == imageId }
             when {
                 swipeAccumLocal > threshold && idx >= 0 && idx < sourceRows.lastIndex -> onSelectImage(sourceRows[idx + 1])
@@ -1889,11 +1889,31 @@ private fun ImageViewerScreen(
                     }
                 }
 
-                Text(
-                    "Swipe anywhere in this panel to move between images.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (sourceRows.size > 1 && currentIndex >= 0) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = { if (currentIndex > 0) onSelectImage(sourceRows[currentIndex - 1]) },
+                            enabled = currentIndex > 0,
+                        ) {
+                            Text("Previous")
+                        }
+                        Text(
+                            "Swipe anywhere below the image",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(
+                            onClick = { if (currentIndex < sourceRows.lastIndex) onSelectImage(sourceRows[currentIndex + 1]) },
+                            enabled = currentIndex < sourceRows.lastIndex,
+                        ) {
+                            Text("Next")
+                        }
+                    }
+                }
 
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
