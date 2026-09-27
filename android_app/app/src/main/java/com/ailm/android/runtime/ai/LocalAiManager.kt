@@ -401,10 +401,12 @@ class LocalAiManager(
 
             val primary = inspection.artifact ?: throw IllegalStateException("No executable artifact found in package")
             val sizeBytes = primary.length()
-            val computedHash = if (sourceFile.isFile && sourceFile.extension.equals("zip", ignoreCase = true)) packageHash else sha256Hex(primary)
+            val artifactHash = sha256Hex(primary)
+            val computedHash = artifactHash
             val inspectedMetadata = payload["metadata"].toStringMap() + inspection.metadata + mapOf(
                 "package_source_path" to sourcePath,
                 "package_hash_sha256" to packageHash,
+                "artifact_hash_sha256" to artifactHash,
             )
 
             // Record artifact path and dependencies so runtimes can load auxiliary files.
@@ -751,6 +753,75 @@ class LocalAiManager(
             "ok" to report.valid,
             "install_id" to installId,
             "validation" to report.toMap(),
+        )
+    }
+
+    fun activateInstalledModel(payload: Map<String, Any>): Map<String, Any> {
+        ensureInitialized()
+        val modelId = payload["model_id"]?.toString()?.trim().orEmpty()
+        val version = payload["version"]?.toString()?.trim().orEmpty()
+        val taskType = AiTaskTypes.normalize(payload["task_type"]?.toString()?.trim().orEmpty())
+        if (modelId.isBlank() || version.isBlank()) {
+            return mapOf("ok" to false, "status" to "invalid", "message" to "model_id and version are required")
+        }
+
+        val model = repository.getModel(modelId, version)
+            ?: return mapOf("ok" to false, "status" to "not_found", "message" to "Model $modelId@$version is not registered")
+
+        val integrity = validationService.validateInstalledModel(modelId, version)
+        if (!integrity.valid) {
+            return mapOf(
+                "ok" to false,
+                "status" to "verification_failed",
+                "message" to "Model must pass installed-file verification before activation",
+                "validation" to integrity.toMap(),
+            )
+        }
+
+        val readiness = model.metadata["execution_readiness"].toStringMap()
+        if (readiness["ready"] == false) {
+            return mapOf(
+                "ok" to false,
+                "status" to "not_ready",
+                "message" to "Model is imported but not execution-ready",
+                "readiness" to readiness,
+            )
+        }
+
+        if (taskType.isNotBlank() && taskType !in model.supportedTasks.map(AiTaskTypes::normalize).toSet()) {
+            return mapOf(
+                "ok" to false,
+                "status" to "task_unsupported",
+                "message" to "Model $modelId@$version does not support task '$taskType'",
+            )
+        }
+
+        val descriptorValidation = validationService.validateModelDescriptor(model)
+        val blockingDescriptorIssues = descriptorValidation.issues.filter { it.severity == "error" }
+        if (blockingDescriptorIssues.isNotEmpty()) {
+            return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "message" to "Model descriptor is not execution-compatible",
+                "validation" to descriptorValidation.toMap(),
+            )
+        }
+
+        val suffix = if (taskType.isBlank()) "" else ".$taskType"
+        val settingsPayload = linkedMapOf<String, Any>(
+            "active_model_id$suffix" to model.modelId,
+            "active_model_version$suffix" to model.version,
+        )
+        val settings = settingsManager.updateSettings(settingsPayload).toMap()
+
+        return mapOf(
+            "ok" to true,
+            "status" to "activated",
+            "model_id" to model.modelId,
+            "version" to model.version,
+            "task_type" to taskType,
+            "settings" to settings,
+            "validation" to integrity.toMap(),
         )
     }
 
