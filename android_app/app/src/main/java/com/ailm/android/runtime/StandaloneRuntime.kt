@@ -752,6 +752,11 @@ object StandaloneRuntime {
         return localAiManager.verifyInstalledModel(payload)
     }
 
+    fun activateInstalledAiModel(payload: Map<String, Any>): Map<String, Any> {
+        ensureInitialized()
+        return localAiManager.activateInstalledModel(payload)
+    }
+
     fun removeAiModel(payload: Map<String, Any>): Map<String, Any> {
         ensureInitialized()
         return localAiManager.removeModel(payload)
