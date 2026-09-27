@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - standalone-android
+      - asterion-import-pass1
   workflow_dispatch:
 
 jobs:
