@@ -81,6 +81,17 @@ class LocalAiBackendManager {
     }
 }
 
+internal fun expectedInstalledArtifactHash(model: AiModelDescriptor): String {
+    val packageHash = model.metadata["package_hash_sha256"]?.toString()?.trim().orEmpty()
+    val artifactHash = model.metadata["artifact_hash_sha256"]?.toString()?.trim().orEmpty()
+    val descriptorHash = model.hashSha256.trim()
+    return artifactHash.ifBlank {
+        descriptorHash.takeUnless { hash ->
+            packageHash.isNotBlank() && hash.equals(packageHash, ignoreCase = true)
+        }.orEmpty()
+    }
+}
+
 class LocalAiValidationService(
     private val repository: LocalAiRepository,
     private val backendManager: LocalAiBackendManager,
@@ -214,13 +225,8 @@ class LocalAiValidationService(
                     )
                 }
                 val packageHash = model.metadata["package_hash_sha256"]?.toString()?.trim().orEmpty()
-                val artifactHash = model.metadata["artifact_hash_sha256"]?.toString()?.trim().orEmpty()
                 val descriptorHash = model.hashSha256.trim()
-                val expectedArtifactHash = artifactHash.ifBlank {
-                    descriptorHash.takeUnless { hash ->
-                        packageHash.isNotBlank() && hash.equals(packageHash, ignoreCase = true)
-                    }.orEmpty()
-                }
+                val expectedArtifactHash = expectedInstalledArtifactHash(model)
                 if (expectedArtifactHash.isNotBlank()) {
                     val actual = sha256Hex(file)
                     if (!actual.equals(expectedArtifactHash, ignoreCase = true)) {
