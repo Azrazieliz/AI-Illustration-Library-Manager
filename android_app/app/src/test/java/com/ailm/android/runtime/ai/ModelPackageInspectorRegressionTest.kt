@@ -462,6 +462,7 @@ class ModelPackageInspectorRegressionTest {
 
             val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_paddleocr")
 
+            assertEquals(listOf("ocr"), result.supportedTasks)
             assertFalse(result.issues.any { it.code == "model_artifact_ambiguous" })
             assertFalse(result.issues.any { it.code == "model_artifacts_reference_invalid" })
             assertFalse(result.issues.any { it.code == "tensor_metadata_unreadable" })
