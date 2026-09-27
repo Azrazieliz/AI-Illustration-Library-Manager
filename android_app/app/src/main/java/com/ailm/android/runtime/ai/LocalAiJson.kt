@@ -13,13 +13,14 @@ object LocalAiJson {
     }
 
     fun decodeMap(raw: String): Map<String, Any> {
-        if (raw.isBlank()) {
+        val normalized = raw.removePrefix("\uFEFF")
+        if (normalized.isBlank()) {
             return emptyMap()
         }
-        if (raw.trimStart().startsWith("{")) {
-            return decodeObjectFallback(raw)
+        if (normalized.trimStart().startsWith("{")) {
+            return decodeObjectFallback(normalized)
         }
-        return runCatching { fromJsonObject(JSONObject(raw)) }
+        return runCatching { fromJsonObject(JSONObject(normalized)) }
             .getOrElse { emptyMap() }
     }
 
