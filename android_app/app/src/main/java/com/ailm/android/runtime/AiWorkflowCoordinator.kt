@@ -1,30 +1,60 @@
 package com.ailm.android.runtime
 
 import android.content.ContentValues
-import android.database.sqlite.SQLiteDatabase
 import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Applies AI observations to mutable Fusion state.
+ *
+ * Canonical identity is never accepted from a free-form model name. The vision
+ * stage only emits observable taxonomy IDs; CharacterResolver then constrains
+ * candidates to immutable Character Knowledge and derives series from the
+ * resolved character entry.
+ */
 class AiWorkflowCoordinator(
     private val database: LocalDatabase,
     private val repository: LocalRepository,
+    private val knowledge: KnowledgeDatabase,
+    private val fusion: FusionResolutionStore,
 ) {
+    private val characterResolver = CharacterResolver(knowledge, fusion)
+
     fun applyImageWorkflow(imageId: Int, response: Map<String, Any>): Map<String, Any> {
-        if (!response["ok"].asBoolean()) return mapOf("accepted" to false, "reason" to "pipeline_failed")
+        if (!response["ok"].asBoolean()) {
+            val message = response["message"]?.toString().orEmpty().ifBlank { "AI pipeline failed." }
+            fusion.queueReview(
+                imageId = imageId,
+                reviewType = "runtime_failure",
+                reason = message,
+                payload = mapOf("pipeline" to response),
+            )
+            return mapOf(
+                "accepted" to false,
+                "queued_for_review" to true,
+                "review_reasons" to listOf(message),
+                "resolved_characters" to emptyList<Map<String, Any>>(),
+            )
+        }
 
         val stages = collectStages(response)
-        val accepted = mutableListOf<String>()
         val reviewReasons = mutableListOf<String>()
         response["failed_stages"].mapList().forEach { failed ->
             val stage = failed.optText("stage_type").ifBlank { "stage" }
             val message = failed.optText("message").ifBlank { failed.optText("status") }
-            reviewReasons += "Automation stage failed: $stage${if (message.isBlank()) "" else " ($message)"}"
+            reviewReasons += "Automation stage failed: " + stage +
+                if (message.isBlank()) "" else " (" + message + ")"
         }
+
         val profile = readProfile(imageId)
-        if (!profile.optBoolean("manual_override", false) && profile.optJSONObject("normalization")?.optBoolean("manual_override", false) != true) {
+        if (!profile.optBoolean("manual_override", false) &&
+            profile.optJSONObject("normalization")?.optBoolean("manual_override", false) != true
+        ) {
             stages["ocr"]?.resultMap()?.optText("text")?.takeIf { it.isNotBlank() }?.let { profile.put("ocr", it) }
             stages["captioning"]?.resultMap()?.optText("caption")?.takeIf { it.isNotBlank() }?.let { profile.put("caption", it) }
-            stages["embedding_generation"]?.get("embedding")?.let { profile.put("embedding", JSONArray(it as? List<*> ?: emptyList<Any>())) }
+            stages["embedding_generation"]?.get("embedding")?.let { value ->
+                profile.put("embedding", JSONArray(value as? List<*> ?: emptyList<Any>()))
+            }
             stages["nsfw_classification"]?.resultMap()?.let { nsfw -> profile.put("nsfw", JSONObject(nsfw)) }
             stages["normalization"]?.resultMap()?.optText("text")?.takeIf { it.isNotBlank() }?.let {
                 profile.put("normalized_context", it)
@@ -33,210 +63,320 @@ class AiWorkflowCoordinator(
             writeProfile(imageId, profile)
         }
 
-        val acceptedCharacter = acceptRecognition(
-            imageId,
-            stages["character_recognition"],
-            FusionDatabaseSchema.TABLE_CHARACTERS,
-            "character_id",
-            "canonical_name",
-            FusionDatabaseSchema.TABLE_IMAGE_CHARACTERS,
-            accepted,
-            reviewReasons,
-        )
-        val originalCharacter = isExplicitOriginalCharacter(stages["series_recognition"])
-        val acceptedSeries = if (originalCharacter) {
-            accepted += "series_recognition"
-            null
+        val illustrationTags = resolveIllustrationTags(stages["tag_prediction"])
+        val illustrationFeatureIds = illustrationTags.associate { it.tagId to it.confidence }
+        val embedding = stages["embedding_generation"]?.get("embedding").doubleList()
+
+        val hasCharacterKnowledge = knowledge.hasCharacters()
+        val recognitionResult = stages["character_recognition"]?.resultMap().orEmpty()
+        val resolvedSubjects = if (hasCharacterKnowledge && recognitionResult.isNotEmpty()) {
+            characterResolver.resolve(
+                recognitionResult = recognitionResult,
+                illustrationFeatureIds = illustrationFeatureIds,
+                imageEmbedding = embedding,
+            )
         } else {
-            acceptRecognition(
-                imageId,
-                stages["series_recognition"],
-                FusionDatabaseSchema.TABLE_SERIES,
-                "series_code",
-                "canonical_title",
-                FusionDatabaseSchema.TABLE_IMAGE_SERIES,
-                accepted,
-                reviewReasons,
+            emptyList()
+        }
+
+        val subjectRecords = resolvedSubjects.map { subject ->
+            SubjectResolutionRecord(
+                subjectIndex = subject.subjectIndex,
+                prominence = subject.prominence,
+                observations = subject.observations,
+                candidates = subject.candidates,
+                characterId = subject.character?.characterId,
+                confidence = subject.confidence,
+                status = if (subject.resolved) "resolved" else "review",
             )
         }
+        fusion.replaceSubjects(imageId, subjectRecords)
 
-        val tags = stages["tag_prediction"]?.resultMap()?.stringList("tags").orEmpty()
-        if (tags.isNotEmpty()) {
-            val canonicalTags = tags.mapNotNull { tag -> linkCanonicalTag(imageId, tag) }.distinct()
-            if (canonicalTags.isNotEmpty()) {
-                repository.setTags(imageId, canonicalTags)
-                accepted += "tag_prediction"
-            }
-            profile.put("raw_predicted_tags", JSONArray(tags))
-            profile.put("canonical_tags", JSONArray(canonicalTags))
-            profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
-            writeProfile(imageId, profile)
-        }
-
-        stages["aesthetic_scoring"]?.resultMap()?.get("aesthetic_score")?.let { score ->
-            profile.put("aesthetic_score", score)
-            profile.put("ai_workflow_updated_at_ms", System.currentTimeMillis())
-            writeProfile(imageId, profile)
-        }
-
-        if (reviewReasons.isNotEmpty()) queueReview(imageId, reviewReasons.joinToString("; "))
-        repository.rebuildSearchIndex()
-        return mapOf(
-            "accepted" to accepted.isNotEmpty(),
-            "accepted_stages" to accepted.distinct(),
-            "accepted_series_code" to acceptedSeries?.first.orEmpty(),
-            "accepted_series_name" to acceptedSeries?.second.orEmpty(),
-            "accepted_character_id" to acceptedCharacter?.first.orEmpty(),
-            "accepted_character_name" to acceptedCharacter?.second.orEmpty(),
-            "original_character" to originalCharacter,
-            "queued_for_review" to reviewReasons.isNotEmpty(),
-            "review_reasons" to reviewReasons,
-        )
-    }
-
-    private fun isExplicitOriginalCharacter(stage: Map<String, Any>?): Boolean {
-        val result = stage?.resultMap() ?: return false
-        if (result["original_character"].asBoolean() || result["is_original_character"].asBoolean()) return true
-        val candidate = result["candidates"].mapList().firstOrNull()
-        val name = candidate?.optText("name").orEmpty().ifBlank { result.optText("top_match") }
-        if (name.isBlank()) return false
-        val normalized = name.trim().lowercase()
-        val explicitOriginal = normalized in setOf(
-            "original character",
-            "original characters",
-            "original_character",
-            "original",
-            "oc",
-        )
-        if (!explicitOriginal) return false
-        val confidence = candidate?.get("confidence").asDouble().takeIf { it > 0.0 }
-            ?: result["confidence"].asDouble()
-        return confidence >= ACCEPTANCE_THRESHOLD
-    }
-
-    private fun acceptRecognition(
-        imageId: Int,
-        stage: Map<String, Any>?,
-        entityTable: String,
-        entityIdColumn: String,
-        entityNameColumn: String,
-        linkTable: String,
-        accepted: MutableList<String>,
-        reviewReasons: MutableList<String>,
-    ): Pair<String, String>? {
-        val result = stage?.resultMap() ?: return null
-        val candidate = result["candidates"].mapList().firstOrNull() ?: mapOf("name" to result.optText("top_match"), "confidence" to 0.0)
-        val name = candidate.optText("name").ifBlank { result.optText("top_match") }
-        val confidence = candidate["confidence"].asDouble()
-        if (name.isBlank() || confidence < ACCEPTANCE_THRESHOLD) {
-            if (name.isNotBlank()) reviewReasons += "Low-confidence recognition: $name (${formatConfidence(confidence)})"
-            return null
-        }
-        val entityId = resolveEntityId(entityTable, entityIdColumn, entityNameColumn, name) ?: run {
-            reviewReasons += "Unresolved canonical recognition: $name"
-            return null
-        }
-        val values = ContentValues().apply {
-            put("image_id", imageId)
-            put(entityIdColumn, entityId)
-            put("confidence", confidence)
-            put("source", "ai")
-            put("added_at_ms", System.currentTimeMillis())
-        }
-        database.writableDatabase.insertWithOnConflict(linkTable, null, values, SQLiteDatabase.CONFLICT_IGNORE)
-        accepted += stage["task_type"]?.toString().orEmpty()
-        return entityId to name
-    }
-
-    private fun linkCanonicalTag(imageId: Int, rawTag: String): String? {
-        val tag = rawTag.trim()
-        if (tag.isBlank()) return null
-        val resolved = resolveTagEntry(tag) ?: return null
-        val values = ContentValues().apply {
-            put("image_id", imageId)
-            put("tag_id", resolved.first)
-            put("confidence", 0.8)
-            put("source", "ai")
-            put("added_at_ms", System.currentTimeMillis())
-        }
-        database.writableDatabase.insertWithOnConflict(
-            FusionDatabaseSchema.TABLE_IMAGE_TAGS,
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_IGNORE,
-        )
-        return resolved.second
-    }
-
-    private fun resolveTagEntry(name: String): Pair<String, String>? {
-        val normalized = name.trim()
-        if (normalized.isBlank()) return null
-        database.readableDatabase.rawQuery(
-            "SELECT tag_id, canonical_name FROM ${FusionDatabaseSchema.TABLE_TAGS} WHERE LOWER(canonical_name) = LOWER(?) LIMIT 1",
-            arrayOf(normalized),
-        ).use { cursor ->
-            if (cursor.moveToFirst()) return cursor.getString(0) to cursor.getString(1)
-        }
-        database.readableDatabase.rawQuery(
-            """
-            SELECT t.tag_id, t.canonical_name
-            FROM ${FusionDatabaseSchema.TABLE_TAG_ALIASES} a
-            JOIN ${FusionDatabaseSchema.TABLE_TAGS} t ON t.tag_id = a.tag_id
-            WHERE LOWER(a.alias_value) = LOWER(?)
-            LIMIT 1
-            """.trimIndent(),
-            arrayOf(normalized),
-        ).use { cursor ->
-            if (cursor.moveToFirst()) return cursor.getString(0) to cursor.getString(1)
-        }
-        return null
-    }
-
-    private fun resolveEntityId(table: String, idColumn: String, nameColumn: String, name: String): String? {
-        val normalized = name.trim()
-        if (normalized.isBlank() || normalized.equals("UNKNOWN", ignoreCase = true)) return null
-
-        database.readableDatabase.rawQuery(
-            "SELECT $idColumn FROM $table WHERE LOWER($nameColumn) = LOWER(?) LIMIT 1",
-            arrayOf(normalized),
-        ).use { cursor ->
-            if (cursor.moveToFirst()) {
-                return cursor.getString(0).orEmpty().ifBlank { null }
-            }
-        }
-
-        if (table == FusionDatabaseSchema.TABLE_SERIES) {
-            database.readableDatabase.rawQuery(
-                "SELECT series_code, aliases_json FROM ${FusionDatabaseSchema.TABLE_SERIES}",
-                emptyArray(),
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    val aliases = runCatching { JSONArray(cursor.getString(1).orEmpty()) }.getOrNull() ?: continue
-                    for (index in 0 until aliases.length()) {
-                        if (aliases.optString(index).trim().equals(normalized, ignoreCase = true)) {
-                            return cursor.getString(0).orEmpty().ifBlank { null }
-                        }
-                    }
+        if (hasCharacterKnowledge) {
+            if (resolvedSubjects.isEmpty()) {
+                reviewReasons += "No character subject could be resolved from observable canonical attributes."
+            } else {
+                resolvedSubjects.filterNot(ResolvedSubject::resolved).forEach { subject ->
+                    reviewReasons += "Subject " + (subject.subjectIndex + 1) +
+                        " is below the character confidence threshold (" +
+                        "%.2f".format(subject.confidence) + ")."
                 }
             }
         }
 
-        if (table == FusionDatabaseSchema.TABLE_TAGS) {
-            database.readableDatabase.rawQuery(
-                "SELECT tag_id FROM ${FusionDatabaseSchema.TABLE_TAG_ALIASES} WHERE LOWER(alias_value) = LOWER(?) LIMIT 1",
-                arrayOf(normalized),
-            ).use { cursor ->
-                if (cursor.moveToFirst()) return cursor.getString(0).orEmpty().ifBlank { null }
+        val resolvedCharacters = resolvedSubjects
+            .filter(ResolvedSubject::resolved)
+            .mapNotNull { subject ->
+                val character = subject.character ?: return@mapNotNull null
+                val series = knowledge.seriesByCode(character.primarySeriesCode)
+                    ?: return@mapNotNull null
+                mapOf(
+                    "subject_index" to subject.subjectIndex,
+                    "prominence" to subject.prominence,
+                    "character_id" to character.characterId,
+                    "canonical_name" to character.canonicalName,
+                    "entry_type" to character.entryType,
+                    "parent_character_id" to character.parentCharacterId,
+                    "series_code" to series.code,
+                    "series_name" to series.name,
+                    "confidence" to subject.confidence,
+                )
+            }
+
+        val canonicalTags = mutableListOf<CanonicalTagObservation>()
+        canonicalTags += illustrationTags
+        resolvedSubjects.forEach { subject ->
+            subject.observations.forEach { (id, confidence) ->
+                knowledge.resolveTag(id)?.let { tag ->
+                    canonicalTags += CanonicalTagObservation(
+                        tagId = tag.id,
+                        tagName = tag.name,
+                        scope = "character_observed",
+                        confidence = confidence,
+                        source = "vision",
+                    )
+                }
+            }
+            subject.character?.let { character ->
+                character.attributeIds.forEach { id ->
+                    knowledge.resolveTag(id)?.let { tag ->
+                        canonicalTags += CanonicalTagObservation(
+                            tagId = tag.id,
+                            tagName = tag.name,
+                            scope = "character_knowledge",
+                            confidence = subject.confidence,
+                            source = "character_knowledge",
+                        )
+                    }
+                }
+                (character.weaponIds + character.outfitIds).forEach { id ->
+                    knowledge.resolveTag(id)?.let { tag ->
+                        canonicalTags += CanonicalTagObservation(
+                            tagId = tag.id,
+                            tagName = tag.name,
+                            scope = "character_knowledge",
+                            confidence = subject.confidence,
+                            source = "character_knowledge",
+                        )
+                    }
+                }
+            }
+        }
+        fusion.replaceCanonicalTags(imageId, canonicalTags)
+        repository.setTags(imageId, canonicalTags.map(CanonicalTagObservation::tagName).distinct())
+
+        val imageUri = repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty()
+        if (embedding.isNotEmpty()) {
+            resolvedSubjects.filter(ResolvedSubject::resolved).forEach { subject ->
+                val character = subject.character ?: return@forEach
+                fusion.addCharacterEvidence(
+                    characterId = character.characterId,
+                    imageId = imageId,
+                    evidenceKind = "auto_resolved_image",
+                    sourceUri = imageUri,
+                    embedding = embedding,
+                    attributes = subject.observations,
+                    validated = false,
+                    weight = 0.45,
+                )
             }
         }
 
-        return null
+        val unresolved = hasCharacterKnowledge &&
+            (resolvedSubjects.isEmpty() || resolvedSubjects.any { !it.resolved })
+        val queuedForReview = reviewReasons.isNotEmpty() || unresolved
+        if (queuedForReview) {
+            fusion.queueReview(
+                imageId = imageId,
+                reviewType = "character_resolution",
+                reason = reviewReasons.distinct().joinToString("; "),
+                payload = mapOf(
+                    "subjects" to subjectRecords.map {
+                        mapOf(
+                            "subject_index" to it.subjectIndex,
+                            "prominence" to it.prominence,
+                            "observations" to it.observations,
+                            "candidates" to it.candidates,
+                            "resolved_character_id" to (it.characterId ?: ""),
+                            "confidence" to it.confidence,
+                        )
+                    },
+                    "resolved_characters" to resolvedCharacters,
+                ),
+            )
+        }
+
+        val primary = resolvedCharacters.maxByOrNull {
+            (it["prominence"] as? Number)?.toDouble() ?: 0.0
+        }.orEmpty()
+
+        return mapOf(
+            "accepted" to resolvedCharacters.isNotEmpty(),
+            "character_resolution_available" to hasCharacterKnowledge,
+            "resolved_characters" to resolvedCharacters,
+            "all_subjects_resolved" to (hasCharacterKnowledge && resolvedSubjects.isNotEmpty() && resolvedSubjects.all(ResolvedSubject::resolved)),
+            "accepted_character_id" to primary["character_id"].orEmptyText(),
+            "accepted_character_name" to primary["canonical_name"].orEmptyText(),
+            "accepted_series_code" to primary["series_code"].orEmptyText(),
+            "accepted_series_name" to primary["series_name"].orEmptyText(),
+            "original_character" to false,
+            "queued_for_review" to queuedForReview,
+            "review_reasons" to reviewReasons.distinct(),
+            "canonical_tag_ids" to canonicalTags.map(CanonicalTagObservation::tagId).distinct(),
+        )
     }
 
+    fun applyReviewCorrection(imageId: Int, payload: Map<String, Any>): Map<String, Any> {
+        val originalCharacter = payload["original_character"].asBoolean()
+        val profile = readProfile(imageId)
+        val embedding = profile.optJSONArray("embedding").doubleList()
+
+        if (originalCharacter) {
+            val observations = payload["attribute_ids"].stringDoubleMap()
+            val clusterId = fusion.createOrAssignOriginalCharacterCluster(
+                imageId = imageId,
+                subjectIndex = 0,
+                attributes = observations,
+                embedding = embedding,
+            )
+            return mapOf(
+                "accepted" to true,
+                "manual_correction" to true,
+                "original_character" to true,
+                "original_character_cluster_id" to clusterId,
+                "resolved_characters" to emptyList<Map<String, Any>>(),
+                "queued_for_review" to false,
+            )
+        }
+
+        val requested = when (val raw = payload["characters"]) {
+            is List<*> -> raw.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+            else -> listOfNotNull(
+                payload["character_id"]?.toString()?.trim()?.takeIf(String::isNotBlank)
+                    ?: payload["character_name"]?.toString()?.trim()?.takeIf(String::isNotBlank),
+            )
+        }
+        if (requested.isEmpty()) {
+            return mapOf(
+                "accepted" to false,
+                "queued_for_review" to true,
+                "review_reasons" to listOf("A corrected character or Original Character selection is required."),
+            )
+        }
+
+        val characters = requested.map { raw ->
+            knowledge.resolveCharacter(raw)
+                ?: return mapOf(
+                    "accepted" to false,
+                    "queued_for_review" to true,
+                    "review_reasons" to listOf("Unknown Character Knowledge identity: " + raw),
+                )
+        }
+
+        val existingSubjects = readSubjectObservations(imageId)
+        val corrected = characters.mapIndexed { index, character ->
+            val observations = existingSubjects.getOrNull(index)?.second.orEmpty()
+            val series = knowledge.seriesByCode(character.primarySeriesCode)
+                ?: return mapOf(
+                    "accepted" to false,
+                    "queued_for_review" to true,
+                    "review_reasons" to listOf("Character has no valid canonical series: " + character.characterId),
+                )
+            mapOf(
+                "subject_index" to index,
+                "prominence" to (1.0 - index * 0.05).coerceAtLeast(0.5),
+                "character_id" to character.characterId,
+                "canonical_name" to character.canonicalName,
+                "entry_type" to character.entryType,
+                "parent_character_id" to character.parentCharacterId,
+                "series_code" to series.code,
+                "series_name" to series.name,
+                "confidence" to 1.0,
+            )
+        }
+
+        val records = corrected.mapIndexed { index, row ->
+            SubjectResolutionRecord(
+                subjectIndex = index,
+                prominence = (row["prominence"] as Number).toDouble(),
+                observations = existingSubjects.getOrNull(index)?.second.orEmpty(),
+                candidates = listOf(row),
+                characterId = row["character_id"].toString(),
+                confidence = 1.0,
+                status = "corrected",
+            )
+        }
+        fusion.replaceSubjects(imageId, records)
+
+        val imageUri = repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty()
+        corrected.forEachIndexed { index, row ->
+            fusion.addCharacterEvidence(
+                characterId = row["character_id"].toString(),
+                imageId = imageId,
+                evidenceKind = "review_correction",
+                sourceUri = imageUri,
+                embedding = embedding,
+                attributes = existingSubjects.getOrNull(index)?.second.orEmpty(),
+                validated = true,
+                weight = 1.0,
+            )
+        }
+
+        return mapOf(
+            "accepted" to true,
+            "manual_correction" to true,
+            "original_character" to false,
+            "resolved_characters" to corrected,
+            "all_subjects_resolved" to true,
+            "accepted_character_id" to corrected.first()["character_id"].toString(),
+            "accepted_character_name" to corrected.first()["canonical_name"].toString(),
+            "accepted_series_code" to corrected.first()["series_code"].toString(),
+            "accepted_series_name" to corrected.first()["series_name"].toString(),
+            "queued_for_review" to false,
+        )
+    }
+
+    private fun resolveIllustrationTags(stage: Map<String, Any>?): List<CanonicalTagObservation> {
+        val tags = stage?.resultMap()?.stringList("tags").orEmpty()
+        return tags.mapNotNull { raw ->
+            val tag = knowledge.resolveTag(raw) ?: return@mapNotNull null
+            CanonicalTagObservation(
+                tagId = tag.id,
+                tagName = tag.name,
+                scope = "illustration",
+                confidence = 0.80,
+                source = "vision",
+            )
+        }.distinctBy(CanonicalTagObservation::tagId)
+    }
+
+    private fun readSubjectObservations(imageId: Int): List<Pair<Int, Map<String, Double>>> =
+        buildList {
+            database.readableDatabase.rawQuery(
+                "SELECT subject_index, observations_json FROM fusion_image_subjects WHERE image_id = ? ORDER BY subject_index",
+                arrayOf(imageId.toString()),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val json = runCatching { JSONObject(cursor.getString(1)) }.getOrElse { JSONObject() }
+                    val observations = buildMap {
+                        json.keys().forEach { key ->
+                            val number = json.opt(key) as? Number
+                            if (number != null) put(key, number.toDouble())
+                        }
+                    }
+                    add(cursor.getInt(0) to observations)
+                }
+            }
+        }
+
     private fun readProfile(imageId: Int): JSONObject = database.readableDatabase.rawQuery(
-        "SELECT metadata_json FROM ${FusionDatabaseSchema.TABLE_IMAGE_PROFILES} WHERE image_id = ? LIMIT 1",
+        "SELECT metadata_json FROM " + FusionDatabaseSchema.TABLE_IMAGE_PROFILES + " WHERE image_id = ? LIMIT 1",
         arrayOf(imageId.toString()),
-    ).use { cursor -> if (cursor.moveToFirst()) runCatching { JSONObject(cursor.getString(0).orEmpty()) }.getOrElse { JSONObject() } else JSONObject() }
+    ).use { cursor ->
+        if (cursor.moveToFirst()) {
+            runCatching { JSONObject(cursor.getString(0).orEmpty()) }.getOrElse { JSONObject() }
+        } else JSONObject()
+    }
 
     private fun writeProfile(imageId: Int, metadata: JSONObject) {
         val values = ContentValues().apply {
@@ -245,69 +385,76 @@ class AiWorkflowCoordinator(
             put("metadata_json", metadata.toString())
             put("updated_at_ms", System.currentTimeMillis())
         }
-        database.writableDatabase.insertWithOnConflict(FusionDatabaseSchema.TABLE_IMAGE_PROFILES, null, values, SQLiteDatabase.CONFLICT_REPLACE)
-    }
-
-    private fun queueReview(imageId: Int, reason: String) {
-        val imageUri = repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty()
-        if (imageUri.isBlank()) return
-        val values = ContentValues().apply {
-            put("status", "pending")
-            put("reason", reason)
-            put("last_updated_ms", System.currentTimeMillis())
-        }
-        val changed = database.writableDatabase.update("review_items", values, "image_uri = ? AND status != 'approved'", arrayOf(imageUri))
-        if (changed == 0) {
-            values.put("image_uri", imageUri)
-            database.writableDatabase.insertWithOnConflict("review_items", null, values, SQLiteDatabase.CONFLICT_IGNORE)
-        }
+        database.writableDatabase.insertWithOnConflict(
+            FusionDatabaseSchema.TABLE_IMAGE_PROFILES,
+            null,
+            values,
+            android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE,
+        )
     }
 
     private fun collectStages(response: Map<String, Any>): Map<String, Map<String, Any>> {
         val stages = linkedMapOf<String, Map<String, Any>>()
-
         val explicitOutputs = response["stage_outputs"] as? Map<*, *>
         explicitOutputs?.forEach { (stageKey, rawOutput) ->
             val stageType = stageKey?.toString()?.trim().orEmpty()
-            val output = (rawOutput as? Map<*, *>)
-                ?.entries
-                ?.filter { it.key != null && it.value != null }
-                ?.associate { it.key.toString() to it.value as Any }
-                .orEmpty()
-            if (stageType.isNotBlank() && output.isNotEmpty()) {
-                stages[stageType] = if (output["task_type"] == null) {
-                    output + mapOf("task_type" to stageType)
-                } else {
-                    output
-                }
-            }
+            val output = (rawOutput as? Map<*, *>)?.toStringAnyMap().orEmpty()
+            if (stageType.isNotBlank() && output.isNotEmpty()) stages[stageType] = output
         }
-
-        fun visit(value: Any?) {
-            when (value) {
-                is Map<*, *> -> {
-                    val map = value.entries.filter { it.key != null && it.value != null }.associate { it.key.toString() to it.value as Any }
-                    val type = map["task_type"]?.toString()?.trim().orEmpty()
-                    if (type.isNotBlank()) stages.putIfAbsent(type, map)
-                    map.values.forEach(::visit)
-                }
-                is List<*> -> value.forEach(::visit)
-            }
+        response["stages"].mapList().forEach { stage ->
+            val stageType = stage.optText("task_type").ifBlank { stage.optText("stage_type") }
+            if (stageType.isNotBlank()) stages.putIfAbsent(stageType, stage)
         }
-        visit(response)
         return stages
     }
 
-    private fun Map<String, Any>.resultMap(): Map<String, Any> = (this["result"] as? Map<*, *>)?.entries
-        ?.filter { it.key != null && it.value != null }?.associate { it.key.toString() to it.value as Any } ?: this
-    private fun Map<String, Any>.optText(key: String): String = this[key]?.toString()?.trim().orEmpty()
-    private fun Map<String, Any>.stringList(key: String): List<String> = (this[key] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }.orEmpty()
-    private fun Any?.mapList(): List<Map<String, Any>> = (this as? List<*>)?.mapNotNull { item ->
-        (item as? Map<*, *>)?.entries?.filter { it.key != null && it.value != null }?.associate { it.key.toString() to it.value as Any }
-    }.orEmpty()
-    private fun Any?.asBoolean(): Boolean = this as? Boolean ?: this?.toString()?.equals("true", ignoreCase = true) == true
-    private fun Any?.asDouble(): Double = (this as? Number)?.toDouble() ?: this?.toString()?.toDoubleOrNull() ?: 0.0
-    private fun formatConfidence(value: Double): String = "%.2f".format(value.coerceIn(0.0, 1.0))
+    private fun Map<String, Any>.resultMap(): Map<String, Any> {
+        val result = this["result"] as? Map<*, *> ?: return this
+        return result.toStringAnyMap()
+    }
 
-    private companion object { const val ACCEPTANCE_THRESHOLD = 0.75 }
+    private fun Map<*, *>.toStringAnyMap(): Map<String, Any> = entries.mapNotNull { (key, value) ->
+        key?.toString()?.let { text -> value?.let { text to it } }
+    }.toMap()
+
+    private fun Any?.mapList(): List<Map<String, Any>> = (this as? List<*>)
+        ?.mapNotNull { (it as? Map<*, *>)?.toStringAnyMap() }
+        .orEmpty()
+
+    private fun Map<String, Any>.optText(key: String): String = this[key]?.toString()?.trim().orEmpty()
+
+    private fun Map<String, Any>.stringList(key: String): List<String> = (this[key] as? List<*>)
+        ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+        .orEmpty()
+
+    private fun Any?.doubleList(): List<Double> = (this as? List<*>)
+        ?.mapNotNull { (it as? Number)?.toDouble() }
+        .orEmpty()
+
+    private fun JSONArray?.doubleList(): List<Double> {
+        if (this == null) return emptyList()
+        return (0 until length()).mapNotNull { index -> (opt(index) as? Number)?.toDouble() }
+    }
+
+    private fun Any?.stringDoubleMap(): Map<String, Double> = when (this) {
+        is Map<*, *> -> entries.mapNotNull { (key, value) ->
+            val id = key?.toString()?.trim().orEmpty()
+            val number = (value as? Number)?.toDouble()
+            if (id.isBlank() || number == null) null else id to number
+        }.toMap()
+        is List<*> -> mapNotNull { value ->
+            val id = value?.toString()?.trim().orEmpty()
+            if (id.isBlank()) null else id to 1.0
+        }.toMap()
+        else -> emptyMap()
+    }
+
+    private fun Any?.asBoolean(): Boolean = when (this) {
+        is Boolean -> this
+        is Number -> toInt() != 0
+        is String -> equals("true", ignoreCase = true) || this == "1"
+        else -> false
+    }
+
+    private fun Any?.orEmptyText(): String = this?.toString()?.trim().orEmpty()
 }
