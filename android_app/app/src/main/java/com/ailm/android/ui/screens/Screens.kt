@@ -3066,7 +3066,8 @@ private fun KnowledgePackManagerScreen(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .navigationBarsPadding()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Knowledge Management", style = MaterialTheme.typography.headlineMedium)
@@ -3086,6 +3087,11 @@ private fun KnowledgePackManagerScreen(
                     Button(onClick = onChoosePacks) { Text("Browse Packs") }
                     Button(onClick = onImportPacks, enabled = selectedPackNames.isNotEmpty()) { Text("Import Selected") }
                 }
+                Text(
+                    "Jsons.zip can be imported directly. It loads the canonical series and non-character vocabulary used by automation. Character knowledge is intentionally separate for the next pass.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 // If a recent knowledge-pack import was performed, surface failures/summaries inline here
                 val kpImport = state.aiLastPipelineResult.takeIf { it["kind"]?.toString() == "knowledge_pack_import" }
                 kpImport?.let { result ->
