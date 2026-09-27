@@ -3,6 +3,7 @@ package com.ailm.android.workers
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
@@ -160,7 +161,11 @@ class LibraryAutomationWorker(
             .setOngoing(total > 0 && processed < total)
             .setProgress(max, processed.coerceIn(0, max), total <= 0)
             .build()
-        return ForegroundInfo(NOTIFICATION_ID, notification)
+        return ForegroundInfo(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
     }
 
     companion object {
