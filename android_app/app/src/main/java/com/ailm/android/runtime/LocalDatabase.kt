@@ -43,6 +43,9 @@ class LocalDatabase(
         if (oldVersion < 9) {
             migrateToV9(db)
         }
+        if (oldVersion < 10) {
+            migrateToV10(db)
+        }
     }
 
     override fun onOpen(db: SQLiteDatabase) {
@@ -133,13 +136,18 @@ class LocalDatabase(
             CREATE TABLE review_items (
                 review_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 image_uri TEXT NOT NULL UNIQUE,
+                image_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'pending',
+                review_type TEXT NOT NULL DEFAULT 'generic',
                 reason TEXT,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                correction_json TEXT NOT NULL DEFAULT '{}',
                 last_updated_ms INTEGER NOT NULL
             )
             """.trimIndent(),
         )
         db.execSQL("CREATE INDEX idx_review_status ON review_items(status)")
+        createAutomationV10Artifacts(db, ifNotExists = false)
 
         db.execSQL(
             """
@@ -318,6 +326,138 @@ class LocalDatabase(
         FusionDatabaseSchema.recordSchemaHistory(db, schemaVersion = 9, notes = "Repaired image FTS mutation triggers")
     }
 
+    private fun migrateToV10(db: SQLiteDatabase) {
+        if (columnMissing(db, "review_items", "image_id")) {
+            db.execSQL("ALTER TABLE review_items ADD COLUMN image_id INTEGER")
+        }
+        if (columnMissing(db, "review_items", "review_type")) {
+            db.execSQL("ALTER TABLE review_items ADD COLUMN review_type TEXT NOT NULL DEFAULT 'generic'")
+        }
+        if (columnMissing(db, "review_items", "payload_json")) {
+            db.execSQL("ALTER TABLE review_items ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'")
+        }
+        if (columnMissing(db, "review_items", "correction_json")) {
+            db.execSQL("ALTER TABLE review_items ADD COLUMN correction_json TEXT NOT NULL DEFAULT '{}'")
+        }
+        createAutomationV10Artifacts(db, ifNotExists = true)
+        FusionDatabaseSchema.recordSchemaHistory(
+            db,
+            schemaVersion = 10,
+            notes = "Separated immutable Knowledge from mutable Fusion resolution state",
+        )
+    }
+
+    private fun createAutomationV10Artifacts(db: SQLiteDatabase, ifNotExists: Boolean) {
+        val clause = if (ifNotExists) "IF NOT EXISTS " else ""
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_image_subjects (
+                subject_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_id INTEGER NOT NULL,
+                subject_index INTEGER NOT NULL,
+                prominence REAL NOT NULL DEFAULT 1.0,
+                observations_json TEXT NOT NULL DEFAULT '{}',
+                candidates_json TEXT NOT NULL DEFAULT '[]',
+                resolved_character_id TEXT,
+                resolution_confidence REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'unresolved',
+                updated_at_ms INTEGER NOT NULL,
+                UNIQUE(image_id, subject_index),
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_subjects_image ON fusion_image_subjects(image_id)")
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_subjects_character ON fusion_image_subjects(resolved_character_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_image_canonical_tags (
+                image_id INTEGER NOT NULL,
+                tag_id TEXT NOT NULL,
+                tag_name TEXT NOT NULL DEFAULT '',
+                tag_scope TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                source TEXT NOT NULL DEFAULT 'ai',
+                added_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(image_id, tag_id, tag_scope),
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_canonical_tags_tag ON fusion_image_canonical_tags(tag_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_character_visual_evidence (
+                evidence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_id TEXT NOT NULL,
+                image_id INTEGER,
+                evidence_kind TEXT NOT NULL,
+                source_uri TEXT NOT NULL DEFAULT '',
+                embedding_json TEXT NOT NULL DEFAULT '[]',
+                attributes_json TEXT NOT NULL DEFAULT '{}',
+                validated INTEGER NOT NULL DEFAULT 0,
+                weight REAL NOT NULL DEFAULT 1.0,
+                added_at_ms INTEGER NOT NULL,
+                UNIQUE(character_id, image_id, evidence_kind),
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_character_evidence_character ON fusion_character_visual_evidence(character_id)")
+
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_automation_state (
+                image_id INTEGER PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'pending',
+                source_modified_at_ms INTEGER NOT NULL DEFAULT 0,
+                pipeline_complete INTEGER NOT NULL DEFAULT 0,
+                organization_complete INTEGER NOT NULL DEFAULT 0,
+                needs_review INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_automation_state ON fusion_automation_state(state)")
+
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_original_character_clusters (
+                cluster_id TEXT PRIMARY KEY,
+                label TEXT NOT NULL DEFAULT '',
+                attributes_json TEXT NOT NULL DEFAULT '{}',
+                prototype_embedding_json TEXT NOT NULL DEFAULT '[]',
+                image_count INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE $clause fusion_image_oc_clusters (
+                image_id INTEGER NOT NULL,
+                subject_index INTEGER NOT NULL,
+                cluster_id TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0.0,
+                added_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(image_id, subject_index),
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE,
+                FOREIGN KEY(cluster_id) REFERENCES fusion_original_character_clusters(cluster_id)
+                    ON UPDATE CASCADE ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+    }
+
     private fun columnMissing(db: SQLiteDatabase, table: String, column: String): Boolean {
         db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
             while (cursor.moveToNext()) {
@@ -442,6 +582,6 @@ class LocalDatabase(
     companion object {
         private const val DB_TAG = "AilmLocalDatabase"
         private const val DB_NAME = "ailm_android.sqlite"
-        private const val DB_VERSION = 9
+        private const val DB_VERSION = 10
     }
 }
