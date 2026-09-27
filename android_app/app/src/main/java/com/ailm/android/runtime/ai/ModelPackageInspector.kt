@@ -221,12 +221,19 @@ internal class ModelPackageInspector(
             .filter(AiTaskTypes::isExecutionTask)
             .distinct()
             .sorted()
-        val capabilities = ((declaredCapabilities + declaredTasks + inferredCapabilities + contractTasks)
-            .map(::normalizeCapability)
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted())
-                .takeIf { it.isNotEmpty() } ?: inferredCapabilities
+            .let { resolved ->
+                if (resolvedMetadata["paddle_ocr"] != null) listOf("ocr") else resolved
+            }
+        val capabilities = if (resolvedMetadata["paddle_ocr"] != null) {
+            listOf("ocr")
+        } else {
+            ((declaredCapabilities + declaredTasks + inferredCapabilities + contractTasks)
+                .map(::normalizeCapability)
+                .filter(String::isNotBlank)
+                .distinct()
+                .sorted())
+                    .takeIf { it.isNotEmpty() } ?: inferredCapabilities
+        }
 
         if (artifact == null) {
             issues += ModelPackageIssue(
