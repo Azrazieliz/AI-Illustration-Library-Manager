@@ -27,7 +27,10 @@ private class CompatModelTokenizer(
         val normalized = text.lowercase()
         val values = mutableListOf<Int>()
         values += startTokenId
-        val tokenPieces = normalized.split(Regex("\\s+"))
+        val tokenPieces = Regex("""[\\p{L}\\p{N}_]+|[^\\s\\p{L}\\p{N}_]""")
+            .findAll(normalized)
+            .map { it.value }
+            .toList()
         values += tokenPieces.flatMap { piece ->
             val idx = tokenIds[piece] ?: unknownTokenId
             listOf(idx)
