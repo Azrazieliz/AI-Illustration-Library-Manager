@@ -961,13 +961,161 @@ object StandaloneRuntime {
         ensureInitialized()
         val imageId = payload["image_id"].toIntOrNullValue()
             ?: return mapOf("ok" to false, "status" to "invalid", "message" to "image_id is required")
+        val stages = resolvedAutonomousImageStages()
+        if (stages.isEmpty()) {
+            return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "message" to "No installed execution-ready model can run an automation stage.",
+            )
+        }
         val prepared = prepareAiPipelinePayload(payload + mapOf(
             "task_type" to "autonomous_image_workflow",
-            "stages" to autonomousImageStages,
+            "stages" to stages,
             "continue_on_stage_error" to true,
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
-        return response + mapOf("workflow" to aiWorkflowCoordinator.applyImageWorkflow(imageId, response))
+        val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
+        val organization = if (response["ok"] == true) {
+            organizeAutonomousImage(imageId, workflow)
+        } else {
+            mapOf("ok" to false, "status" to "skipped", "message" to "Pipeline did not complete.")
+        }
+        return response + mapOf(
+            "automation_stages" to stages,
+            "workflow" to workflow,
+            "organization" to organization,
+        )
+    }
+
+    private fun resolvedAutonomousImageStages(): List<String> {
+        val installedTasks = localAiManager.listInstalledModels()
+            .filter { model ->
+                val metadata = model["metadata"] as? Map<*, *>
+                val readiness = metadata?.get("execution_readiness") as? Map<*, *>
+                readiness?.get("ready") != false
+            }
+            .flatMap { model ->
+                (model["supported_tasks"] as? List<*>)
+                    ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                    .orEmpty()
+            }
+            .map { it.trim().lowercase().replace('-', '_').replace(' ', '_') }
+            .toSet()
+
+        val hasCharacters = database.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM ${FusionDatabaseSchema.TABLE_CHARACTERS}",
+            emptyArray(),
+        ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) > 0 }
+
+        return autonomousImageStageCandidates.filter { stage ->
+            stage in installedTasks && (stage != "character_recognition" || hasCharacters)
+        }
+    }
+
+    private fun organizeAutonomousImage(imageId: Int, workflow: Map<String, Any>): Map<String, Any> {
+        val seriesName = workflow["accepted_series_name"]?.toString()?.trim().orEmpty()
+        if (seriesName.isBlank()) {
+            return mapOf(
+                "ok" to true,
+                "status" to "unchanged",
+                "message" to "No high-confidence canonical series assignment; file left in place.",
+            )
+        }
+        val characterName = workflow["accepted_character_name"]?.toString()?.trim().orEmpty()
+        val record = repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
+            ?: return mapOf("ok" to false, "status" to "missing", "message" to "Image record not found.")
+
+        val roots = repository.listFolders(includeDisabled = false)
+            .mapNotNull { it["folder_uri"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
+        val root = roots
+            .filter { candidate ->
+                record.uri.startsWith(candidate) ||
+                    record.folderUri.startsWith(candidate) ||
+                    record.parentUri.startsWith(candidate)
+            }
+            .maxByOrNull(String::length)
+            ?: roots.singleOrNull()
+            ?: record.folderUri
+
+        if (root.isBlank()) {
+            return mapOf("ok" to false, "status" to "no_root", "message" to "No writable library root is available.")
+        }
+
+        val folderName = safeAutomationPathSegment(seriesName)
+        val targetFolder = storageProvider.listChildren(root)
+            .firstOrNull { it.isDirectory && it.name.equals(folderName, ignoreCase = true) }
+            ?.uri
+            ?: storageProvider.createFolder(root, folderName).takeIf { it.ok }?.uri
+            ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create series folder '$folderName'.")
+
+        val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
+        val stem = buildList {
+            add(safeAutomationPathSegment(seriesName))
+            if (characterName.isNotBlank()) add(safeAutomationPathSegment(characterName))
+            add(imageId.toString().padStart(8, '0'))
+        }.joinToString(" - ")
+        val targetName = if (extension.isBlank()) stem else "$stem.$extension"
+
+        if (record.folderUri == targetFolder && record.filename == targetName) {
+            return mapOf(
+                "ok" to true,
+                "status" to "already_organized",
+                "folder" to folderName,
+                "filename" to targetName,
+            )
+        }
+
+        val changed = if (record.folderUri == targetFolder) {
+            storageProvider.rename(record.uri, targetName)
+        } else {
+            storageProvider.move(record.uri, targetFolder, targetName)
+        }
+        if (!changed.ok || changed.uri.isNullOrBlank()) {
+            return mapOf(
+                "ok" to false,
+                "status" to "file_operation_failed",
+                "message" to changed.message.ifBlank { "Unable to organize image." },
+            )
+        }
+
+        val updated = repository.updateImagePathAndClearThumbnails(
+            imageId = imageId,
+            newUri = changed.uri,
+            newFilename = targetName,
+            newFolderUri = targetFolder,
+            newParentUri = targetFolder,
+            newFolderName = folderName,
+            newRelativePath = "$folderName/$targetName",
+            newModifiedAtMs = System.currentTimeMillis(),
+            oldUri = record.uri,
+        )
+        if (!updated) {
+            return mapOf(
+                "ok" to false,
+                "status" to "database_update_failed",
+                "message" to "File was organized but the library record could not be updated.",
+            )
+        }
+
+        return mapOf(
+            "ok" to true,
+            "status" to "organized",
+            "series" to seriesName,
+            "character" to characterName,
+            "folder" to folderName,
+            "filename" to targetName,
+            "uri" to changed.uri,
+        )
+    }
+
+    private fun safeAutomationPathSegment(raw: String): String {
+        val cleaned = raw
+            .replace(Regex("[<>:\"/\\\\|?*\\u0000-\\u001F]"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trim('.')
+        return cleaned.ifBlank { "Unsorted" }.take(96).trim().ifBlank { "Unsorted" }
     }
 
     fun automationImageIds(forceAll: Boolean = false): List<Int> {
