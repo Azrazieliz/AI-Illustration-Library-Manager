@@ -29,13 +29,13 @@ object StandaloneRuntime {
     private const val AUTOMATION_CURRENT_IMAGE_KEY = "current_image_id"
     private const val AUTOMATION_MESSAGE_KEY = "message"
     private const val AUTOMATION_UPDATED_AT_KEY = "updated_at_ms"
+    private const val AUTOMATION_PAUSE_REQUESTED_KEY = "pause_requested"
 
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
     )
     private val autonomousImageStageCandidates = listOf(
         "character_recognition",
-        "series_recognition",
         "ocr",
         "captioning",
         "tag_prediction",
@@ -53,6 +53,8 @@ object StandaloneRuntime {
     private lateinit var storageProvider: StorageProvider
     private lateinit var database: LocalDatabase
     private lateinit var repository: LocalRepository
+    private lateinit var knowledgeDatabase: KnowledgeDatabase
+    private lateinit var resolutionStore: FusionResolutionStore
     private lateinit var localAiManager: LocalAiManager
     private val knowledgeRepository: KnowledgeRepository by lazy { KnowledgeRepository() }
     private var lastKnowledgeRebuildSignature: String? = null
@@ -122,7 +124,14 @@ object StandaloneRuntime {
                     storageProvider = SafStorageProvider(context.applicationContext)
                     database = LocalDatabase(context.applicationContext)
                     repository = LocalRepository(database)
-                    aiWorkflowCoordinator = AiWorkflowCoordinator(database, repository)
+                    knowledgeDatabase = KnowledgeDatabase(context.applicationContext)
+                    resolutionStore = FusionResolutionStore(database)
+                    aiWorkflowCoordinator = AiWorkflowCoordinator(
+                        database = database,
+                        repository = repository,
+                        knowledge = knowledgeDatabase,
+                        fusion = resolutionStore,
+                    )
                     localAiManager = LocalAiManager(
                         context = context.applicationContext,
                         database = database,
@@ -495,7 +504,7 @@ object StandaloneRuntime {
             if (filename.lowercase().endsWith(".zip")) {
                 val result = runCatching {
                     appContext.contentResolver.openInputStream(uri)?.use { input ->
-                        ReferenceKnowledgeImporter(database).importZip(input, filename)
+                        ReferenceKnowledgeImporter(knowledgeDatabase).importZip(input, filename)
                     } ?: mapOf("ok" to false, "message" to "Unable to open reference knowledge archive.", "filename" to filename)
                 }.getOrElse { error ->
                     mapOf(
@@ -506,6 +515,7 @@ object StandaloneRuntime {
                 }
                 referenceResults += result
                 if (result["ok"] == true) {
+                    resolutionStore.resetWaitingForKnowledge()
                     repository.rebuildSearchIndex()
                 }
             } else {
@@ -973,10 +983,39 @@ object StandaloneRuntime {
             "task_type" to "autonomous_image_workflow",
             "stages" to stages,
             "continue_on_stage_error" to true,
+            "character_taxonomy_context" to knowledgeDatabase.taxonomyPromptContext(),
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
         val organization = organizeAutonomousImage(imageId, workflow)
+
+        val hasCharacterKnowledge = workflow["character_resolution_available"] == true
+        val needsReview = workflow["queued_for_review"] == true
+        val organizationFailed = organization["ok"] == false &&
+            organization["status"]?.toString() !in setOf("skipped", "unchanged")
+        val state = when {
+            !hasCharacterKnowledge -> "waiting_for_knowledge"
+            needsReview -> "review_pending"
+            organizationFailed -> "retry_required"
+            else -> "complete"
+        }
+        if (organizationFailed) {
+            resolutionStore.queueReview(
+                imageId = imageId,
+                reviewType = "organization_failure",
+                reason = organization["message"]?.toString().orEmpty().ifBlank { "File organization failed." },
+                payload = mapOf("organization" to organization, "workflow" to workflow),
+            )
+        }
+        resolutionStore.markAutomationState(
+            imageId = imageId,
+            state = state,
+            pipelineComplete = response["ok"] == true,
+            organizationComplete = organization["ok"] == true || organization["status"]?.toString() == "unchanged",
+            needsReview = needsReview || organizationFailed,
+            lastError = if (organizationFailed) organization["message"]?.toString().orEmpty() else "",
+        )
+
         val completedStages = (response["stage_outputs"] as? Map<*, *>)?.size ?: 0
         val stageFailures = (response["stage_errors"] as? Map<*, *>)?.size ?: 0
         return response + mapOf(
@@ -985,6 +1024,7 @@ object StandaloneRuntime {
             "automation_stage_failures" to stageFailures,
             "workflow" to workflow,
             "organization" to organization,
+            "automation_state" to state,
         )
     }
 
@@ -1002,7 +1042,7 @@ object StandaloneRuntime {
                 val metadata = model["metadata"] as? Map<*, *>
                 val llama = metadata?.get("llama_cpp") as? Map<*, *>
                 val implicit = if (llama?.get("multimodal") == true) {
-                    listOf("captioning", "series_recognition", "character_recognition", "tag_prediction", "normalization")
+                    listOf("captioning", "character_recognition", "tag_prediction", "normalization")
                 } else {
                     emptyList()
                 }
@@ -1011,10 +1051,7 @@ object StandaloneRuntime {
             .map { it.trim().lowercase().replace('-', '_').replace(' ', '_') }
             .toSet()
 
-        val hasCharacters = database.readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM ${FusionDatabaseSchema.TABLE_CHARACTERS}",
-            emptyArray(),
-        ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) > 0 }
+        val hasCharacters = knowledgeDatabase.hasCharacters()
 
         return autonomousImageStageCandidates.filter { stage ->
             stage in installedTasks && (stage != "character_recognition" || hasCharacters)
@@ -1150,7 +1187,29 @@ object StandaloneRuntime {
 
     fun automationImageIds(forceAll: Boolean = false): List<Int> {
         ensureInitialized()
-        return repository.listAutomationImageIds(forceAll)
+        return resolutionStore.listAutomationImageIds(forceAll)
+    }
+
+    fun requestAutomationPause() {
+        ensureInitialized()
+        appContext.getSharedPreferences(AUTOMATION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(AUTOMATION_PAUSE_REQUESTED_KEY, true)
+            .apply()
+    }
+
+    fun clearAutomationPauseRequest() {
+        ensureInitialized()
+        appContext.getSharedPreferences(AUTOMATION_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(AUTOMATION_PAUSE_REQUESTED_KEY, false)
+            .apply()
+    }
+
+    fun automationPauseRequested(): Boolean {
+        ensureInitialized()
+        return appContext.getSharedPreferences(AUTOMATION_PREFS, Context.MODE_PRIVATE)
+            .getBoolean(AUTOMATION_PAUSE_REQUESTED_KEY, false)
     }
 
     fun automationStatus(): Map<String, Any> {
