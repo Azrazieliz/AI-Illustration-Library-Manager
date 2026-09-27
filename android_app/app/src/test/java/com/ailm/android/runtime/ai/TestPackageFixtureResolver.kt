@@ -28,7 +28,8 @@ internal object TestPackageFixtureResolver {
             error("JUnit assumption did not abort missing real-package fixture")
         }
 
-        val destination = createTempDirectory(prefix = "\${packageName.replace(Regex("[^A-Za-z0-9._-]"), "-")}-").toFile()
+        val prefix = packageName.replace(Regex("[^A-Za-z0-9._-]"), "-") + "-"
+        val destination = createTempDirectory(prefix = prefix).toFile()
         destination.deleteRecursively()
         destination.mkdirs()
         ZipFile(zip).use { archive ->
