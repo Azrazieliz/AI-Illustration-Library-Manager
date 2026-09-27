@@ -1206,7 +1206,12 @@ class LocalAiResultValidator {
                 }
             }
 
-            "character_recognition",
+            "character_recognition" -> {
+                if (!result.containsKey("subjects")) {
+                    issues += AiValidationIssue("missing_outputs", "Character observation result is missing subjects")
+                }
+            }
+
             "series_recognition",
             "artist_recognition" -> {
                 val topMatch = result["top_match"]?.toString().orEmpty()
