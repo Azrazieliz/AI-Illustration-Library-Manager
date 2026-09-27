@@ -335,6 +335,33 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
+    fun `Nomic text without vocab remains importable but not execution ready`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(
+                        ModelArtifactTensor("input_ids", 0, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("token_type_ids", 1, "int64", listOf(1, -1)),
+                        ModelArtifactTensor("attention_mask", 2, "int64", listOf(1, -1)),
+                    ),
+                    outputs = listOf(ModelArtifactTensor("last_hidden_state", 0, "float32", listOf(1, -1, 768))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nomic-embed-text-v1.5",
+            )
+
+            assertTrue(result.valid)
+            assertTrue(result.issues.any { it.code == "nomic_text_tokenizer_unavailable" })
+            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
+        }
+    }
+
+    @Test
     fun `BGE tokenizer with UTF-8 BOM remains valid package metadata and builds reranking contract`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
@@ -359,9 +386,9 @@ class ModelPackageInspectorRegressionTest {
 
             assertTrue(result.valid)
             assertFalse(result.issues.any { it.code == "metadata_invalid" })
-            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
-            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
-            assertTrue(contracts?.containsKey("text_reranking") == true)
+            assertTrue(result.issues.any { it.code == "bge_tokenizer_deferred" })
+            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
+            assertTrue(result.supportedTasks.contains("text_reranking"))
         }
     }
 
@@ -486,6 +513,29 @@ class ModelPackageInspectorRegressionTest {
             assertTrue(result.valid)
             assertTrue(result.supportedTasks.contains("nsfw_classification"))
             assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+        }
+    }
+
+    @Test
+    fun `NSFW graph mismatch remains importable but not execution ready`() {
+        withTempDir { root ->
+            File(root, "model.onnx").writeText("fixture")
+            val inspector = ModelPackageInspector { _, _ ->
+                ModelArtifactBindings(
+                    inputs = listOf(ModelArtifactTensor("input", 0, "float16", listOf(1, 224, 224, 3))),
+                    outputs = listOf(ModelArtifactTensor("probabilities", 0, "float32", listOf(1, 2))),
+                )
+            }
+
+            val result = inspector.inspect(
+                root,
+                File(root, "extracted"),
+                modelIdHint = "primary_ai_illustration_generation_asterioncore_nsfw-classifier",
+            )
+
+            assertTrue(result.valid)
+            assertTrue(result.issues.any { it.code == "nsfw_graph_incompatible" })
+            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
         }
     }
 
