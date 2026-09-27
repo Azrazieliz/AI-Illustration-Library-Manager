@@ -426,12 +426,16 @@ class ModelPackageInspectorRegressionTest {
     fun `NSFW classifier package builds an executable image classification contract`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
-            File(root, "config.json").writeText(
-                """{"architectures":["ViTForImageClassification"],"problem_type":"single_label_classification","id2label":{"0":"drawings","1":"hentai","2":"neutral","3":"porn","4":"sexy"}}""",
-            )
-            File(root, "preprocessor_config.json").writeText(
-                """{"size":{"height":224,"width":224},"image_mean":[0.5,0.5,0.5],"image_std":[0.5,0.5,0.5],"rescale_factor":0.0039215686,"do_convert_rgb":true,"do_center_crop":false}""",
-            )
+            val configRaw = """{"architectures":["ViTForImageClassification"],"problem_type":"single_label_classification","id2label":{"0":"drawings","1":"hentai","2":"neutral","3":"porn","4":"sexy"}}"""
+            val preprocessorRaw = """{"size":{"height":224,"width":224},"image_mean":[0.5,0.5,0.5],"image_std":[0.5,0.5,0.5],"rescale_factor":0.0039215686,"do_convert_rgb":true,"do_center_crop":false}"""
+            try {
+                assertEquals("ViTForImageClassification", (LocalAiJson.decodeMap(configRaw)["architectures"] as? List<*>)?.first())
+                assertEquals(true, LocalAiJson.decodeMap(preprocessorRaw)["do_convert_rgb"])
+            } catch (error: StackOverflowError) {
+                throw AssertionError("NSFW fixture JSON decode overflowed before inspection", error)
+            }
+            File(root, "config.json").writeText(configRaw)
+            File(root, "preprocessor_config.json").writeText(preprocessorRaw)
             val inspector = ModelPackageInspector { _, _ ->
                 ModelArtifactBindings(
                     inputs = listOf(ModelArtifactTensor("pixel_values", 0, "float32", listOf(1, 3, 224, 224))),
@@ -439,7 +443,11 @@ class ModelPackageInspectorRegressionTest {
                 )
             }
 
-            val result = inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_nsfw-classifier")
+            val result = try {
+                inspector.inspect(root, File(root, "extracted"), modelIdHint = "asterioncore_nsfw-classifier")
+            } catch (error: StackOverflowError) {
+                throw AssertionError("NSFW inspection overflowed after JSON decode", error)
+            }
 
             assertTrue(result.valid)
             assertTrue(result.supportedTasks.contains("nsfw_classification"))
