@@ -20,11 +20,16 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Compile tests and build debug APK
+      - name: Run inspector regression tests and build debug APK
         working-directory: android_app
         run: |
           chmod +x gradlew
-          ./gradlew :app:compileDebugUnitTestKotlin :app:assembleDebug --stacktrace
+          ./gradlew :app:compileDebugUnitTestKotlin
+          ./gradlew :app:testDebugUnitTest \
+            --tests "com.ailm.android.runtime.ai.ModelPackageInspectorTest" \
+            --tests "com.ailm.android.runtime.ai.ModelPackageInspectorRegressionTest" \
+            --stacktrace
+          ./gradlew :app:assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
