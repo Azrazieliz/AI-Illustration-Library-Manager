@@ -21,7 +21,7 @@ class PaddleOcrExecutionContractTest {
         assertEquals(listOf("detector", "recognizer", "dictionary_decoder"), roles)
         assertTrue(inspection.supportedTasks.contains("ocr"))
         assertFalse(inspection.issues.any { it.code == "model_artifact_ambiguous" })
-        assertFalse(inspection.valid)
+        assertTrue(inspection.valid)
     }
 
     @Test
@@ -44,20 +44,31 @@ class PaddleOcrExecutionContractTest {
     }
 
     @Test
-    fun `dictionary count and unresolved CTC mapping remain explicit`() {
+    fun `dictionary count resolves canonical PP-OCRv5 CTC mapping`() {
         val dictionary = inspectPackage().metadata["ocr_dictionary"] as Map<*, *>
         assertEquals(18383, dictionary["entry_count"])
         assertEquals(18385, dictionary["recognizer_class_count"])
-        assertEquals("unresolved", dictionary["mapping_status"])
-        assertTrue(inspectPackage().issues.any { it.code == "ocr_ctc_mapping_unresolved" })
+        assertEquals(0, dictionary["blank_index"])
+        assertEquals(1, dictionary["dictionary_offset"])
+        assertEquals(18384, dictionary["space_index"])
+        assertEquals("ctc_blank_plus_dictionary_plus_space", dictionary["mapping_status"])
+        assertFalse(inspectPackage().issues.any { it.code == "ocr_ctc_mapping_unresolved" })
     }
 
     @Test
-    fun `OCR is not executable without proven preprocessing and postprocessing`() {
-        val issues = inspectPackage().issues.map { it.code }.toSet()
-        assertTrue(issues.contains("ocr_preprocessing_unresolved"))
-        assertTrue(issues.contains("ocr_detector_postprocessing_unresolved"))
-        assertFalse(inspectPackage().valid)
+    fun `OCR package exposes complete two stage runtime profile`() {
+        val inspection = inspectPackage()
+        assertTrue(inspection.valid)
+        assertTrue(inspection.metadata["execution_readiness"] == null)
+        val paddle = inspection.metadata["paddle_ocr"] as Map<*, *>
+        val detectorPost = paddle["detector_postprocessing"] as Map<*, *>
+        assertEquals("db", detectorPost["type"])
+        assertEquals(0.3f, detectorPost["thresh"])
+        assertEquals(0.6f, detectorPost["box_thresh"])
+        assertEquals(1.5f, detectorPost["unclip_ratio"])
+        val recognizerPre = paddle["recognizer_preprocessing"] as Map<*, *>
+        assertEquals(48, recognizerPre["height"])
+        assertEquals(320, recognizerPre["max_width"])
     }
 
     private fun inspectPackage(): ModelPackageInspection =
