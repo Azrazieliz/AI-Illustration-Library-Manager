@@ -1553,6 +1553,7 @@ class LocalAiManager(
             "pipeline_type" to pipelineType,
             "task_ids" to taskIds,
             "stages" to stageRecords,
+            "stage_outputs" to stageOutputs,
             "failed_stages" to failedStages,
             "result" to (finalStageOutput["result"] ?: finalStageOutput),
             "raw_result" to finalStageOutput,
