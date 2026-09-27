@@ -384,14 +384,27 @@ internal class LlamaCppBackend(
 
     override suspend fun execute(request: AiExecutionRequest, reporter: AiProgressReporter): AiExecutionResult {
         val model = modelResolver(request.modelId, request.version) ?: return unavailable("Model is not installed")
-        if (AiTaskTypes.normalize(request.taskType) !in setOf("text_generation", "prompt_generation")) {
-            return incompatible("Qwen native backend supports text generation only")
+        val normalizedTask = AiTaskTypes.normalize(request.taskType)
+        val supportedQwenTasks = setOf(
+            "text_generation",
+            "prompt_generation",
+            "captioning",
+            "series_recognition",
+            "character_recognition",
+            "tag_prediction",
+            "normalization",
+        )
+        if (normalizedTask !in supportedQwenTasks) {
+            return incompatible("Qwen native backend does not support task $normalizedTask")
         }
         val handle = loadModel(model) ?: return incompatible("model_load_failed: native llama.cpp could not load the GGUF artifact")
         val nativeHandle = (handle.metadata["native_handle"] as Number).toLong()
-        val prompt = request.payload["text"]?.toString() ?: request.payload["prompt"]?.toString()
-            ?: return incompatible("tokenization_failed: request text is missing")
-        val maxNewTokens = ((request.payload["max_new_tokens"] as? Number)?.toInt() ?: 128).coerceIn(1, 4096)
+        val prompt = semanticQwenPrompt(normalizedTask, request.payload)
+        if (prompt.isBlank()) {
+            return incompatible("tokenization_failed: request text is missing")
+        }
+        val maxNewTokens = ((request.payload["max_new_tokens"] as? Number)?.toInt()
+            ?: if (normalizedTask == "tag_prediction") 192 else 128).coerceIn(1, 4096)
         return try {
             activeHandles[request.sessionId] = bridge to nativeHandle
             val multimodal = handle.metadata["multimodal"] == true
@@ -417,6 +430,7 @@ internal class LlamaCppBackend(
                     "sampling_policy" to "greedy",
                     "native_backend" to "llama.cpp",
                     "llama_cpp_revision" to "5266f24da75dc449bd56cbed7addb9c8e4a6a73e",
+                    "result" to semanticQwenResult(normalizedTask, generated),
                 ),
             )
         } catch (error: Throwable) {
@@ -424,6 +438,59 @@ internal class LlamaCppBackend(
         } finally {
             activeHandles.remove(request.sessionId)
             unloadModel(handle)
+        }
+    }
+
+    private fun semanticQwenPrompt(taskType: String, payload: Map<String, Any>): String {
+        val userPrompt = payload["prompt"]?.toString()?.trim().orEmpty()
+        val caption = payload["caption"]?.toString()?.trim().orEmpty()
+        val ocr = payload["ocr_text"]?.toString()?.trim().orEmpty()
+        val context = buildString {
+            if (caption.isNotBlank()) append("\nExisting caption: ").append(caption)
+            if (ocr.isNotBlank()) append("\nDetected text: ").append(ocr)
+        }
+        return when (taskType) {
+            "captioning" ->
+                "Describe the image accurately in one concise sentence. Mention the main subject, appearance, clothing, pose, and setting when visible. Return only the caption."
+            "series_recognition" ->
+                "Identify the most likely franchise, anime, game, manga, or series represented by this image. Return only one canonical series title. If you cannot identify it reliably, return UNKNOWN." + context
+            "character_recognition" ->
+                "Identify the most likely named fictional character represented by this image. Return only one canonical character name. If you cannot identify the character reliably, return UNKNOWN." + context
+            "tag_prediction" ->
+                "Return a concise comma-separated list of visually observable tags for this image. Include useful appearance, outfit, pose, expression, environment, framing, and action tags. Do not explain." + context
+            "normalization" ->
+                "Normalize the supplied context into concise canonical wording. Preserve meaning and do not invent facts. Return only the normalized text." + context
+            else -> payload["text"]?.toString()?.trim().orEmpty().ifBlank { userPrompt }
+        }
+    }
+
+    private fun semanticQwenResult(taskType: String, generated: String): Map<String, Any> {
+        val clean = generated.trim()
+        return when (taskType) {
+            "captioning" -> mapOf("caption" to clean)
+            "series_recognition", "character_recognition" -> {
+                val top = clean.lineSequence().firstOrNull()?.trim()?.trim('"', '\'', '.', ',').orEmpty()
+                    .ifBlank { "UNKNOWN" }
+                val confidence = if (top.equals("UNKNOWN", ignoreCase = true)) 0.0 else 0.80
+                mapOf(
+                    "top_match" to top,
+                    "confidence" to confidence,
+                    "candidates" to listOf(mapOf("name" to top, "confidence" to confidence)),
+                )
+            }
+            "tag_prediction" -> {
+                val tags = clean
+                    .replace("\n", ",")
+                    .split(',')
+                    .map { it.trim().trim('-', '*', '•', '"') }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+                    .take(40)
+                mapOf("tags" to tags)
+            }
+            "normalization" -> mapOf("text" to clean)
+            "prompt_generation" -> mapOf("prompt" to clean)
+            else -> mapOf("text" to clean)
         }
     }
 
