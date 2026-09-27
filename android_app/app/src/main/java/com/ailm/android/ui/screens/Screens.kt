@@ -1736,11 +1736,12 @@ private fun ImageViewerScreen(
     onNavigate: (AppDestination) -> Unit,
 ) {
     var tagsText by rememberSaveable { mutableStateOf("") }
-    var showMetadata by rememberSaveable { mutableStateOf(true) }
+    var showMetadata by rememberSaveable { mutableStateOf(false) }
     var imageScale by rememberSaveable { mutableStateOf(1f) }
     var imageOffset by remember { mutableStateOf(Offset.Zero) }
     var imageContentScale by rememberSaveable { mutableStateOf("fit") }
     var swipeAccumLocal by remember { mutableStateOf(0f) }
+
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         imageScale = (imageScale * zoomChange).coerceIn(1f, 4f)
         imageOffset = if (imageScale > 1f) imageOffset + panChange else Offset.Zero
@@ -1748,6 +1749,7 @@ private fun ImageViewerScreen(
 
     val selected = state.selectedImage
     val selectedId = selected?.imageId()
+
     LaunchedEffect(selectedId, selected?.get("metadata")) {
         val metadata = selected?.get("metadata") as? Map<*, *>
         val tags = when (val nested = metadata?.get("tags")) {
@@ -1756,181 +1758,187 @@ private fun ImageViewerScreen(
             else -> emptyList()
         }
         tagsText = tags.joinToString(", ")
+        imageScale = 1f
+        imageOffset = Offset.Zero
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Image Viewer", style = MaterialTheme.typography.headlineMedium)
-
         if (selected == null) {
+            Text("Viewer", style = MaterialTheme.typography.headlineMedium)
             AsterionEmptyState(
                 title = "No image selected",
-                detail = "Open an image from Library Browser to inspect it, edit tags, and review metadata.",
+                detail = "Open an image from the library or search results.",
             )
-        } else {
-            val title = selected["filename"]?.toString().orEmpty().ifBlank { "Untitled image" }
-            val imageId = selected.imageId()
-            val metadata = selected["metadata"] as? Map<*, *> ?: emptyMap<String, Any>()
-            val tags = when (val nested = metadata["tags"]) {
-                is List<*> -> nested.mapNotNull { it?.toString()?.trim() }.filter { it.isNotBlank() }
-                is String -> nested.split('|').map { it.trim() }.filter { it.isNotBlank() }
-                else -> emptyList()
-            }
-            LaunchedEffect(selectedId, tags.joinToString("|")) {
-                Log.d(
-                    UI_TRACE_TAG,
-                    "Compose recomposition: imageId=$imageId displayedTags=${tags.joinToString("|")}",
-                )
-            }
+            Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) { Text("Open Library") }
+            return@Column
+        }
 
-            // Determine source ordering: prefer explicit activeViewerContext when set,
-            // otherwise prefer searchResults, then fall back to full images.
-            val sourceRows = when {
-                state.activeViewerContext.isNotEmpty() -> state.activeViewerContext
-                state.searchResults.isNotEmpty() -> state.searchResults
-                else -> state.images
-            }
-            // Helper to resolve current index within the sourceRows
-            fun findCurrentIndex(): Int {
-                val id = selected?.imageId() ?: return -1
-                return sourceRows.indexOfFirst { it.imageId() == id }
-            }
+        val title = selected["filename"]?.toString().orEmpty().ifBlank { "Untitled image" }
+        val imageId = selected.imageId()
+        val sourceRows = when {
+            state.activeViewerContext.isNotEmpty() -> state.activeViewerContext
+            state.searchResults.isNotEmpty() -> state.searchResults
+            else -> state.images
+        }
+        val currentIndex = sourceRows.indexOfFirst { it.imageId() == imageId }
+        val positionLabel = if (currentIndex >= 0) "${currentIndex + 1} / ${sourceRows.size}" else ""
 
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (!imageUrl.isNullOrBlank()) {
+        fun finishSwipe() {
+            val threshold = 72f
+            val idx = sourceRows.indexOfFirst { it.imageId() == imageId }
+            when {
+                swipeAccumLocal > threshold && idx >= 0 && idx < sourceRows.lastIndex -> onSelectImage(sourceRows[idx + 1])
+                swipeAccumLocal < -threshold && idx > 0 -> onSelectImage(sourceRows[idx - 1])
+            }
+            swipeAccumLocal = 0f
+        }
 
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(320.dp)
-                        ) {
-                            ImageTile(
-                                model = imageUrl,
-                                contentDescription = title,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer(
-                                        scaleX = imageScale,
-                                        scaleY = imageScale,
-                                        translationX = imageOffset.x,
-                                        translationY = imageOffset.y,
-                                    )
-                                    .pointerInput(selectedId) {
-                                        detectTapGestures(
-                                            onDoubleTap = {
-                                                imageScale = if (imageScale > 1f) 1f else 2f
-                                                imageOffset = Offset.Zero
-                                            },
-                                        )
-                                    }
-                                    .transformable(transformState),
-                                contentScale = if (imageContentScale == "fill") ContentScale.Crop else ContentScale.Fit,
+        Card(modifier = Modifier.fillMaxWidth()) {
+            if (!imageUrl.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(430.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    ImageTile(
+                        model = imageUrl,
+                        contentDescription = title,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer(
+                                scaleX = imageScale,
+                                scaleY = imageScale,
+                                translationX = imageOffset.x,
+                                translationY = imageOffset.y,
                             )
-                        }
+                            .pointerInput(selectedId) {
+                                detectTapGestures(
+                                    onDoubleTap = {
+                                        imageScale = if (imageScale > 1f) 1f else 2f
+                                        imageOffset = Offset.Zero
+                                    },
+                                )
+                            }
+                            .transformable(transformState),
+                        contentScale = if (imageContentScale == "fill") ContentScale.Crop else ContentScale.Fit,
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(selectedId) {
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { _, dragAmount ->
+                                swipeAccumLocal += dragAmount
+                            },
+                            onDragEnd = { finishSwipe() },
+                            onDragCancel = { swipeAccumLocal = 0f },
+                        )
                     }
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (positionLabel.isNotBlank()) {
+                        Text(
+                            positionLabel,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
 
-                    Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Swipe anywhere in this panel to move between images.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { showMetadata = !showMetadata }) {
-                            Text(if (showMetadata) "Hide Metadata" else "Show Metadata")
-                        }
-                        AssistChip(onClick = {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AssistChip(
+                        onClick = {
                             imageScale = 1f
                             imageOffset = Offset.Zero
                             imageContentScale = "fit"
-                        }, label = { Text("Fit") })
-                        AssistChip(onClick = {
+                        },
+                        label = { Text("Fit") },
+                    )
+                    AssistChip(
+                        onClick = {
                             imageScale = 1f
                             imageOffset = Offset.Zero
                             imageContentScale = "fill"
-                        }, label = { Text("Fill") })
-                        AssistChip(onClick = {
-                            imageScale = 1f
-                            imageOffset = Offset.Zero
-                        }, label = { Text("100%") })
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(40.dp)
-                            .pointerInput(selectedId, imageScale) {
-                                detectHorizontalDragGestures(
-                                    onHorizontalDrag = { _, dragAmount ->
-                                        if (imageScale == 1f) {
-                                            swipeAccumLocal += dragAmount
-                                        }
-                                    },
-                                    onDragEnd = {
-                                        if (imageScale == 1f) {
-                                            val threshold = 120f
-                                            val idx = findCurrentIndex()
-                                            when {
-                                                swipeAccumLocal > threshold && idx >= 0 && idx < sourceRows.size - 1 -> {
-                                                    val next = sourceRows[idx + 1]
-                                                    onSelectImage(next)
-                                                }
-                                                swipeAccumLocal < -threshold && idx > 0 -> {
-                                                    val prev = sourceRows[idx - 1]
-                                                    onSelectImage(prev)
-                                                }
-                                            }
-                                        }
-                                        swipeAccumLocal = 0f
-                                    },
-                                    onDragCancel = {
-                                        swipeAccumLocal = 0f
-                                    },
-                                )
-                            },
+                        },
+                        label = { Text("Fill") },
                     )
-
-                    OutlinedTextField(
-                        value = tagsText,
-                        onValueChange = { tagsText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Tags (comma or | separated)") },
+                    AssistChip(
+                        onClick = { showMetadata = !showMetadata },
+                        label = { Text(if (showMetadata) "Hide details" else "Details") },
                     )
-                    Button(onClick = {
-                        if (imageId != null) {
-                            Log.d(UI_TRACE_TAG, "UI click tags: imageId=$imageId currentTags=${tags.joinToString("|")} nextTagsCsv=$tagsText")
-                            onSetTags(imageId, tagsText)
-                        }
-                    }, enabled = imageId != null) {
-                        Text("Save Tags")
-                    }
-                    state.lastActionMessage?.let { message ->
-                        Text(message, style = MaterialTheme.typography.bodySmall)
-                    }
-                    state.errorMessage?.let { message ->
-                        Text("Error: $message", style = MaterialTheme.typography.bodySmall)
-                    }
+                }
 
-                    if (showMetadata) {
-                        Text("Metadata", style = MaterialTheme.typography.titleSmall)
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Tags") },
+                )
+                Button(
+                    onClick = {
+                        if (imageId != null) onSetTags(imageId, tagsText)
+                    },
+                    enabled = imageId != null,
+                ) {
+                    Text("Save tags")
+                }
+
+                state.lastActionMessage?.let { AsterionStatusNotice(it) }
+                state.errorMessage?.let { AsterionStatusNotice(it, isError = true) }
+
+                AnimatedVisibility(visible = showMetadata) {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                         metadataRows(selected).forEach { line ->
-                            Text(line, style = MaterialTheme.typography.bodySmall)
+                            Text(
+                                line,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
             }
         }
 
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) {
-                Text("Back to Library")
-            }
-            Button(onClick = { onNavigate(AppDestination.Dashboard) }) {
-                Text("Dashboard")
-            }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Button(onClick = { onNavigate(AppDestination.LibraryBrowser) }) { Text("Library") }
+            TextButton(onClick = { onNavigate(AppDestination.Dashboard) }) { Text("Dashboard") }
         }
     }
 }
