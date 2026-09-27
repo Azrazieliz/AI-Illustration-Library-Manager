@@ -44,7 +44,11 @@ internal data class ModelPackageInspection(
 }
 
 /** Reads a distributed model package without assigning meanings that its files do not declare. */
-internal class ModelPackageInspector {
+internal class ModelPackageInspector(
+    private val inspectArtifactBindings: (File, String) -> ModelArtifactBindings = { artifact, runtime ->
+        ModelArtifactInspector.inspect(artifact, runtime)
+    },
+) {
     fun inspect(source: File, extractionDirectory: File): ModelPackageInspection {
         val issues = mutableListOf<ModelPackageIssue>()
         val packageRoot = materializePackage(source, extractionDirectory, issues)
@@ -75,7 +79,7 @@ internal class ModelPackageInspector {
         val artifact = resolveArtifact(source, packageRoot, files, normalizedMetadata, issues)
         val runtime = artifact?.let(::runtimeFor).orEmpty()
         val bindings = artifact?.takeIf { runtime.isNotBlank() && runtime != AiRuntimeType.LLAMA_CPP.raw }?.let { model ->
-            runCatching { ModelArtifactInspector.inspect(model, runtime) }.getOrElse { error ->
+            runCatching { inspectArtifactBindings(model, runtime) }.getOrElse { error ->
                 issues += ModelPackageIssue(
                     "tensor_metadata_unreadable",
                     "Unable to inspect ${model.name}: ${error.message ?: error.javaClass.simpleName}",
@@ -1611,7 +1615,7 @@ internal class ModelPackageInspector {
             return null
         }
 
-        return runCatching { ModelArtifactInspector.inspect(artifact, runtime) }
+        return runCatching { inspectArtifactBindings(artifact, runtime) }
             .onSuccess { resolved -> bindingCache[key] = resolved }
             .getOrElse { error ->
                 issues += ModelPackageIssue(
