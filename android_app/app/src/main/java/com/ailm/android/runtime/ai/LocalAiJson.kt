@@ -18,9 +18,14 @@ object LocalAiJson {
             return emptyMap()
         }
         if (normalized.trimStart().startsWith("{")) {
-            val platformParsed = runCatching { fromJsonObject(JSONObject(normalized)) }.getOrNull()
-            if (platformParsed != null) {
-                return platformParsed
+            val vmName = System.getProperty("java.vm.name").orEmpty()
+            val runtimeName = System.getProperty("java.runtime.name").orEmpty()
+            val isAndroidRuntime =
+                vmName.contains("dalvik", ignoreCase = true) ||
+                    runtimeName.contains("android", ignoreCase = true)
+            if (isAndroidRuntime) {
+                return runCatching { fromJsonObject(JSONObject(normalized)) }
+                    .getOrElse { decodeObjectFallback(normalized) }
             }
             return decodeObjectFallback(normalized)
         }
