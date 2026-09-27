@@ -227,11 +227,11 @@ fun ScreenScaffold(
         knowledgeDocumentPickerLauncher.launch(arrayOf("application/json", "text/*"))
     }
     val chooseKnowledgePacks: () -> Unit = {
-        knowledgePackDocumentPickerLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/*"))
+        knowledgePackDocumentPickerLauncher.launch(arrayOf("application/json", "application/zip", "application/octet-stream", "text/*"))
     }
     val chooseKnowledgePackReplacement: (String) -> Unit = { filename ->
         replacingKnowledgePackName = filename
-        knowledgePackReplacementPickerLauncher.launch(arrayOf("application/json", "application/octet-stream", "text/*"))
+        knowledgePackReplacementPickerLauncher.launch(arrayOf("application/json", "application/zip", "application/octet-stream", "text/*"))
     }
 
     when (destination) {
@@ -2462,7 +2462,7 @@ private fun AiAutomationScreen(
             ) {
                 Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Each image is analysed with every applicable stage: recognition, OCR when text is present, captioning, tags, embeddings, normalization and safety classification. High-confidence results are saved; uncertain or failed stages are sent to Review without stopping the rest of the library.",
+                    "Each pending image is processed end-to-end with the compatible local models: OCR, visual recognition, captioning, tags, embeddings, normalization, safety and quality scoring. Confident canonical series results are used to rename and move the file into its series folder. Uncertain results stay in place and go to Review. Character recognition is skipped until character knowledge is installed.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
