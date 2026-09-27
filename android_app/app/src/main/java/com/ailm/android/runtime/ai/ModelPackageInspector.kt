@@ -1919,8 +1919,24 @@ internal class ModelPackageInspector(
                 else -> "unclassified_gguf"
             },
         )
-        if (isQwenCoder || isQwenVl) {
-            metadata["supported_tasks"] = (metadata["supported_tasks"].asDeclaredValues() + "text_generation").distinct()
+        if (isQwenVl) {
+            metadata["supported_tasks"] = (
+                metadata["supported_tasks"].asDeclaredValues() +
+                    listOf(
+                        "text_generation",
+                        "prompt_generation",
+                        "captioning",
+                        "series_recognition",
+                        "character_recognition",
+                        "tag_prediction",
+                        "normalization",
+                    )
+                ).distinct()
+        } else if (isQwenCoder) {
+            metadata["supported_tasks"] = (
+                metadata["supported_tasks"].asDeclaredValues() +
+                    listOf("text_generation", "prompt_generation", "normalization")
+                ).distinct()
         }
     }
 
