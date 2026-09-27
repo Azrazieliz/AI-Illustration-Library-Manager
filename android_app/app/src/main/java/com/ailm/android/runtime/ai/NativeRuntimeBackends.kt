@@ -7,6 +7,7 @@ import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.io.FileInputStream
@@ -662,25 +663,40 @@ class OptionalNativeRuntimeProvider(
     }
 }
 
+internal data class OnnxRuntimeTensorOutput(
+    val values: List<Float>,
+    val shape: LongArray = longArrayOf(),
+)
+
 internal object OnnxRuntimeClient {
-    fun run(model: AiModelDescriptor, inputs: List<PreparedInferenceTensor>): Map<String, List<Float>> {
+    fun run(model: AiModelDescriptor, inputs: List<PreparedInferenceTensor>): Map<String, List<Float>> =
+        runDetailed(model, inputs).mapValues { it.value.values }
+
+    fun runDetailed(model: AiModelDescriptor, inputs: List<PreparedInferenceTensor>): Map<String, OnnxRuntimeTensorOutput> {
         val environment = OrtEnvironment.getEnvironment()
         OrtSession.SessionOptions().use { options ->
             environment.createSession(model.installPath, options).use { session ->
                 val tensors = inputs.associate { input -> input.name to createTensor(environment, input) }
                 try {
                     session.run(tensors).use { result ->
-                        val outputMap = linkedMapOf<String, List<Float>>()
+                        val outputMap = linkedMapOf<String, OnnxRuntimeTensorOutput>()
                         result.forEach { output ->
-                            outputMap[output.key] = RuntimeOutputMapper.flatten(output.value.value)
+                            val info = output.value.info as? TensorInfo
+                            outputMap[output.key] = OnnxRuntimeTensorOutput(
+                                values = RuntimeOutputMapper.flatten(output.value.value),
+                                shape = info?.shape ?: longArrayOf(),
+                            )
                         }
                         inputs.firstOrNull { it.name.equals("attention_mask", ignoreCase = true) }?.let { tensor ->
-                            outputMap["attention_mask"] = when (tensor.dataType) {
-                                "int64" -> tensor.longs.map(Long::toFloat)
-                                "int32" -> tensor.ints.map(Int::toFloat)
-                                "float32" -> tensor.floats.toList()
-                                else -> emptyList()
-                            }
+                            outputMap["attention_mask"] = OnnxRuntimeTensorOutput(
+                                values = when (tensor.dataType) {
+                                    "int64" -> tensor.longs.map(Long::toFloat)
+                                    "int32" -> tensor.ints.map(Int::toFloat)
+                                    "float32" -> tensor.floats.toList()
+                                    else -> emptyList()
+                                },
+                                shape = tensor.shape,
+                            )
                         }
                         return outputMap
                     }
