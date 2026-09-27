@@ -43,16 +43,22 @@ class AiWorkflowCoordinator(
             accepted,
             reviewReasons,
         )
-        val acceptedSeries = acceptRecognition(
-            imageId,
-            stages["series_recognition"],
-            FusionDatabaseSchema.TABLE_SERIES,
-            "series_code",
-            "canonical_title",
-            FusionDatabaseSchema.TABLE_IMAGE_SERIES,
-            accepted,
-            reviewReasons,
-        )
+        val originalCharacter = isExplicitOriginalCharacter(stages["series_recognition"])
+        val acceptedSeries = if (originalCharacter) {
+            accepted += "series_recognition"
+            null
+        } else {
+            acceptRecognition(
+                imageId,
+                stages["series_recognition"],
+                FusionDatabaseSchema.TABLE_SERIES,
+                "series_code",
+                "canonical_title",
+                FusionDatabaseSchema.TABLE_IMAGE_SERIES,
+                accepted,
+                reviewReasons,
+            )
+        }
 
         val tags = stages["tag_prediction"]?.resultMap()?.stringList("tags").orEmpty()
         if (tags.isNotEmpty()) {
@@ -82,9 +88,30 @@ class AiWorkflowCoordinator(
             "accepted_series_name" to acceptedSeries?.second.orEmpty(),
             "accepted_character_id" to acceptedCharacter?.first.orEmpty(),
             "accepted_character_name" to acceptedCharacter?.second.orEmpty(),
+            "original_character" to originalCharacter,
             "queued_for_review" to reviewReasons.isNotEmpty(),
             "review_reasons" to reviewReasons,
         )
+    }
+
+    private fun isExplicitOriginalCharacter(stage: Map<String, Any>?): Boolean {
+        val result = stage?.resultMap() ?: return false
+        if (result["original_character"].asBoolean() || result["is_original_character"].asBoolean()) return true
+        val candidate = result["candidates"].mapList().firstOrNull()
+        val name = candidate?.optText("name").orEmpty().ifBlank { result.optText("top_match") }
+        if (name.isBlank()) return false
+        val normalized = name.trim().lowercase()
+        val explicitOriginal = normalized in setOf(
+            "original character",
+            "original characters",
+            "original_character",
+            "original",
+            "oc",
+        )
+        if (!explicitOriginal) return false
+        val confidence = candidate?.get("confidence").asDouble().takeIf { it > 0.0 }
+            ?: result["confidence"].asDouble()
+        return confidence >= ACCEPTANCE_THRESHOLD
     }
 
     private fun acceptRecognition(
