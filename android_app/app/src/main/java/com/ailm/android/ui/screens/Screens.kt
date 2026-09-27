@@ -976,6 +976,7 @@ private fun LibraryBrowserScreen(
     var showSearch by rememberSaveable { mutableStateOf(true) }
     var showSort by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
+    var showFileTools by rememberSaveable { mutableStateOf(false) }
     var tagsQuery by rememberSaveable { mutableStateOf("") }
     var minWidthText by rememberSaveable { mutableStateOf("") }
     var minHeightText by rememberSaveable { mutableStateOf("") }
@@ -1105,11 +1106,21 @@ private fun LibraryBrowserScreen(
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 12.dp)) {
-                Text("Library Browser", style = MaterialTheme.typography.headlineMedium)
-                Text("Results: $totalCount")
+                Text("Library", style = MaterialTheme.typography.headlineMedium)
+                Text("$totalCount images", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            AssistChip(
+                onClick = { showFileTools = !showFileTools },
+                label = {
+                    Text(if (showFileTools) "Hide file operations" else "File operations")
+                },
+            )
+        }
+
+        if (showFileTools) {
         item(span = { GridItemSpan(maxLineSpan) }) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1209,11 +1220,13 @@ private fun LibraryBrowserScreen(
             }
         }
 
+        }
+
         item(span = { GridItemSpan(maxLineSpan) }) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { showSearch = !showSearch }) { Text(if (showSearch) "▼ Search" else "► Search") }
-                Button(onClick = { showSort = !showSort }) { Text(if (showSort) "▼ Sort" else "► Sort") }
-                Button(onClick = { showFilters = !showFilters }) { Text(if (showFilters) "▼ Filters" else "► Filters") }
+                AssistChip(onClick = { showSearch = !showSearch }, label = { Text(if (showSearch) "Hide search" else "Search") })
+                AssistChip(onClick = { showSort = !showSort }, label = { Text(if (showSort) "Hide sort" else "Sort") })
+                AssistChip(onClick = { showFilters = !showFilters }, label = { Text(if (showFilters) "Hide filters" else "Filters") })
                 Button(onClick = {
                     searchQuery = ""
                     imageIdQuery = ""
