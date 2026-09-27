@@ -1171,9 +1171,12 @@ class LocalAiResultValidator {
             }
 
             "ocr" -> {
-                val text = result["text"]?.toString().orEmpty().ifBlank { details["text"]?.toString().orEmpty() }
-                if (text.isBlank()) {
-                    issues += AiValidationIssue("missing_outputs", "OCR result is missing extracted text")
+                // Empty OCR text is a valid outcome for an image with no readable text.
+                // The runtime only needs to expose the text field; blank content must not
+                // fail an autonomous workflow.
+                val hasTextField = result.containsKey("text") || details.containsKey("text")
+                if (!hasTextField) {
+                    issues += AiValidationIssue("missing_outputs", "OCR result is missing the text field")
                 }
             }
 
