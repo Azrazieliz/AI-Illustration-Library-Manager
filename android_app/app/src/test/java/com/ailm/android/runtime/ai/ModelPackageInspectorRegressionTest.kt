@@ -275,7 +275,9 @@ class ModelPackageInspectorRegressionTest {
     fun `Nomic text inferred task builds executable contract from inspected graph`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
-            File(root, "vocab.txt").writeText("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n")
+            File(root, "tokenizer.json").writeText(
+                """{"model":{"type":"WordPiece","unk_token":"[UNK]","continuing_subword_prefix":"##","vocab":{"[PAD]":0,"[UNK]":100,"[CLS]":101,"[SEP]":102,"[MASK]":103,"hello":104}}}""",
+            )
             val inspector = ModelPackageInspector { _, _ ->
                 ModelArtifactBindings(
                     inputs = listOf(
@@ -304,7 +306,6 @@ class ModelPackageInspectorRegressionTest {
     fun `Nomic text known-package path ignores deeply nested tokenizer metadata during import`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
-            File(root, "vocab.txt").writeText("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nhello\n")
             val deeplyNested = buildString {
                 repeat(5000) { append("{\"x\":") }
                 append("0")
@@ -335,7 +336,7 @@ class ModelPackageInspectorRegressionTest {
     }
 
     @Test
-    fun `Nomic text without vocab remains importable but not execution ready`() {
+    fun `Nomic text without tokenizer remains importable but not execution ready`() {
         withTempDir { root ->
             File(root, "model.onnx").writeText("fixture")
             val inspector = ModelPackageInspector { _, _ ->
@@ -386,9 +387,15 @@ class ModelPackageInspectorRegressionTest {
 
             assertTrue(result.valid)
             assertFalse(result.issues.any { it.code == "metadata_invalid" })
-            assertTrue(result.issues.any { it.code == "bge_tokenizer_deferred" })
-            assertEquals(false, (result.metadata["execution_readiness"] as? Map<*, *>)?.get("ready"))
+            assertFalse(result.issues.any { it.code == "bge_tokenizer_deferred" })
+            assertFalse(result.issues.any { it.code == "execution_metadata_missing" })
+            assertTrue(result.metadata["execution_readiness"] == null)
             assertTrue(result.supportedTasks.contains("text_reranking"))
+            val contracts = result.metadata["inference_contracts"] as? Map<*, *>
+            val contract = contracts?.get("text_reranking") as? Map<*, *>
+            val tokenizer = contract?.get("tokenizer") as? Map<*, *>
+            assertEquals("hf_unigram_json", tokenizer?.get("source_format"))
+            assertTrue(tokenizer?.get("source_file")?.toString()?.endsWith("tokenizer.json") == true)
         }
     }
 
