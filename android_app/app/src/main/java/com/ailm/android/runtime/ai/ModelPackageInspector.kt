@@ -97,6 +97,18 @@ internal class ModelPackageInspector(
                 null
             }
         }
+        inspectKnownNsfwPackage(
+            modelIdHint = modelIdHint,
+            packageRoot = packageRoot,
+            artifact = artifact,
+            runtime = runtime,
+            bindings = bindings,
+            normalizedMetadata = normalizedMetadata,
+            filesByName = filesByName,
+            relativeFiles = relativeFiles,
+            issues = issues,
+        )?.let { return it }
+
         val declaredCapabilities = discoverValues(normalizedMetadata, CAPABILITY_KEYS)
         val declaredTasks = (discoverValues(normalizedMetadata, TASK_KEYS) +
             normalizedMetadata["task"].asDeclaredValues() +
@@ -245,6 +257,148 @@ internal class ModelPackageInspector(
             runtime = runtime,
             supportedTasks = tasks,
             capabilities = capabilities,
+            metadata = resolvedMetadata,
+            files = relativeFiles,
+            issues = issues,
+        )
+    }
+
+    private fun inspectKnownNsfwPackage(
+        modelIdHint: String,
+        packageRoot: File,
+        artifact: File?,
+        runtime: String,
+        bindings: ModelArtifactBindings?,
+        normalizedMetadata: Map<String, Any>,
+        filesByName: Map<String, List<File>>,
+        relativeFiles: List<String>,
+        issues: MutableList<ModelPackageIssue>,
+    ): ModelPackageInspection? {
+        val identity = listOf(
+            modelIdHint,
+            normalizedMetadata["model_id"]?.toString().orEmpty(),
+            normalizedMetadata["_name_or_path"]?.toString().orEmpty(),
+        ).joinToString(" ").lowercase()
+        if (!identity.contains("nsfw-classifier") && !identity.contains("nsfw_classifier")) {
+            return null
+        }
+
+        val expectedLabels = listOf("drawings", "hentai", "neutral", "porn", "sexy")
+        val labels = standardLabels(normalizedMetadata, filesByName).map { it.lowercase() }
+        if (labels != expectedLabels) {
+            issues += ModelPackageIssue(
+                "nsfw_labels_invalid",
+                "NSFW classifier package must declare labels in canonical order: ${expectedLabels.joinToString()}.",
+            )
+        }
+
+        if (artifact == null || runtime != AiRuntimeType.ONNX.raw || bindings == null) {
+            issues += ModelPackageIssue(
+                "nsfw_graph_unreadable",
+                "NSFW classifier requires one readable ONNX artifact.",
+            )
+            return ModelPackageInspection(
+                packageRoot = packageRoot,
+                artifact = artifact,
+                runtime = runtime,
+                supportedTasks = listOf("nsfw_classification"),
+                capabilities = listOf("nsfw_classification"),
+                metadata = normalizedMetadata,
+                files = relativeFiles,
+                issues = issues,
+            )
+        }
+
+        val input = bindings.inputs.singleOrNull { tensor ->
+            tensor.dataType == "float32" && tensor.shape.size == 4
+        }
+        val output = bindings.outputs.singleOrNull { tensor ->
+            tensor.dataType == "float32" && tensor.shape.size == 2 && tensor.shape.lastOrNull() == 5
+        }
+        if (input == null || output == null) {
+            issues += ModelPackageIssue(
+                "nsfw_graph_incompatible",
+                "NSFW classifier requires one float32 image input and one float32 [B,5] logits output.",
+            )
+        }
+
+        val imageConfig = normalizedMetadata["preprocessor_config"].asStringMap()
+            ?: normalizedMetadata["processor_config"].asStringMap()
+        val layout = input?.let { inferImageLayout(it.shape) }
+        val dimensions = input?.let { imageDimensions(imageConfig, it.shape, layout.orEmpty()) }
+        val mean = imageConfig?.get("image_mean").floatList()
+        val standardDeviation = imageConfig?.get("image_std").floatList()
+        val scale = imageConfig?.get("rescale_factor").toFloatOrNull()
+        val convertsRgb = imageConfig?.get("do_convert_rgb").toBooleanOrNull()
+        if (
+            imageConfig == null || dimensions == null || layout == null ||
+            mean.isNullOrEmpty() || standardDeviation.isNullOrEmpty() ||
+            scale == null || convertsRgb == null
+        ) {
+            issues += ModelPackageIssue(
+                "image_preprocessing_metadata_missing",
+                "NSFW classifier requires explicit size, image_mean, image_std, rescale_factor, and do_convert_rgb preprocessing metadata.",
+            )
+        }
+
+        val resolvedMetadata = normalizedMetadata.toMutableMap()
+        resolvedMetadata["model_id"] = normalizedMetadata["model_id"] ?: modelIdHint
+        resolvedMetadata["package_inspection"] = mapOf(
+            "artifact_path" to artifact.absolutePath,
+            "runtime" to runtime,
+            "files" to relativeFiles,
+            "capabilities" to listOf("nsfw_classification"),
+        )
+        if (input != null && output != null && dimensions != null && layout != null &&
+            !mean.isNullOrEmpty() && !standardDeviation.isNullOrEmpty() && scale != null && convertsRgb != null
+        ) {
+            resolvedMetadata[INFERENCE_CONTRACTS_KEY] = mapOf(
+                "nsfw_classification" to mapOf(
+                    "tokenizer" to mapOf("type" to "none"),
+                    "image_preprocessing" to mapOf(
+                        "enabled" to true,
+                        "width" to dimensions.first,
+                        "height" to dimensions.second,
+                        "channels" to if (convertsRgb) 3 else 1,
+                        "color_space" to if (convertsRgb) "rgb" else "grayscale",
+                        "resize_mode" to if (imageConfig?.get("do_center_crop").toBooleanOrNull() == true) "center_crop" else "stretch",
+                        "scale" to scale,
+                        "mean" to mean,
+                        "std" to standardDeviation,
+                    ),
+                    "inputs" to listOf(
+                        mapOf(
+                            "name" to input.name,
+                            "source" to "image",
+                            "data_type" to input.dataType,
+                            "layout" to layout,
+                            "shape" to input.shape,
+                        ),
+                    ),
+                    "outputs" to listOf(
+                        mapOf(
+                            "name" to output.name,
+                            "index" to output.index,
+                            "data_type" to output.dataType,
+                            "shape" to output.shape,
+                        ),
+                    ),
+                    "output_decoder" to mapOf(
+                        "type" to "classification",
+                        "output_name" to output.name,
+                        "labels" to expectedLabels,
+                    ),
+                    "confidence_scoring" to mapOf("type" to "softmax", "threshold" to 0f),
+                ),
+            )
+        }
+
+        return ModelPackageInspection(
+            packageRoot = packageRoot,
+            artifact = artifact,
+            runtime = runtime,
+            supportedTasks = listOf("nsfw_classification"),
+            capabilities = listOf("nsfw_classification"),
             metadata = resolvedMetadata,
             files = relativeFiles,
             issues = issues,
