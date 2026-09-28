@@ -1058,6 +1058,7 @@ object StandaloneRuntime {
             "stages" to stages,
             "continue_on_stage_error" to true,
             "character_taxonomy_context" to knowledgeDatabase.taxonomyPromptContext(),
+            "illustration_taxonomy_context" to knowledgeDatabase.illustrationTaxonomyPromptContext(),
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
@@ -1512,7 +1513,13 @@ object StandaloneRuntime {
     }
 
     fun runTagPredictionPipeline(payload: Map<String, Any>): Map<String, Any> {
-        return runAiPipeline(payload + mapOf("task_type" to "tag_prediction"))
+        ensureInitialized()
+        return runAiPipeline(
+            payload + mapOf(
+                "task_type" to "tag_prediction",
+                "illustration_taxonomy_context" to knowledgeDatabase.illustrationTaxonomyPromptContext(),
+            ),
+        )
     }
 
     fun runMetadataExtractionPipeline(payload: Map<String, Any>): Map<String, Any> {
