@@ -486,13 +486,14 @@ internal class KnowledgeDatabase(
         return raw.mapNotNull { characterId ->
             val profile = getCharacter(characterId) ?: return@mapNotNull null
             val featureIds = (profile.attributeIds + profile.weaponIds + profile.outfitIds).toSet()
-            val matched = observed.entries.sumOf { (id, confidence) ->
-                if (id in featureIds) featureWeight(id) * confidence.coerceIn(0.0, 1.0) else 0.0
-            }
-            val available = observed.entries.sumOf { (id, confidence) ->
-                featureWeight(id) * confidence.coerceIn(0.0, 1.0)
-            }.coerceAtLeast(0.0001)
-            KnowledgeCandidate(profile, (matched / available).coerceIn(0.0, 1.0))
+            KnowledgeCandidate(
+                character = profile,
+                attributeScore = CanonicalAttributeSemantics.coherenceScore(
+                    observed = observed,
+                    candidateFeatures = featureIds,
+                    weight = ::featureWeight,
+                ),
+            )
         }.sortedByDescending(KnowledgeCandidate::attributeScore)
     }
 
