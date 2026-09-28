@@ -12,7 +12,7 @@ import org.json.JSONObject
  * candidates to immutable Character Knowledge and derives series from the
  * resolved character entry.
  */
-class AiWorkflowCoordinator(
+internal class AiWorkflowCoordinator(
     private val database: LocalDatabase,
     private val repository: LocalRepository,
     private val knowledge: KnowledgeDatabase,
