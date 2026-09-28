@@ -8,6 +8,8 @@
 **Final target branch:** `standalone-android`  
 **Checkpoint date:** 2026-09-28
 
+**Merge status:** The full `asterion-import-pass1` + `asterion-character-resolver-v1` history has been fast-forwarded into `standalone-android`. `standalone-android` is now the authoritative implementation branch. Final standalone CI validation is required before declaring the merge complete.
+
 ---
 
 ## 1. User intent / architecture that must not drift
@@ -416,11 +418,13 @@ Do not merge until the latest code-equivalent CI run is green.
 
 ## 6. Branch topology / merge instruction
 
-Current intended ancestry:
+Historical development ancestry:
 
-`standalone-android`
+`standalone-android` (old base)
 → `asterion-import-pass1`
 → `asterion-character-resolver-v1`
+
+The validated combined history has now been fast-forwarded back into `standalone-android`; the two named pass branches are historical recovery branches, not the authoritative application branch.
 
 `asterion-import-pass1` is already strictly ahead of `standalone-android`, and the resolver branch is built on top of it.
 
