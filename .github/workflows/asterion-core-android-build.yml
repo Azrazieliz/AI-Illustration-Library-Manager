@@ -31,12 +31,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :app:compileDebugUnitTestKotlin
-          ./gradlew :app:testDebugUnitTest \
-            --tests "com.ailm.android.runtime.ai.ModelPackageInspectorTest" \
-            --tests "com.ailm.android.runtime.ai.ModelPackageInspectorRegressionTest" \
-            --tests "com.ailm.android.runtime.ai.QwenLlamaCppContractTest" \
-            --tests "com.ailm.android.runtime.ai.NomicVisionExecutionContractTest" \
-            --stacktrace
+          ./gradlew :app:testDebugUnitTest --stacktrace
           ./gradlew :app:assembleDebug --stacktrace
 
       - name: Upload APK
