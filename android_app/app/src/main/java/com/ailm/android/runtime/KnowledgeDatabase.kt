@@ -47,6 +47,17 @@ internal class KnowledgeDatabase(
             """.trimIndent(),
         )
         db.execSQL("CREATE INDEX idx_knowledge_series_name ON knowledge_series(canonical_name COLLATE NOCASE)")
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_series_aliases (
+                alias_key TEXT PRIMARY KEY,
+                series_code TEXT NOT NULL,
+                FOREIGN KEY(series_code) REFERENCES knowledge_series(series_code)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_series_aliases_series ON knowledge_series_aliases(series_code)")
 
         db.execSQL(
             """
@@ -62,6 +73,17 @@ internal class KnowledgeDatabase(
         db.execSQL("CREATE INDEX idx_knowledge_tags_name ON knowledge_tags(canonical_name COLLATE NOCASE)")
         db.execSQL("CREATE INDEX idx_knowledge_tags_category ON knowledge_tags(category)")
         db.execSQL("CREATE INDEX idx_knowledge_tags_parent ON knowledge_tags(parent_tag_id)")
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_tag_aliases (
+                alias_key TEXT PRIMARY KEY,
+                tag_id TEXT NOT NULL,
+                FOREIGN KEY(tag_id) REFERENCES knowledge_tags(tag_id)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_tag_aliases_tag ON knowledge_tag_aliases(tag_id)")
 
         db.execSQL(
             """
@@ -89,6 +111,17 @@ internal class KnowledgeDatabase(
         db.execSQL("CREATE INDEX idx_knowledge_characters_series ON knowledge_characters(primary_series_code)")
         db.execSQL("CREATE INDEX idx_knowledge_characters_parent ON knowledge_characters(parent_character_id)")
         db.execSQL("CREATE INDEX idx_knowledge_characters_group ON knowledge_characters(identity_group_id)")
+        db.execSQL(
+            """
+            CREATE TABLE knowledge_character_aliases (
+                alias_key TEXT PRIMARY KEY,
+                character_id TEXT NOT NULL,
+                FOREIGN KEY(character_id) REFERENCES knowledge_characters(character_id)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX idx_knowledge_character_aliases_character ON knowledge_character_aliases(character_id)")
 
         db.execSQL(
             """
@@ -127,8 +160,11 @@ internal class KnowledgeDatabase(
         listOf(
             "knowledge_character_sheets",
             "knowledge_character_features",
+            "knowledge_character_aliases",
             "knowledge_characters",
+            "knowledge_tag_aliases",
             "knowledge_tags",
+            "knowledge_series_aliases",
             "knowledge_series",
             "knowledge_releases",
         ).forEach { table -> db.execSQL("DROP TABLE IF EXISTS $table") }
@@ -145,8 +181,11 @@ internal class KnowledgeDatabase(
             // changed IDs after the taxonomy is replaced.
             db.delete("knowledge_character_sheets", null, null)
             db.delete("knowledge_character_features", null, null)
+            db.delete("knowledge_character_aliases", null, null)
             db.delete("knowledge_characters", null, null)
+            db.delete("knowledge_tag_aliases", null, null)
             db.delete("knowledge_tags", null, null)
+            db.delete("knowledge_series_aliases", null, null)
             db.delete("knowledge_series", null, null)
 
             bundle.series.forEach { entry ->
@@ -160,6 +199,9 @@ internal class KnowledgeDatabase(
                         put("aliases_json", JSONArray(entry.aliases).toString())
                     },
                 )
+                (entry.aliases + entry.name + entry.code).distinct().forEach { alias ->
+                    insertAlias(db, "knowledge_series_aliases", "series_code", entry.code, alias)
+                }
             }
             bundle.tags.forEach { entry ->
                 db.insertOrThrow(
@@ -173,6 +215,9 @@ internal class KnowledgeDatabase(
                         put("aliases_json", JSONArray(entry.aliases).toString())
                     },
                 )
+                (entry.aliases + entry.name + entry.id).distinct().forEach { alias ->
+                    insertAlias(db, "knowledge_tag_aliases", "tag_id", entry.id, alias)
+                }
             }
             db.delete("knowledge_releases", "release_kind = ?", arrayOf("characters"))
             upsertRelease(db, "taxonomy", sourceName, now, bundle.series.size + bundle.tags.size)
@@ -192,6 +237,7 @@ internal class KnowledgeDatabase(
         try {
             db.delete("knowledge_character_sheets", null, null)
             db.delete("knowledge_character_features", null, null)
+            db.delete("knowledge_character_aliases", null, null)
             db.delete("knowledge_characters", null, null)
 
             val ordered = entries.sortedWith(
@@ -217,6 +263,9 @@ internal class KnowledgeDatabase(
                         put("metadata_json", JSONObject(entry.metadata).toString())
                     },
                 )
+                (entry.aliases + entry.canonicalName + entry.characterId).distinct().forEach { alias ->
+                    insertAlias(db, "knowledge_character_aliases", "character_id", entry.characterId, alias)
+                }
                 entry.attributeIds.distinct().forEach { id ->
                     insertCharacterFeature(db, entry.characterId, id, "attribute", featureWeight(id))
                 }
@@ -287,36 +336,13 @@ internal class KnowledgeDatabase(
     ).use { cursor -> if (cursor.moveToFirst()) cursor.toKnowledgeCharacter() else null }
 
     fun resolveCharacter(value: String): KnowledgeCharacterEntry? {
-        val needle = value.trim()
-        if (needle.isBlank()) return null
-        getCharacter(needle)?.let { return it }
-        readableDatabase.rawQuery(
-            """
-            SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
-                   canonical_name, primary_series_code, aliases_json, attributes_json,
-                   canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
-            FROM knowledge_characters
-            WHERE LOWER(canonical_name) = LOWER(?)
-            """.trimIndent(),
-            arrayOf(needle),
-        ).use { cursor -> if (cursor.moveToFirst()) return cursor.toKnowledgeCharacter() }
-
-        readableDatabase.rawQuery(
-            """
-            SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
-                   canonical_name, primary_series_code, aliases_json, attributes_json,
-                   canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
-            FROM knowledge_characters
-            """.trimIndent(),
-            emptyArray(),
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                if (jsonStringList(cursor.getString(6)).any { it.equals(needle, ignoreCase = true) }) {
-                    return cursor.toKnowledgeCharacter()
-                }
-            }
-        }
-        return null
+        val key = aliasKey(value)
+        if (key.isBlank()) return null
+        val characterId = readableDatabase.rawQuery(
+            "SELECT character_id FROM knowledge_character_aliases WHERE alias_key = ? LIMIT 1",
+            arrayOf(key),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        return characterId?.let(::getCharacter)
     }
 
     fun seriesByCode(seriesCode: String): ReferenceSeriesEntry? = readableDatabase.rawQuery(
@@ -329,49 +355,26 @@ internal class KnowledgeDatabase(
     }
 
     fun resolveSeries(value: String): ReferenceSeriesEntry? {
-        val needle = value.trim()
-        if (needle.isBlank()) return null
-        readableDatabase.rawQuery(
-            "SELECT series_code, canonical_name, franchise, aliases_json FROM knowledge_series WHERE series_code = ? OR LOWER(canonical_name) = LOWER(?)",
-            arrayOf(needle, needle),
-        ).use { cursor ->
-            if (cursor.moveToFirst()) {
-                return ReferenceSeriesEntry(cursor.getString(0), cursor.getString(1), cursor.getString(2), jsonStringList(cursor.getString(3)))
-            }
-        }
-        readableDatabase.rawQuery(
-            "SELECT series_code, canonical_name, franchise, aliases_json FROM knowledge_series",
-            emptyArray(),
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                val aliases = jsonStringList(cursor.getString(3))
-                if (aliases.any { it.equals(needle, ignoreCase = true) }) {
-                    return ReferenceSeriesEntry(cursor.getString(0), cursor.getString(1), cursor.getString(2), aliases)
-                }
-            }
-        }
-        return null
+        val key = aliasKey(value)
+        if (key.isBlank()) return null
+        val seriesCode = readableDatabase.rawQuery(
+            "SELECT series_code FROM knowledge_series_aliases WHERE alias_key = ? LIMIT 1",
+            arrayOf(key),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        return seriesCode?.let(::seriesByCode)
     }
 
     fun resolveTag(value: String): ReferenceTagEntry? {
-        val needle = value.trim()
-        if (needle.isBlank()) return null
-        readableDatabase.rawQuery(
-            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags WHERE tag_id = ? OR LOWER(canonical_name) = LOWER(?)",
-            arrayOf(needle, needle),
-        ).use { cursor -> if (cursor.moveToFirst()) return cursor.toReferenceTag() }
-
-        readableDatabase.rawQuery(
-            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags",
-            emptyArray(),
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                if (jsonStringList(cursor.getString(4)).any { it.equals(needle, ignoreCase = true) }) {
-                    return cursor.toReferenceTag()
-                }
-            }
-        }
-        return null
+        val key = aliasKey(value)
+        if (key.isBlank()) return null
+        val tagId = readableDatabase.rawQuery(
+            "SELECT tag_id FROM knowledge_tag_aliases WHERE alias_key = ? LIMIT 1",
+            arrayOf(key),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null } ?: return null
+        return readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags WHERE tag_id = ? LIMIT 1",
+            arrayOf(tagId),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.toReferenceTag() else null }
     }
 
     fun taxonomyPromptContext(): String {
@@ -469,6 +472,38 @@ internal class KnowledgeDatabase(
         return issues.distinct()
     }
 
+    private fun insertAlias(
+        db: SQLiteDatabase,
+        table: String,
+        idColumn: String,
+        idValue: String,
+        alias: String,
+    ) {
+        val key = aliasKey(alias)
+        if (key.isBlank()) return
+        val existing = db.rawQuery(
+            "SELECT " + idColumn + " FROM " + table + " WHERE alias_key = ? LIMIT 1",
+            arrayOf(key),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+        require(existing == null || existing == idValue) {
+            "Alias collision '" + alias + "' between " + existing + " and " + idValue + "."
+        }
+        db.insertWithOnConflict(
+            table,
+            null,
+            ContentValues().apply {
+                put("alias_key", key)
+                put(idColumn, idValue)
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    private fun aliasKey(value: String): String = value
+        .trim()
+        .lowercase(Locale.US)
+        .replace(Regex("\\s+"), " ")
+
     private fun insertCharacterFeature(
         db: SQLiteDatabase,
         characterId: String,
@@ -539,7 +574,7 @@ internal class KnowledgeDatabase(
 
     companion object {
         private const val DB_NAME = "asterion_knowledge.sqlite"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
 
         fun featureWeight(id: String): Double = when {
             id.startsWith("WP", ignoreCase = true) -> 1.55
