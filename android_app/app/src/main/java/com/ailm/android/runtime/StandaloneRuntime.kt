@@ -566,7 +566,7 @@ object StandaloneRuntime {
                 val sheetResult = if (knowledgeDatabase.hasCharacters()) {
                     runCatching {
                         appContext.contentResolver.openInputStream(uri)?.use { input ->
-                            CharacterSheetArchiveImporter(appContext, knowledgeDatabase).importZip(input, filename)
+                            CharacterSheetArchiveImporter(appContext, knowledgeDatabase, resolutionStore).importZip(input, filename)
                         }
                     }.getOrNull()
                 } else null
