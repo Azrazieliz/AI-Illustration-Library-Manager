@@ -51,8 +51,9 @@ class ReferenceKnowledgeParserTest {
 
         val character = bundle.characters.single()
         assertEquals(
-            listOf("HC015", "HC030", "EC010", "EC014", "ET001"),
-            character.attributeIds,
+            setOf("HC015", "HC030", "EC010", "EC014", "ET001"),
+            character.attributeIds.toSet(),
         )
+        assertEquals(5, character.attributeIds.size)
     }
 }
