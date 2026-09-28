@@ -13,6 +13,13 @@ internal data class ResolvedSubject(
     val resolved: Boolean get() = character != null
 }
 
+internal data class RankedCandidate(
+    val candidate: KnowledgeCandidate,
+    val coherentAttributeScore: Double,
+    val visualScore: Double?,
+    val finalScore: Double,
+)
+
 internal class CharacterResolver(
     private val knowledge: KnowledgeDatabase,
     private val fusion: FusionResolutionStore,
@@ -42,19 +49,31 @@ internal class CharacterResolver(
                     }
                 }
 
+            val subjectEmbedding = (raw["visual_embedding"] as? List<*>)
+                ?.mapNotNull { (it as? Number)?.toDouble() }
+                .orEmpty()
+                .ifEmpty { imageEmbedding }
+
             val ranked = knowledge.rankByFeatures(observed, CANDIDATE_POOL)
                 .map { candidate ->
-                    val visual = fusion.visualSimilarity(candidate.character.characterId, imageEmbedding)
+                    val coherentAttributeScore = applyContradictionPenalty(
+                        candidate = candidate,
+                        observed = observed,
+                    )
+                    val visual = fusion.visualSimilarity(candidate.character.characterId, subjectEmbedding)
                     val finalScore = if (visual == null) {
-                        candidate.attributeScore
+                        coherentAttributeScore
                     } else {
-                        (ATTRIBUTE_WEIGHT * candidate.attributeScore + VISUAL_WEIGHT * visual).coerceIn(0.0, 1.0)
+                        (ATTRIBUTE_WEIGHT * coherentAttributeScore + VISUAL_WEIGHT * visual).coerceIn(0.0, 1.0)
                     }
-                    Triple(candidate, visual, finalScore)
+                    RankedCandidate(candidate, coherentAttributeScore, visual, finalScore)
                 }
-                .sortedByDescending { it.third }
+                .sortedByDescending { it.finalScore }
 
-            val candidateMaps = ranked.take(REVIEW_CANDIDATE_COUNT).map { (candidate, visual, score) ->
+            val candidateMaps = ranked.take(REVIEW_CANDIDATE_COUNT).map { rankedCandidate ->
+                val candidate = rankedCandidate.candidate
+                val visual = rankedCandidate.visualScore
+                val score = rankedCandidate.finalScore
                 val character = candidate.character
                 mapOf(
                     "character_id" to character.characterId,
@@ -62,7 +81,7 @@ internal class CharacterResolver(
                     "series_code" to character.primarySeriesCode,
                     "entry_type" to character.entryType,
                     "parent_character_id" to character.parentCharacterId,
-                    "attribute_score" to candidate.attributeScore,
+                    "attribute_score" to rankedCandidate.coherentAttributeScore,
                     "visual_score" to (visual ?: -1.0),
                     "confidence" to score,
                 )
@@ -70,19 +89,54 @@ internal class CharacterResolver(
 
             val best = ranked.firstOrNull()
             val acceptedCharacter = best
-                ?.takeIf { it.third >= acceptanceThreshold }
-                ?.first
+                ?.takeIf { it.finalScore >= acceptanceThreshold }
+                ?.candidate
                 ?.character
             ResolvedSubject(
                 subjectIndex = subjectIndex,
                 prominence = prominence,
                 observations = observed,
                 character = acceptedCharacter,
-                confidence = best?.third ?: 0.0,
+                confidence = best?.finalScore ?: 0.0,
                 candidates = candidateMaps,
             )
         }
     }
+
+    private fun applyContradictionPenalty(
+        candidate: KnowledgeCandidate,
+        observed: Map<String, Double>,
+    ): Double {
+        if (observed.isEmpty()) return candidate.attributeScore
+        val candidateFeatures = (
+            candidate.character.attributeIds +
+                candidate.character.weaponIds +
+                candidate.character.outfitIds
+            ).toSet()
+        val candidateByFamily = candidateFeatures.groupBy(::featureFamily)
+        var contradictionWeight = 0.0
+        var evidenceWeight = 0.0
+
+        observed.forEach { (observedId, confidence) ->
+            val bounded = confidence.coerceIn(0.0, 1.0)
+            val weight = KnowledgeDatabase.featureWeight(observedId)
+            evidenceWeight += weight * bounded
+            val family = featureFamily(observedId)
+            if (family !in STRICT_CONTRADICTION_FAMILIES) return@forEach
+            val sameFamily = candidateByFamily[family].orEmpty()
+            if (sameFamily.isNotEmpty() && observedId !in sameFamily) {
+                contradictionWeight += weight * bounded
+            }
+        }
+
+        if (evidenceWeight <= 0.0) return candidate.attributeScore
+        val penalty = CONTRADICTION_PENALTY * contradictionWeight / evidenceWeight
+        return (candidate.attributeScore - penalty).coerceIn(0.0, 1.0)
+    }
+
+    private fun featureFamily(id: String): String = id
+        .takeWhile(Char::isLetter)
+        .uppercase()
 
     private fun parseObservedFeatures(raw: Map<String, Any>): Map<String, Double> {
         val out = linkedMapOf<String, Double>()
@@ -124,6 +178,10 @@ internal class CharacterResolver(
         private const val REVIEW_CANDIDATE_COUNT = 8
         private const val ATTRIBUTE_WEIGHT = 0.62
         private const val VISUAL_WEIGHT = 0.38
+        private const val CONTRADICTION_PENALTY = 0.65
         private const val DEFAULT_OBSERVATION_CONFIDENCE = 0.70
+        private val STRICT_CONTRADICTION_FAMILIES = setOf(
+            "HC", "HL", "EC", "ET", "SC", "BH", "BT", "BS", "BY", "SX", "AG", "SP",
+        )
     }
 }
