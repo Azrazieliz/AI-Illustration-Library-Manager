@@ -470,8 +470,18 @@ internal class LlamaCppBackend(
                 Taxonomy:
                 """.trimIndent() + "\n" + taxonomy + context
             }
-            "tag_prediction" ->
-                "Return a concise comma-separated list of visually observable illustration tags only. Include current outfit, visible weapon, pose, expression, eye/mouth state, environment, framing, action and props when visible. Do not infer permanent character identity and do not explain." + context
+            "tag_prediction" -> {
+                val taxonomy = payload["illustration_taxonomy_context"]?.toString()?.trim().orEmpty()
+                """
+                Analyze only what is visibly present in this specific illustration.
+                Return a comma-separated list of canonical taxonomy IDs only, with no explanation.
+                Use IDs from the supplied taxonomy for visible outfit/accessories, visible weapons, pose,
+                gesture, expression, eye/mouth state, environment/weather, framing/camera/lighting,
+                action and rating when safely inferable. Do not infer permanent character traits from
+                identity, and never invent an ID or free-form synonym. Omit uncertain or absent concepts.
+                Taxonomy:
+                """.trimIndent() + "\n" + taxonomy + context
+            }
             "normalization" ->
                 "Normalize the supplied context into concise canonical wording. Preserve meaning and do not invent facts. Return only the normalized text." + context
             else -> payload["text"]?.toString()?.trim().orEmpty().ifBlank { userPrompt }
