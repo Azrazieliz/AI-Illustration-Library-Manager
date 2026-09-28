@@ -114,13 +114,15 @@ internal class KnowledgeDatabase(
         db.execSQL(
             """
             CREATE TABLE knowledge_character_aliases (
-                alias_key TEXT PRIMARY KEY,
+                alias_key TEXT NOT NULL,
                 character_id TEXT NOT NULL,
+                PRIMARY KEY(alias_key, character_id),
                 FOREIGN KEY(character_id) REFERENCES knowledge_characters(character_id)
                     ON UPDATE RESTRICT ON DELETE CASCADE
             )
             """.trimIndent(),
         )
+        db.execSQL("CREATE INDEX idx_knowledge_character_aliases_key ON knowledge_character_aliases(alias_key)")
         db.execSQL("CREATE INDEX idx_knowledge_character_aliases_character ON knowledge_character_aliases(character_id)")
 
         db.execSQL(
@@ -279,7 +281,7 @@ internal class KnowledgeDatabase(
                     },
                 )
                 (entry.aliases + entry.canonicalName + entry.characterId).distinct().forEach { alias ->
-                    insertAlias(db, "knowledge_character_aliases", "character_id", entry.characterId, alias)
+                    insertCharacterAlias(db, entry.characterId, alias)
                 }
                 entry.attributeIds.distinct().forEach { id ->
                     insertCharacterFeature(db, entry.characterId, id, "attribute", featureWeight(id))
@@ -382,14 +384,35 @@ internal class KnowledgeDatabase(
         arrayOf(characterId),
     ).use { cursor -> if (cursor.moveToFirst()) cursor.toKnowledgeCharacter() else null }
 
-    fun resolveCharacter(value: String): KnowledgeCharacterEntry? {
+    fun resolveCharacter(
+        value: String,
+        seriesCode: String? = null,
+    ): KnowledgeCharacterEntry? {
+        val direct = value.trim()
+        if (direct.isBlank()) return null
+        getCharacter(direct)?.let { return it }
+
+        val matches = resolveCharacters(value)
+            .let { entries ->
+                val requiredSeries = seriesCode?.trim().orEmpty()
+                if (requiredSeries.isBlank()) entries
+                else entries.filter { it.primarySeriesCode == requiredSeries }
+            }
+        return matches.singleOrNull()
+    }
+
+    fun resolveCharacters(value: String): List<KnowledgeCharacterEntry> {
         val key = aliasKey(value)
-        if (key.isBlank()) return null
-        val characterId = readableDatabase.rawQuery(
-            "SELECT character_id FROM knowledge_character_aliases WHERE alias_key = ? LIMIT 1",
-            arrayOf(key),
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-        return characterId?.let(::getCharacter)
+        if (key.isBlank()) return emptyList()
+        val ids = buildList {
+            readableDatabase.rawQuery(
+                "SELECT character_id FROM knowledge_character_aliases WHERE alias_key = ? ORDER BY character_id",
+                arrayOf(key),
+            ).use { cursor ->
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+        return ids.mapNotNull(::getCharacter)
     }
 
     fun seriesByCode(seriesCode: String): ReferenceSeriesEntry? = readableDatabase.rawQuery(
@@ -528,18 +551,29 @@ internal class KnowledgeDatabase(
             }
         }
 
-        val aliasOwners = linkedMapOf<String, String>()
-        entries.forEach { entry ->
-            (entry.aliases + entry.canonicalName).forEach { raw ->
-                val alias = raw.trim().lowercase(Locale.US)
-                if (alias.isBlank()) return@forEach
-                val previous = aliasOwners.putIfAbsent(alias, entry.characterId)
-                if (previous != null && previous != entry.characterId) {
-                    issues += "Alias collision '" + raw + "' between " + previous + " and " + entry.characterId + "."
-                }
-            }
-        }
+        // Character aliases are intentionally allowed to be ambiguous across
+        // identities. They are lookup/index terms, not canonical identities.
+        // Automatic alias resolution succeeds only when the alias (optionally
+        // constrained by series) identifies exactly one character.
         return issues.distinct()
+    }
+
+    private fun insertCharacterAlias(
+        db: SQLiteDatabase,
+        characterId: String,
+        alias: String,
+    ) {
+        val key = aliasKey(alias)
+        if (key.isBlank()) return
+        db.insertWithOnConflict(
+            "knowledge_character_aliases",
+            null,
+            ContentValues().apply {
+                put("alias_key", key)
+                put("character_id", characterId)
+            },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
     }
 
     private fun insertAlias(
@@ -644,7 +678,7 @@ internal class KnowledgeDatabase(
 
     companion object {
         private const val DB_NAME = "asterion_knowledge.sqlite"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
 
         fun featureWeight(id: String): Double = when {
             id.startsWith("WP", ignoreCase = true) -> 1.55
