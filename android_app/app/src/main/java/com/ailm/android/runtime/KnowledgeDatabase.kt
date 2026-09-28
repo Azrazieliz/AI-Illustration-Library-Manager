@@ -204,6 +204,8 @@ internal class KnowledgeDatabase(
                 }
             }
             bundle.tags.forEach { entry ->
+                // Parent references are linked in a second pass so file/order
+                // differences in an external Knowledge ZIP cannot violate FKs.
                 db.insertOrThrow(
                     "knowledge_tags",
                     null,
@@ -211,13 +213,26 @@ internal class KnowledgeDatabase(
                         put("tag_id", entry.id)
                         put("canonical_name", entry.name)
                         put("category", entry.category)
-                        put("parent_tag_id", entry.parentId.takeIf(String::isNotBlank))
+                        putNull("parent_tag_id")
                         put("aliases_json", JSONArray(entry.aliases).toString())
                     },
                 )
                 (entry.aliases + entry.name + entry.id).distinct().forEach { alias ->
                     insertAlias(db, "knowledge_tag_aliases", "tag_id", entry.id, alias)
                 }
+            }
+            bundle.tags.filter { it.parentId.isNotBlank() }.forEach { entry ->
+                val parentExists = db.rawQuery(
+                    "SELECT EXISTS(SELECT 1 FROM knowledge_tags WHERE tag_id = ?)",
+                    arrayOf(entry.parentId),
+                ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+                require(parentExists) {
+                    "Knowledge tag '" + entry.id + "' references missing parent '" + entry.parentId + "'."
+                }
+                db.execSQL(
+                    "UPDATE knowledge_tags SET parent_tag_id = ? WHERE tag_id = ?",
+                    arrayOf(entry.parentId, entry.id),
+                )
             }
             db.delete("knowledge_releases", "release_kind = ?", arrayOf("characters"))
             upsertRelease(db, "taxonomy", sourceName, now, bundle.series.size + bundle.tags.size)
