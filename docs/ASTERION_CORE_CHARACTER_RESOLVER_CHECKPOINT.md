@@ -588,3 +588,45 @@ Mandatory sequence:
 10. Only the user-approved roster proceeds to Character Knowledge research, taxonomy mapping, identity/transformation resolution, ID assignment, sheet naming, validation, and compilation.
 
 This pre-pass roster approval is a hard Character Knowledge authoring gate. Popularity, fame, number of appearances, or documentation volume must never be used alone to decide inclusion/exclusion.
+
+
+---
+
+## 13. Character Knowledge authoring artifact and pre-pass presentation
+
+### One incremental master workbook
+
+Character Knowledge authoring must use **one single cumulative XLSX workbook** for the whole project. Do not create one workbook per series or per pass.
+
+The workbook is incrementally updated after every user-approved Character Knowledge pass and remains the human-auditable source used to compile immutable Character Knowledge releases.
+
+The workbook must keep taxonomy families in dedicated columns rather than hiding all features in one opaque JSON field. This allows cross-character anomaly checking, sorting and filtering (for example spotting one blue-haired character mapped to an inconsistent Hair Color ID relative to comparable entries).
+
+Recommended master columns include:
+- character_id;
+- series_code / series;
+- canonical_name;
+- entry_type;
+- parent_character_id;
+- form_name / display_name;
+- aliases;
+- separate canonical taxonomy-ID columns for hair color, hair length, hair style, eye color, eye traits, skin color, height, body type, bust class, body traits, sex, age group, species, species attributes;
+- canonical weapon IDs;
+- canonical outfit IDs;
+- Character Sheet filename;
+- status;
+- source/provenance;
+- notes.
+
+A taxonomy reference and series reference may live as separate sheets **inside the same workbook**. A roster-review sheet may also live inside that same workbook. They do not constitute separate Character Knowledge files.
+
+### Concise pre-pass user validation view
+
+Before each series/pass, after merging the user's list with web research, present the validation roster in a rapid yes/no format only:
+
+- character name — visual link
+- character name (Transformation?) — visual link
+
+Do not include biographies, explanations, appearance descriptions, or long rationale by default. Only add a short ambiguity note when the user cannot make an inclusion/split/merge decision from the name + visual alone.
+
+The purpose of the pre-pass is fast user curation. Detailed research and taxonomy mapping occur only after the roster is approved.
