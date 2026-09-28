@@ -316,6 +316,7 @@ fun ScreenScaffold(
         AppDestination.ReviewQueue -> ReviewQueueScreen(
             items = state.reviewQueue,
             onApprove = appViewModel::approveReview,
+            onCorrect = appViewModel::correctReview,
             onReject = appViewModel::rejectReview,
             onUndo = appViewModel::undoReview,
             onNavigate = onNavigate,
@@ -1995,6 +1996,7 @@ private fun ImageViewerScreen(
 private fun ReviewQueueScreen(
     items: List<Map<String, Any>>,
     onApprove: (String) -> Unit,
+    onCorrect: (String, String, Boolean) -> Unit,
     onReject: (String) -> Unit,
     onUndo: (String) -> Unit,
     onNavigate: (AppDestination) -> Unit,
@@ -2022,14 +2024,64 @@ private fun ReviewQueueScreen(
                 ?: item["item_id"]?.toString()
                 ?: item["path"]?.toString()
                 ?: item.hashCode().toString()
-            Text("Item ${boundedIndex + 1} of ${items.size}", style = MaterialTheme.typography.labelLarge)
+            val reviewType = item["review_type"]?.toString().orEmpty()
+            val isCharacterReview = reviewType == "character_resolution"
+            var correctedCharacters by rememberSaveable(id) { mutableStateOf("") }
+            var markOriginalCharacter by rememberSaveable(id) { mutableStateOf(false) }
+
+            Text("Item " + (boundedIndex + 1) + " of " + items.size, style = MaterialTheme.typography.labelLarge)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item.entries.take(10).forEach { entry ->
-                        Text("${entry.key}: ${entry.value}", style = MaterialTheme.typography.bodyMedium)
+                    Text(item["path"]?.toString().orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                    val reason = item["reason"]?.toString().orEmpty()
+                    if (reason.isNotBlank()) {
+                        Text(reason, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
                     }
+                    if (isCharacterReview) {
+                        val payloadJson = item["payload_json"]?.toString().orEmpty()
+                        val suggestion = remember(payloadJson) { reviewCandidateSummary(payloadJson) }
+                        if (suggestion.isNotBlank()) {
+                            Text("Candidates: " + suggestion, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(
+                            "Correct with canonical Character Knowledge names or IDs. For multiple characters, use | in visual order. Series is derived automatically from the corrected identities.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedTextField(
+                            value = correctedCharacters,
+                            onValueChange = { correctedCharacters = it },
+                            label = { Text("Character(s): Artoria | Rin Tohsaka") },
+                            enabled = !markOriginalCharacter,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        TextButton(onClick = { markOriginalCharacter = !markOriginalCharacter }) {
+                            Text(if (markOriginalCharacter) "Original Character selected" else "Mark as Original Character")
+                        }
+                        Button(
+                            onClick = {
+                                onCorrect(id, correctedCharacters, markOriginalCharacter)
+                                currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex)
+                            },
+                            enabled = markOriginalCharacter || correctedCharacters.isNotBlank(),
+                        ) {
+                            Text("Apply correction")
+                        }
+                    } else {
+                        item.entries
+                            .filter { it.key !in setOf("payload_json", "correction_json", "path", "reason") }
+                            .take(8)
+                            .forEach { entry ->
+                                Text(entry.key.toString() + ": " + entry.value.toString(), style = MaterialTheme.typography.bodySmall)
+                            }
+                    }
+
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(onClick = { onApprove(id); currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }) { Text("Accept") }
+                        if (!isCharacterReview) {
+                            Button(onClick = { onApprove(id); currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }) {
+                                Text("Accept")
+                            }
+                        }
                         Button(onClick = { onReject(id); currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }) { Text("Reject") }
                         Button(onClick = { onUndo(id) }) { Text("Undo") }
                     }
@@ -2039,7 +2091,9 @@ private fun ReviewQueueScreen(
                 AssistChip(onClick = { currentIndex = (boundedIndex - 1).coerceAtLeast(0) }, label = { Text("Previous") })
                 AssistChip(onClick = { currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }, label = { Text("Next") })
                 AssistChip(onClick = { currentIndex = (boundedIndex + 1).coerceAtMost(items.lastIndex) }, label = { Text("Next unresolved") })
-                Button(onClick = { items.drop(boundedIndex).forEach { row -> onApprove(row.reviewItemId()) } }) { Text("Accept Remaining") }
+                if (!isCharacterReview) {
+                    Button(onClick = { items.drop(boundedIndex).forEach { row -> onApprove(row.reviewItemId()) } }) { Text("Accept Remaining") }
+                }
                 Button(onClick = { items.drop(boundedIndex).forEach { row -> onReject(row.reviewItemId()) } }) { Text("Reject Remaining") }
             }
         }
@@ -4843,6 +4897,29 @@ private fun Map<String, Any>.imageId(): Int? {
     val metadata = this["metadata"] as? Map<*, *> ?: return null
     val nested = metadata["image_id"].asIntNullable() ?: metadata["id"].asIntNullable()
     return nested?.takeIf { it > 0 }
+}
+
+private fun reviewCandidateSummary(payloadJson: String): String {
+    if (payloadJson.isBlank()) return ""
+    return runCatching {
+        val root = org.json.JSONObject(payloadJson)
+        val subjects = root.optJSONArray("subjects") ?: return@runCatching ""
+        buildList {
+            for (subjectIndex in 0 until subjects.length()) {
+                val subject = subjects.optJSONObject(subjectIndex) ?: continue
+                val candidates = subject.optJSONArray("candidates") ?: continue
+                val top = buildList {
+                    for (candidateIndex in 0 until minOf(candidates.length(), 3)) {
+                        val candidate = candidates.optJSONObject(candidateIndex) ?: continue
+                        val name = candidate.optString("canonical_name").ifBlank { candidate.optString("character_id") }
+                        val confidence = candidate.optDouble("confidence", 0.0)
+                        if (name.isNotBlank()) add(name + " " + "%.0f%%".format(confidence * 100.0))
+                    }
+                }
+                if (top.isNotEmpty()) add("Subject " + (subjectIndex + 1) + ": " + top.joinToString(", "))
+            }
+        }.joinToString(" • ")
+    }.getOrDefault("")
 }
 
 private fun Map<String, Any>.reviewItemId(): String = this["id"]?.toString()
