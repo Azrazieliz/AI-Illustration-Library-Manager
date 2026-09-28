@@ -156,6 +156,22 @@ internal class FusionResolutionStore(
         }
     }
 
+    fun hasCharacterEvidence(
+        characterId: String,
+        evidenceKind: String,
+        sourceUri: String,
+    ): Boolean = database.readableDatabase.rawQuery(
+        """
+        SELECT EXISTS(
+            SELECT 1
+            FROM fusion_character_visual_evidence
+            WHERE character_id = ? AND evidence_kind = ? AND source_uri = ?
+            LIMIT 1
+        )
+        """.trimIndent(),
+        arrayOf(characterId, evidenceKind, sourceUri),
+    ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+
     fun addCharacterEvidence(
         characterId: String,
         imageId: Int?,
@@ -166,7 +182,17 @@ internal class FusionResolutionStore(
         validated: Boolean,
         weight: Double,
     ) {
-        database.writableDatabase.insertWithOnConflict(
+        val db = database.writableDatabase
+        if (imageId == null) {
+            // SQLite UNIQUE permits multiple NULL image_ids. Canonical sheet
+            // evidence is instead idempotent by character + kind + source path.
+            db.delete(
+                "fusion_character_visual_evidence",
+                "character_id = ? AND evidence_kind = ? AND source_uri = ?",
+                arrayOf(characterId, evidenceKind, sourceUri),
+            )
+        }
+        db.insertWithOnConflict(
             "fusion_character_visual_evidence",
             null,
             ContentValues().apply {
