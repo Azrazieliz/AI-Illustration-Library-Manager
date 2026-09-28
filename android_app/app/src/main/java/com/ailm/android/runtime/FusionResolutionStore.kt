@@ -156,6 +156,84 @@ internal class FusionResolutionStore(
         }
     }
 
+    fun markCharacterSheetPending(characterId: String, sourceUri: String) {
+        database.writableDatabase.insertWithOnConflict(
+            "fusion_character_sheet_index_state",
+            null,
+            ContentValues().apply {
+                put("character_id", characterId)
+                put("source_uri", sourceUri)
+                put("status", "pending")
+                put("attempts", 0)
+                put("last_error", "")
+                put("updated_at_ms", System.currentTimeMillis())
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    fun pendingCharacterSheets(limit: Int = 50): List<Map<String, String>> {
+        val bounded = limit.coerceIn(1, 250)
+        return buildList {
+            database.readableDatabase.rawQuery(
+                """
+                SELECT character_id, source_uri
+                FROM fusion_character_sheet_index_state
+                WHERE status IN ('pending', 'retry')
+                ORDER BY updated_at_ms ASC, character_id ASC
+                LIMIT ?
+                """.trimIndent(),
+                arrayOf(bounded.toString()),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    add(
+                        mapOf(
+                            "character_id" to cursor.getString(0),
+                            "source_uri" to cursor.getString(1),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun characterSheetIndexRemaining(): Int = database.readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM fusion_character_sheet_index_state WHERE status IN ('pending', 'retry')",
+        emptyArray(),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+
+    fun completeCharacterSheetIndex(characterId: String, sourceUri: String) {
+        database.writableDatabase.update(
+            "fusion_character_sheet_index_state",
+            ContentValues().apply {
+                put("status", "indexed")
+                put("source_uri", sourceUri)
+                put("last_error", "")
+                put("updated_at_ms", System.currentTimeMillis())
+            },
+            "character_id = ?",
+            arrayOf(characterId),
+        )
+    }
+
+    fun failCharacterSheetIndex(characterId: String, error: String, retryable: Boolean = true) {
+        val attempts = database.readableDatabase.rawQuery(
+            "SELECT attempts FROM fusion_character_sheet_index_state WHERE character_id = ? LIMIT 1",
+            arrayOf(characterId),
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+        database.writableDatabase.update(
+            "fusion_character_sheet_index_state",
+            ContentValues().apply {
+                put("status", if (retryable && attempts < 3) "retry" else "failed")
+                put("attempts", attempts + 1)
+                put("last_error", error.take(500))
+                put("updated_at_ms", System.currentTimeMillis())
+            },
+            "character_id = ?",
+            arrayOf(characterId),
+        )
+    }
+
     fun hasCharacterEvidence(
         characterId: String,
         evidenceKind: String,
