@@ -8,7 +8,7 @@
 **Final target branch:** `standalone-android`  
 **Checkpoint date:** 2026-09-28
 
-**Merge status:** The full `asterion-import-pass1` + `asterion-character-resolver-v1` history has been fast-forwarded into `standalone-android`. `standalone-android` is now the authoritative implementation branch. Final standalone CI validation is required before declaring the merge complete.
+**Merge status:** COMPLETE. The full `asterion-import-pass1` + `asterion-character-resolver-v1` history has been fast-forwarded into `standalone-android`. `standalone-android` is now the authoritative implementation branch. Final standalone CI run `36386648585` completed successfully at commit `fa61d7ff59b46507849862f14eb43d351d11ebef`, including the full Android regression suite, debug APK build and artifact upload.
 
 ---
 
@@ -410,9 +410,9 @@ The Kotlin build itself compiled; the failure was a test assertion/order problem
 
 Commit `d53098de493a...` changes that test to make the multi-ID assertion order-independent.
 
-At the time this checkpoint was written, CI run `36363591774` for `d53098de493a...` was **in progress**, executing the regression/build step.
+Resolver CI run `36363591774` for `d53098de493a...` completed successfully. The combined history was then fast-forwarded into `standalone-android`.
 
-Do not merge until the latest code-equivalent CI run is green.
+Final authoritative validation: standalone CI run `36386648585` completed successfully at `fa61d7ff59b46507849862f14eb43d351d11ebef`. The regression/build step succeeded and GitHub uploaded artifact `AsterionCore-debug-apk` (artifact id `10954757125`).
 
 ---
 
@@ -441,10 +441,14 @@ The final standalone branch must therefore contain both the import-pass fixes an
 
 ## 7. What still must be done before finalizing
 
-1. Wait for the latest regression/build run to complete.
-2. If it fails, inspect exact GitHub Actions job logs and fix only the actual failure.
-3. Rerun the full resolver regression gate until green.
-4. Re-audit changed files for integration regressions, especially:
+Completed before final merge:
+
+- Resolver regression/build gate: green.
+- Full history fast-forwarded into `standalone-android`.
+- Final standalone regression/build gate: green.
+- Debug APK artifact uploaded successfully.
+
+Remaining work belongs to the **next character-population/device-validation phase**, not this code-integration phase. Preserve the following audit areas during future changes:
    - Knowledge/Fusion boundary;
    - Review correction path;
    - safe pause;
