@@ -630,3 +630,24 @@ Before each series/pass, after merging the user's list with web research, presen
 Do not include biographies, explanations, appearance descriptions, or long rationale by default. Only add a short ambiguity note when the user cannot make an inclusion/split/merge decision from the name + visual alone.
 
 The purpose of the pre-pass is fast user curation. Detailed research and taxonomy mapping occur only after the roster is approved.
+
+
+---
+
+## 13. Character Knowledge authoring — single incremental workbook
+
+Character Knowledge authoring uses one persistent master workbook:
+
+`Asterion_Character_Knowledge_Master.xlsx`
+
+Rules:
+- do not create one workbook per series/batch;
+- every validated series appends to the same workbook;
+- the workbook remains human-readable and is the review/audit source before machine compilation;
+- it contains the authoritative taxonomy and series references needed for cross-checking;
+- character rows retain both readable attribute labels and canonical taxonomy IDs so mapping inconsistencies are visible and can be validated programmatically;
+- roster decisions are logged separately inside the same workbook;
+- global checks are run across all accumulated characters after every incremental update;
+- the workbook is only populated after the pre-pass roster has been approved by the user.
+
+Pre-pass chat output is intentionally minimal: character name (including transformation suffix only when relevant) plus a visual link, so the user can approve/remove entries rapidly.
