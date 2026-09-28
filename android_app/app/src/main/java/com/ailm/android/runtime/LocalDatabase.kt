@@ -430,6 +430,20 @@ class LocalDatabase(
 
         db.execSQL(
             """
+            CREATE TABLE $clause fusion_character_sheet_index_state (
+                character_id TEXT PRIMARY KEY,
+                source_uri TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at_ms INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX " + clause + "idx_fusion_sheet_index_status ON fusion_character_sheet_index_state(status)")
+
+        db.execSQL(
+            """
             CREATE TABLE $clause fusion_original_character_clusters (
                 cluster_id TEXT PRIMARY KEY,
                 label TEXT NOT NULL DEFAULT '',
