@@ -5,6 +5,7 @@ on:
     branches:
       - standalone-android
       - asterion-import-pass1
+      - asterion-character-resolver-v1
   workflow_dispatch:
 
 jobs:
