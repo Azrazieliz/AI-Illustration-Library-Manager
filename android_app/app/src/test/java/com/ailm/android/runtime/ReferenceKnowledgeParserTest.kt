@@ -56,4 +56,29 @@ class ReferenceKnowledgeParserTest {
         )
         assertEquals(5, character.attributeIds.size)
     }
+
+    @Test
+    fun `transformation parser keeps base name and explicit form name`() {
+        val bundle = ReferenceKnowledgeParser.parseDocuments(
+            mapOf(
+                "characters.json" to """[
+                    {
+                      "character_id":"CH000002-1",
+                      "parent_character_id":"CH000002",
+                      "entry_type":"transformation",
+                      "canonical_name":"Goku",
+                      "form_name":"Super Saiyan 3",
+                      "primary_series_code":"SE0002",
+                      "attribute_ids":["HC011"]
+                    }
+                ]"""
+            ),
+        )
+
+        val character = bundle.characters.single()
+        assertEquals("Goku", character.canonicalName)
+        assertEquals("Super Saiyan 3", character.formName)
+        assertEquals("Goku (Super Saiyan 3)", character.displayName)
+        assertEquals("transformation", character.entryType)
+    }
 }
