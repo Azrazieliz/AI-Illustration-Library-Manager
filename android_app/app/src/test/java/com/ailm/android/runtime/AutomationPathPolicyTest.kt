@@ -28,8 +28,8 @@ class AutomationPathPolicyTest {
     fun `intraseries multi character image stays in series folder`() {
         val plan = AutomationPathPolicy.plan(
             listOf(
-                ResolvedCharacterPathInput(0, 0.8, "Artoria", "SE0001", "Fate"),
-                ResolvedCharacterPathInput(1, 0.7, "Rin Tohsaka", "SE0001", "Fate"),
+                ResolvedCharacterPathInput(0, 0.8, "Artoria", "Artoria", "SE0001", "Fate"),
+                ResolvedCharacterPathInput(1, 0.7, "Rin Tohsaka", "Rin Tohsaka", "SE0001", "Fate"),
             ),
         )
 
@@ -42,8 +42,8 @@ class AutomationPathPolicyTest {
     fun `interseries image is owned by most prominent character but keeps all names`() {
         val plan = AutomationPathPolicy.plan(
             listOf(
-                ResolvedCharacterPathInput(0, 0.35, "Character A", "SE0001", "Series A"),
-                ResolvedCharacterPathInput(1, 0.92, "Character B", "SE0002", "Series B"),
+                ResolvedCharacterPathInput(0, 0.35, "Character A", "Character A", "SE0001", "Series A"),
+                ResolvedCharacterPathInput(1, 0.92, "Character B", "Character B", "SE0002", "Series B"),
             ),
         )
 
@@ -52,6 +52,26 @@ class AutomationPathPolicyTest {
         assertEquals("Character A - Character B - Series B", plan.filenamePrefix)
         assertEquals("Character B", plan.primaryCharacter)
         assertEquals("Series B", plan.primarySeries)
+    }
+
+    @Test
+    fun `transformation keeps base character folder but form-aware filename`() {
+        val plan = AutomationPathPolicy.plan(
+            listOf(
+                ResolvedCharacterPathInput(
+                    subjectIndex = 0,
+                    prominence = 1.0,
+                    canonicalName = "Goku",
+                    displayName = "Goku (Super Saiyan 3)",
+                    seriesCode = "SE0002",
+                    seriesName = "Dragon Ball",
+                ),
+            ),
+        )
+
+        assertNotNull(plan)
+        assertEquals(listOf("Dragon Ball", "Goku"), plan!!.folderSegments)
+        assertEquals("Goku (Super Saiyan 3) - Dragon Ball", plan.filenamePrefix)
     }
 
     @Test
