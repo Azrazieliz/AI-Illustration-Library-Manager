@@ -78,6 +78,8 @@ internal class CharacterResolver(
                 mapOf(
                     "character_id" to character.characterId,
                     "canonical_name" to character.canonicalName,
+                    "display_name" to character.displayName,
+                    "form_name" to character.formName,
                     "series_code" to character.primarySeriesCode,
                     "entry_type" to character.entryType,
                     "parent_character_id" to character.parentCharacterId,
