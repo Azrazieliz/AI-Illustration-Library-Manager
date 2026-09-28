@@ -113,30 +113,15 @@ internal class CharacterResolver(
                 candidate.character.weaponIds +
                 candidate.character.outfitIds
             ).toSet()
-        val candidateByFamily = candidateFeatures.groupBy(::featureFamily)
-        var contradictionWeight = 0.0
-        var evidenceWeight = 0.0
-
-        observed.forEach { (observedId, confidence) ->
-            val bounded = confidence.coerceIn(0.0, 1.0)
-            val weight = KnowledgeDatabase.featureWeight(observedId)
-            evidenceWeight += weight * bounded
-            val family = featureFamily(observedId)
-            if (family !in STRICT_CONTRADICTION_FAMILIES) return@forEach
-            val sameFamily = candidateByFamily[family].orEmpty()
-            if (sameFamily.isNotEmpty() && observedId !in sameFamily) {
-                contradictionWeight += weight * bounded
-            }
-        }
-
-        if (evidenceWeight <= 0.0) return candidate.attributeScore
-        val penalty = CONTRADICTION_PENALTY * contradictionWeight / evidenceWeight
+        val contradictionFraction = CanonicalAttributeSemantics.contradictionFraction(
+            observed = observed,
+            candidateFeatures = candidateFeatures,
+            strictFamilies = STRICT_CONTRADICTION_FAMILIES,
+            weight = KnowledgeDatabase::featureWeight,
+        )
+        val penalty = CONTRADICTION_PENALTY * contradictionFraction
         return (candidate.attributeScore - penalty).coerceIn(0.0, 1.0)
     }
-
-    private fun featureFamily(id: String): String = id
-        .takeWhile(Char::isLetter)
-        .uppercase()
 
     private fun parseObservedFeatures(raw: Map<String, Any>): Map<String, Double> {
         val out = linkedMapOf<String, Double>()
