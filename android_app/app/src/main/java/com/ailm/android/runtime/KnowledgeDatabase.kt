@@ -93,6 +93,7 @@ internal class KnowledgeDatabase(
                 identity_group_id TEXT NOT NULL DEFAULT '',
                 entry_type TEXT NOT NULL DEFAULT 'identity',
                 canonical_name TEXT NOT NULL,
+                form_name TEXT NOT NULL DEFAULT '',
                 primary_series_code TEXT NOT NULL,
                 aliases_json TEXT NOT NULL DEFAULT '[]',
                 attributes_json TEXT NOT NULL DEFAULT '[]',
@@ -271,6 +272,7 @@ internal class KnowledgeDatabase(
                         put("identity_group_id", entry.identityGroupId)
                         put("entry_type", entry.entryType)
                         put("canonical_name", entry.canonicalName)
+                        put("form_name", entry.formName)
                         put("primary_series_code", entry.primarySeriesCode)
                         put("aliases_json", JSONArray(entry.aliases).toString())
                         put("attributes_json", JSONArray(entry.attributeIds).toString())
@@ -280,7 +282,7 @@ internal class KnowledgeDatabase(
                         put("metadata_json", JSONObject(entry.metadata).toString())
                     },
                 )
-                (entry.aliases + entry.canonicalName + entry.characterId).distinct().forEach { alias ->
+                (entry.aliases + entry.canonicalName + entry.displayName + entry.characterId).distinct().forEach { alias ->
                     insertCharacterAlias(db, entry.characterId, alias)
                 }
                 entry.attributeIds.distinct().forEach { id ->
@@ -375,7 +377,7 @@ internal class KnowledgeDatabase(
     fun getCharacter(characterId: String): KnowledgeCharacterEntry? = readableDatabase.rawQuery(
         """
         SELECT character_id, COALESCE(parent_character_id, ''), identity_group_id, entry_type,
-               canonical_name, primary_series_code, aliases_json, attributes_json,
+               canonical_name, form_name, primary_series_code, aliases_json, attributes_json,
                canonical_weapons_json, canonical_outfits_json, sheet_asset_id, metadata_json
         FROM knowledge_characters
         WHERE character_id = ?
@@ -531,6 +533,12 @@ internal class KnowledgeDatabase(
                 issues += "Duplicate character_id '" + entry.characterId + "'."
             }
             if (entry.canonicalName.isBlank()) issues += entry.characterId + ": canonical_name is required."
+            if (entry.entryType == "transformation" && entry.formName.isBlank()) {
+                issues += entry.characterId + ": transformation entries require form_name."
+            }
+            if (entry.entryType != "transformation" && entry.formName.isNotBlank()) {
+                issues += entry.characterId + ": form_name is only valid for transformation entries."
+            }
             if (seriesByCode(entry.primarySeriesCode) == null) {
                 issues += entry.characterId + ": unknown series '" + entry.primarySeriesCode + "'."
             }
@@ -647,13 +655,14 @@ internal class KnowledgeDatabase(
         identityGroupId = getString(2).orEmpty(),
         entryType = getString(3).orEmpty().ifBlank { "identity" },
         canonicalName = getString(4),
-        primarySeriesCode = getString(5),
-        aliases = jsonStringList(getString(6)),
-        attributeIds = jsonStringList(getString(7)),
-        weaponIds = jsonStringList(getString(8)),
-        outfitIds = jsonStringList(getString(9)),
-        sheetAssetId = getString(10).orEmpty(),
-        metadata = jsonObjectMap(getString(11)),
+        formName = getString(5).orEmpty(),
+        primarySeriesCode = getString(6),
+        aliases = jsonStringList(getString(7)),
+        attributeIds = jsonStringList(getString(8)),
+        weaponIds = jsonStringList(getString(9)),
+        outfitIds = jsonStringList(getString(10)),
+        sheetAssetId = getString(11).orEmpty(),
+        metadata = jsonObjectMap(getString(12)),
     )
 
     private fun android.database.Cursor.toReferenceTag(): ReferenceTagEntry = ReferenceTagEntry(
@@ -678,7 +687,7 @@ internal class KnowledgeDatabase(
 
     companion object {
         private const val DB_NAME = "asterion_knowledge.sqlite"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
 
         fun featureWeight(id: String): Double = when {
             id.startsWith("WP", ignoreCase = true) -> 1.55
@@ -704,6 +713,7 @@ internal data class KnowledgeCharacterEntry(
     val identityGroupId: String = "",
     val entryType: String = "identity",
     val canonicalName: String,
+    val formName: String = "",
     val primarySeriesCode: String,
     val aliases: List<String> = emptyList(),
     val attributeIds: List<String> = emptyList(),
@@ -711,7 +721,14 @@ internal data class KnowledgeCharacterEntry(
     val outfitIds: List<String> = emptyList(),
     val sheetAssetId: String = "",
     val metadata: Map<String, Any> = emptyMap(),
-)
+) {
+    val displayName: String
+        get() = if (entryType == "transformation" && formName.isNotBlank()) {
+            canonicalName + " (" + formName + ")"
+        } else {
+            canonicalName
+        }
+}
 
 internal data class KnowledgeCandidate(
     val character: KnowledgeCharacterEntry,
