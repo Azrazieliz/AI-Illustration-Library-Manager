@@ -463,8 +463,9 @@ internal class LlamaCppBackend(
                 Analyze every visually distinct character/person in the image. Do NOT guess character names or series.
                 Resolve only directly visible physical attributes to the supplied canonical taxonomy IDs.
                 Return strict JSON only in this form:
-                {"subjects":[{"subject_index":0,"prominence":0.0,"attributes":[{"id":"HC001","confidence":0.0}]}]}
-                prominence is 0..1 and indicates visual prominence. confidence is 0..1.
+                {"subjects":[{"subject_index":0,"prominence":0.0,"bbox":[0.0,0.0,1.0,1.0],"attributes":[{"id":"HC001","confidence":0.0}]}]}
+                prominence is 0..1 and indicates visual prominence. bbox is normalized [x,y,width,height]
+                for that subject and each value must be 0..1. confidence is 0..1.
                 Omit any attribute that is hidden, ambiguous, perspective-dependent, or not safely distinguishable.
                 Use only IDs listed below. Never invent an ID, shade, body measurement, character, or series.
                 Taxonomy:
@@ -550,10 +551,17 @@ internal class LlamaCppBackend(
                             )
                         }
                     }
+                    val bboxArray = subject.optJSONArray("bbox") ?: JSONArray()
+                    val bbox = (0 until minOf(4, bboxArray.length()))
+                        .map { bboxArray.optDouble(it, Double.NaN) }
+                        .takeIf { values -> values.size == 4 && values.all(Double::isFinite) }
+                        ?.map { it.coerceIn(0.0, 1.0) }
+                        .orEmpty()
                     add(
                         mapOf(
                             "subject_index" to subject.optInt("subject_index", index),
                             "prominence" to subject.optDouble("prominence", 1.0).coerceIn(0.0, 1.0),
+                            "bbox" to bbox,
                             "attributes" to attributes,
                         ),
                     )
