@@ -2972,11 +2972,24 @@ object StandaloneRuntime {
         }
 
         val imageId = requestPayload["image_id"].toIntOrNullValue() ?: return
-        val tags = extractPredictedTags(response)
-        if (tags.isEmpty()) {
-            return
-        }
-        repository.setTags(imageId, tags)
+        val rawTags = extractPredictedTags(response)
+        if (rawTags.isEmpty()) return
+
+        val canonical = rawTags.mapNotNull { raw ->
+            knowledgeDatabase.resolveTag(raw)?.let { tag ->
+                CanonicalTagObservation(
+                    tagId = tag.id,
+                    tagName = tag.name,
+                    scope = "illustration",
+                    confidence = 0.80,
+                    source = "vision",
+                )
+            }
+        }.distinctBy(CanonicalTagObservation::tagId)
+        if (canonical.isEmpty()) return
+
+        resolutionStore.replaceCanonicalTags(imageId, canonical)
+        repository.setTags(imageId, canonical.map(CanonicalTagObservation::tagName))
     }
 
     private fun extractPredictedTags(response: Map<String, Any>): List<String> {
