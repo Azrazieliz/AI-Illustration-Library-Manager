@@ -626,6 +626,7 @@ class AppViewModel : ViewModel() {
         val appContext = context.applicationContext
         runCatching {
             StandaloneRuntime.initialize(appContext)
+            StandaloneRuntime.clearAutomationPauseRequest()
             val pending = StandaloneRuntime.automationImageIds(forceAll).size
             StandaloneRuntime.updateAutomationStatus(
                 status = "queued",
@@ -652,8 +653,42 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    fun pauseLibraryAutomation(context: Context) {
+        val appContext = context.applicationContext
+        runCatching {
+            StandaloneRuntime.initialize(appContext)
+            StandaloneRuntime.requestAutomationPause()
+            val current = StandaloneRuntime.automationStatus()
+            StandaloneRuntime.updateAutomationStatus(
+                status = "pausing",
+                total = (current["automation_total"] as? Number)?.toInt() ?: 0,
+                processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
+                failed = (current["automation_failed"] as? Number)?.toInt() ?: 0,
+                currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
+                message = "Pause requested. The current image will finish before automation pauses.",
+            )
+            _uiState.value = _uiState.value.copy(lastActionMessage = "Safe pause requested.")
+            refreshLocalAiState()
+        }.onFailure { error ->
+            _uiState.value = _uiState.value.copy(errorMessage = error.message ?: error.javaClass.simpleName)
+        }
+    }
+
+    fun resumeLibraryAutomation(context: Context) {
+        val appContext = context.applicationContext
+        runCatching {
+            StandaloneRuntime.initialize(appContext)
+            StandaloneRuntime.clearAutomationPauseRequest()
+        }
+        startLibraryAutomation(context, forceAll = false)
+    }
+
     fun stopLibraryAutomation(context: Context) {
         val appContext = context.applicationContext
+        runCatching {
+            StandaloneRuntime.initialize(appContext)
+            StandaloneRuntime.clearAutomationPauseRequest()
+        }
         WorkManager.getInstance(appContext).cancelUniqueWork(LibraryAutomationWorker.UNIQUE_WORK_NAME)
         runCatching {
             StandaloneRuntime.initialize(appContext)
