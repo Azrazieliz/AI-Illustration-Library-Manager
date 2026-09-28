@@ -354,30 +354,22 @@ It fixes:
 
 Added `CharacterSheetArchiveImporter.kt`.
 
-Canonical sheets are:
+The Character Sheet workflow is **completely external to Asterion Core**. The user can provide a character image to that workflow; it performs its own research/canonical reconstruction and generates one complete final Character Sheet in one external image-generation call. Core does not collect, curate, require, or construct a multi-image reference set for sheet creation.
 
-- resolved against Character Knowledge;
-- stored separately from Character JSON;
-- compressed to WebP for scale;
-- registered via `sheet_asset_id`;
-- queued for background visual indexing;
-- indexed into Fusion visual evidence for reranking.
+A finished Character Sheet is one canonical visual baseline for one Character Knowledge identity/form. Core:
 
-A raw numbered reference-image ZIP is **not** a finished character-sheet archive.
+- associates the externally generated sheet with Character Knowledge;
+- stores it separately from Character JSON;
+- compresses/stores it for scale;
+- registers it via `sheet_asset_id`;
+- queues it for background visual indexing;
+- uses its derived visual evidence during identity reranking.
 
-The sheet importer now rejects numbered raw references such as:
+Normal illustration-library images are a separate source of visual evidence. As Core resolves and organizes real library images into character folders, those images can also contribute Fusion-side visual evidence after validation/correction.
 
-`Rin Tohsaka - Fate 1.png`
+The filename form `Character - Series N.ext` is reserved for ordinary library images that Core itself renames and organizes. It must not be reinterpreted as a Character Sheet naming convention.
 
-Those belong to the external Character Sheet creation workflow.
-
-Finished sheet archive names can use stable IDs such as:
-
-`CH000001.webp`
-or
-`CS-CH000001.webp`
-
-and may also use an unnumbered canonical `Character - Series.ext` form when unambiguous.
+The exact packaging/naming convention for externally generated Character Sheets is not conceptually required by Core. Stable Character Knowledge IDs such as `CH000001.webp` / `CS-CH000001.webp` are supported as an unambiguous association method, and an unnumbered canonical `Character - Series.ext` form can also resolve when unique. A later packaging workflow may use manifest/sidecar metadata without changing the visible Character Sheet.
 
 ### Scalable character-sheet visual indexing
 
@@ -456,7 +448,7 @@ Remaining work belongs to the **next character-population/device-validation phas
    - multi-value attributes;
    - ambiguous aliases;
    - canonical path policy;
-   - raw reference ZIP rejection;
+   - strict separation between externally generated Character Sheets and Core-organized ordinary library images;
    - sheet indexing.
 5. Verify the current user taxonomy archive imports cleanly into the immutable Knowledge DB.
 6. Exercise a minimal synthetic Character Knowledge release containing:
@@ -487,7 +479,7 @@ Remaining work belongs to the **next character-population/device-validation phas
 - Do not derive series independently when character identity is resolved.
 - Do not organize below-threshold files; leave them for Review.
 - Do not write Review corrections into immutable Knowledge.
-- Do not import raw numbered references as final canonical character sheets.
+- Do not invent a pre-curated or manually renamed reference-image set for Character Sheet creation. Character Sheets are generated externally; ordinary library images are organized by Core as `Character - Series N.ext` and may later contribute Fusion visual evidence.
 - Do not redesign the future ecosystem API now.
 - Do not renumber existing Character IDs merely to keep related identities adjacent.
 
@@ -503,4 +495,25 @@ If conversation state is damaged:
 4. Continue from the latest validated commit, not from memory.
 5. Preserve every architectural rule in sections 1–8 unless the user explicitly changes it.
 6. Update this checkpoint whenever a material rule, schema, unresolved defect or merge status changes.
+
+
+
+---
+
+## 10. Correction recorded after user review — Character Sheet workflow
+
+A previous implementation explanation incorrectly invented a workflow in which the user would provide a curated/numbered reference-image set that would then be converted into a Character Sheet. **That model is rejected and must not reappear.**
+
+Authoritative interpretation from the Character Sheet V5 workflow and the user's clarification:
+
+1. The Character Sheet workflow is external to Asterion Core.
+2. The user may provide a character image directly to that workflow.
+3. The workflow performs its own internal research and canonical reconstruction.
+4. It generates **one complete 9:16 Character Sheet in one image-generation call**.
+5. That finished sheet is later supplied to Asterion as a canonical visual baseline for the corresponding Character Knowledge identity/form.
+6. Asterion does not require the user to curate, rename, or package a set of source reference images for sheet creation.
+7. Ordinary library images are handled by Asterion automation and are renamed `Character - Series N.ext`, organized into canonical folders, tagged, and used as additional Fusion-side visual evidence when appropriate.
+8. Character Sheets are references among the resolver's visual evidence, not the only references.
+9. The exact external packaging convention for generated sheets may later use filename association, manifest/sidecar metadata, or another explicit mapping, but this packaging detail must not be confused with the ordinary library filename scheme.
+10. Any future code/documentation that describes `Character - Series N.ext` as sheet-source material is wrong.
 
