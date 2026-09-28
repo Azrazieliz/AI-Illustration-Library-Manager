@@ -232,7 +232,9 @@ internal class AiWorkflowCoordinator(
         val embedding = profile.optJSONArray("embedding").doubleList()
 
         if (originalCharacter) {
-            val observations = payload["attribute_ids"].stringDoubleMap()
+            val observations = payload["attribute_ids"].stringDoubleMap().ifEmpty {
+                readSubjectObservations(imageId).firstOrNull()?.second.orEmpty()
+            }
             val clusterId = fusion.createOrAssignOriginalCharacterCluster(
                 imageId = imageId,
                 subjectIndex = 0,
