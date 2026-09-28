@@ -1179,6 +1179,7 @@ object StandaloneRuntime {
         val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
         val pathInputs = resolvedCharacters.mapNotNull { character ->
             val canonicalName = character["canonical_name"]?.toString()?.trim().orEmpty()
+            val displayName = character["display_name"]?.toString()?.trim().orEmpty().ifBlank { canonicalName }
             val seriesCode = character["series_code"]?.toString()?.trim().orEmpty()
             val seriesName = character["series_name"]?.toString()?.trim().orEmpty()
             if (canonicalName.isBlank() || seriesCode.isBlank() || seriesName.isBlank()) {
@@ -1188,6 +1189,7 @@ object StandaloneRuntime {
                     subjectIndex = (character["subject_index"] as? Number)?.toInt() ?: Int.MAX_VALUE,
                     prominence = (character["prominence"] as? Number)?.toDouble()?.coerceIn(0.0, 1.0) ?: 0.0,
                     canonicalName = canonicalName,
+                    displayName = displayName,
                     seriesCode = seriesCode,
                     seriesName = seriesName,
                 )
