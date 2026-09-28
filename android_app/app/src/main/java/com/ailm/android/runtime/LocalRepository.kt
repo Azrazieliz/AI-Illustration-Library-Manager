@@ -743,7 +743,8 @@ class LocalRepository(
     fun reviewQueue(limit: Int = 250): List<Map<String, Any>> {
         val rows = mutableListOf<Map<String, Any>>()
         val sql = """
-            SELECT review_id, image_uri, status, reason, last_updated_ms
+            SELECT review_id, image_uri, COALESCE(image_id, 0), status, review_type,
+                   COALESCE(reason, ''), payload_json, correction_json, last_updated_ms
             FROM review_items
             WHERE status = 'pending'
             ORDER BY last_updated_ms DESC, review_id DESC
@@ -755,9 +756,13 @@ class LocalRepository(
                     "id" to cursor.getLong(0).toString(),
                     "item_id" to cursor.getLong(0).toString(),
                     "path" to cursor.getString(1),
-                    "status" to cursor.getString(2),
-                    "reason" to (cursor.getString(3) ?: ""),
-                    "updated_at_ms" to cursor.getLong(4),
+                    "image_id" to cursor.getInt(2),
+                    "status" to cursor.getString(3),
+                    "review_type" to cursor.getString(4),
+                    "reason" to cursor.getString(5),
+                    "payload_json" to cursor.getString(6).orEmpty(),
+                    "correction_json" to cursor.getString(7).orEmpty(),
+                    "updated_at_ms" to cursor.getLong(8),
                 )
             }
         }
