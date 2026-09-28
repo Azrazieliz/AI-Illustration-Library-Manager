@@ -29,4 +29,30 @@ class ReferenceKnowledgeParserTest {
         assertTrue(bundle.tags.any { it.id == "OF001" && it.category == "outfit" })
         assertTrue(bundle.tags.any { it.id == "EX001" && it.category == "expression" })
     }
+
+    @Test
+    fun `character parser preserves multiple ids in one attribute family`() {
+        val bundle = ReferenceKnowledgeParser.parseDocuments(
+            mapOf(
+                "characters.json" to """[
+                    {
+                      "character_id":"CH000001",
+                      "canonical_name":"Example",
+                      "primary_series_code":"SE0001",
+                      "attributes":{
+                        "hair_color":["HC015","HC030"],
+                        "eye_color":["EC010","EC014"],
+                        "eye_traits":["ET001"]
+                      }
+                    }
+                ]"""
+            ),
+        )
+
+        val character = bundle.characters.single()
+        assertEquals(
+            listOf("HC015", "HC030", "EC010", "EC014", "ET001"),
+            character.attributeIds,
+        )
+    }
 }
