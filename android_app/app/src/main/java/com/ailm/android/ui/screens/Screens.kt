@@ -462,6 +462,8 @@ fun ScreenScaffold(
             onRefreshAi = appViewModel::refreshLocalAiState,
             onStartAutomation = { appViewModel.startLibraryAutomation(context, forceAll = false) },
             onReprocessAll = { appViewModel.startLibraryAutomation(context, forceAll = true) },
+            onPauseAutomation = { appViewModel.pauseLibraryAutomation(context) },
+            onResumeAutomation = { appViewModel.resumeLibraryAutomation(context) },
             onStopAutomation = { appViewModel.stopLibraryAutomation(context) },
             onNavigate = onNavigate,
         )
@@ -2330,6 +2332,8 @@ private fun AiAutomationScreen(
     onRefreshAi: () -> Unit,
     onStartAutomation: () -> Unit,
     onReprocessAll: () -> Unit,
+    onPauseAutomation: () -> Unit,
+    onResumeAutomation: () -> Unit,
     onStopAutomation: () -> Unit,
     onNavigate: (AppDestination) -> Unit,
 ) {
@@ -2339,7 +2343,8 @@ private fun AiAutomationScreen(
     val failed = (state.aiOverview["automation_failed"] as? Number)?.toInt() ?: 0
     val currentImageId = (state.aiOverview["automation_current_image_id"] as? Number)?.toInt() ?: 0
     val message = state.aiOverview["automation_message"]?.toString().orEmpty()
-    val active = automationStatus in setOf("queued", "running", "stopping")
+    val active = automationStatus in setOf("queued", "running", "pausing", "stopping")
+    val paused = automationStatus == "paused"
     val progress = if (total > 0) processed.toFloat() / total.toFloat() else 0f
     var showDiagnostics by rememberSaveable { mutableStateOf(false) }
 
@@ -2382,6 +2387,8 @@ private fun AiAutomationScreen(
                             when (automationStatus) {
                                 "queued" -> "Queued"
                                 "running" -> "Running"
+                                "pausing" -> "Pausing safely"
+                                "paused" -> "Paused"
                                 "stopping" -> "Stopping"
                                 "completed" -> "Complete"
                                 "failed" -> "Needs attention"
@@ -2432,15 +2439,27 @@ private fun AiAutomationScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(
-                        onClick = onStartAutomation,
+                        onClick = if (paused) onResumeAutomation else onStartAutomation,
                         enabled = !active,
                         modifier = Modifier.weight(1f),
                     ) {
-                        Text(if (automationStatus == "completed") "Run New / Changed" else "Run Automation")
+                        Text(
+                            when {
+                                paused -> "Resume"
+                                automationStatus == "completed" -> "Run New / Changed"
+                                else -> "Run Automation"
+                            },
+                        )
+                    }
+                    Button(
+                        onClick = onPauseAutomation,
+                        enabled = automationStatus == "running",
+                    ) {
+                        Text("Pause")
                     }
                     Button(
                         onClick = onStopAutomation,
-                        enabled = active,
+                        enabled = active || paused,
                     ) {
                         Text("Stop")
                     }
@@ -2462,7 +2481,7 @@ private fun AiAutomationScreen(
             ) {
                 Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Each pending image is processed end-to-end with the compatible local models: OCR, visual recognition, captioning, tags, embeddings, normalization, safety and quality scoring. Confident canonical series results are used to rename and move the file into its series folder. Uncertain results stay in place and go to Review. Character recognition is skipped until character knowledge is installed.",
+                    "Each image is completed before Asterion moves to the next. Vision extracts observable taxonomy-bound character attributes and illustration tags; Character Knowledge filters and ranks possible identities, visual references/Fusion evidence rerank them, and the canonical series comes from the resolved character rather than a free-form series guess. Above threshold the image is organized into its canonical series/character path; below threshold it stays in place for editable Review. Pause finishes the current image safely.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
