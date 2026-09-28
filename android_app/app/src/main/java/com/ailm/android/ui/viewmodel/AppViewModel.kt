@@ -1934,6 +1934,22 @@ class AppViewModel : ViewModel() {
         submitReviewAction(itemId, "approve")
     }
 
+    fun correctReview(itemId: String, charactersText: String, originalCharacter: Boolean) {
+        val characters = charactersText
+            .split('|')
+            .map(String::trim)
+            .filter(String::isNotBlank)
+        val correction = buildMap<String, Any> {
+            put("original_character", originalCharacter)
+            if (!originalCharacter && characters.isNotEmpty()) put("characters", characters)
+        }
+        submitReviewAction(
+            itemId = itemId,
+            action = "correct",
+            payload = mapOf("correction" to correction),
+        )
+    }
+
     fun rejectReview(itemId: String) {
         submitReviewAction(itemId, "reject")
     }
@@ -2085,9 +2101,18 @@ class AppViewModel : ViewModel() {
         return updatedImage
     }
 
-    private fun submitReviewAction(itemId: String, action: String) {
+    private fun submitReviewAction(
+        itemId: String,
+        action: String,
+        payload: Map<String, Any> = emptyMap(),
+    ) {
         runIoAction {
-            StandaloneRuntime.updateReview(itemId = itemId, action = action)
+            val updated = StandaloneRuntime.updateReview(itemId = itemId, action = action, payload = payload)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = if (updated) "Review updated." else "Review change was not applied.",
+                )
+            }
             refreshDashboard()
         }
     }
