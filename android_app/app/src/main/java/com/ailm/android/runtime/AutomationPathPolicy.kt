@@ -10,10 +10,12 @@ internal data class ResolvedCharacterPathInput(
 
 internal data class AutomationPathPlan(
     val folderSegments: List<String>,
-    val filenamePrefix: String,
+    val filenameParts: List<String>,
     val primarySeries: String,
     val primaryCharacter: String,
-)
+) {
+    val filenamePrefix: String get() = filenameParts.joinToString(" - ")
+}
 
 /**
  * Pure path policy for autonomous organization. Storage creation and SAF I/O
@@ -28,7 +30,7 @@ internal object AutomationPathPolicy {
         if (originalCharacter) {
             return AutomationPathPlan(
                 folderSegments = listOf("Original Characters"),
-                filenamePrefix = "Original Character",
+                filenameParts = listOf("Original Character"),
                 primarySeries = "",
                 primaryCharacter = originalCharacterClusterId,
             )
@@ -55,7 +57,7 @@ internal object AutomationPathPolicy {
 
         return AutomationPathPlan(
             folderSegments = folderSegments,
-            filenamePrefix = orderedNames.joinToString(" - ") + " - " + primary.seriesName,
+            filenameParts = orderedNames + primary.seriesName,
             primarySeries = primary.seriesName,
             primaryCharacter = primary.canonicalName,
         )
