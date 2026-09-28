@@ -19,6 +19,7 @@ import java.util.zip.ZipInputStream
 internal class CharacterSheetArchiveImporter(
     private val context: Context,
     private val knowledge: KnowledgeDatabase,
+    private val fusion: FusionResolutionStore,
 ) {
     fun importZip(input: InputStream, sourceName: String): Map<String, Any> {
         val targetRoot = File(context.filesDir, "knowledge/character-sheets").apply { mkdirs() }
@@ -88,6 +89,10 @@ internal class CharacterSheetArchiveImporter(
                         "storage_format" to "webp",
                         "quality" to SHEET_WEBP_QUALITY,
                     ),
+                )
+                fusion.markCharacterSheetPending(
+                    characterId = character.characterId,
+                    sourceUri = output.absolutePath + "#" + sha,
                 )
                 imported += 1
             }
