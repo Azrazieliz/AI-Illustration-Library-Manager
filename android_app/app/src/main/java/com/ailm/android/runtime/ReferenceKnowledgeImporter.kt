@@ -64,6 +64,8 @@ internal object ReferenceKnowledgeParser {
                                 if (obj.optString("parent_character_id").isNotBlank()) "transformation" else "identity"
                             },
                             canonicalName = canonicalName,
+                            formName = obj.optString("form_name").trim()
+                                .ifBlank { obj.optString("transformation_name").trim() },
                             primarySeriesCode = primarySeries,
                             aliases = stringList(obj.optJSONArray("aliases")),
                             attributeIds = attributes.toList(),
