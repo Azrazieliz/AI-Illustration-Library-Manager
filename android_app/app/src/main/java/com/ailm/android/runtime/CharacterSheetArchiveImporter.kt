@@ -126,9 +126,9 @@ internal class CharacterSheetArchiveImporter(
         while (index > 0) {
             val characterText = stem.substring(0, index).trim()
             val seriesText = stem.substring(index + delimiter.length).trim()
-            val character = knowledge.resolveCharacter(characterText)
             val series = knowledge.resolveSeries(seriesText)
-            if (character != null && series != null && character.primarySeriesCode == series.code) {
+            val character = series?.let { knowledge.resolveCharacter(characterText, it.code) }
+            if (character != null && series != null) {
                 return character
             }
             index = stem.lastIndexOf(delimiter, index - 1)
