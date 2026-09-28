@@ -551,21 +551,37 @@ object StandaloneRuntime {
         uris.distinct().forEach { uri ->
             val filename = safeKnowledgePackFileName(uri)
             if (filename.lowercase().endsWith(".zip")) {
-                val result = runCatching {
+                val knowledgeResult = runCatching {
                     appContext.contentResolver.openInputStream(uri)?.use { input ->
                         ReferenceKnowledgeImporter(knowledgeDatabase).importZip(input, filename)
-                    } ?: mapOf("ok" to false, "message" to "Unable to open reference knowledge archive.", "filename" to filename)
+                    } ?: mapOf("ok" to false, "message" to "Unable to open Knowledge archive.", "filename" to filename)
                 }.getOrElse { error ->
                     mapOf(
                         "ok" to false,
-                        "message" to (error.message ?: "Reference knowledge archive import failed."),
+                        "message" to (error.message ?: "Knowledge archive import failed."),
                         "filename" to filename,
                     )
                 }
-                referenceResults += result
-                if (result["ok"] == true) {
+
+                val sheetResult = if (knowledgeDatabase.hasCharacters()) {
+                    runCatching {
+                        appContext.contentResolver.openInputStream(uri)?.use { input ->
+                            CharacterSheetArchiveImporter(appContext, knowledgeDatabase).importZip(input, filename)
+                        }
+                    }.getOrNull()
+                } else null
+
+                val sheetsImported = (sheetResult?.get("imported") as? Number)?.toInt() ?: 0
+                val sheetIssues = (sheetResult?.get("unresolved_files") as? List<*>)?.isNotEmpty() == true
+                if (knowledgeResult["ok"] == true) {
+                    referenceResults += knowledgeResult
                     resolutionStore.resetWaitingForKnowledge()
                     repository.rebuildSearchIndex()
+                } else if (sheetsImported == 0 && !sheetIssues) {
+                    referenceResults += knowledgeResult
+                }
+                if (sheetsImported > 0 || sheetIssues) {
+                    referenceResults += sheetResult.orEmpty()
                 }
             } else {
                 ordinaryUris += uri
