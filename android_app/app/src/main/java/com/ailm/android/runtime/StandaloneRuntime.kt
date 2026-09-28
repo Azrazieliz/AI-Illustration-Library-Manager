@@ -473,12 +473,61 @@ object StandaloneRuntime {
         ensureInitialized()
         val normalizedItem = itemId.trim()
         val normalizedAction = action.trim().lowercase()
-        if (normalizedItem.isBlank() || normalizedAction.isBlank()) {
-            return false
+        if (normalizedItem.isBlank() || normalizedAction.isBlank()) return false
+        if (normalizedAction == "undo") return repository.undoLastReviewUpdate()
+
+        if (normalizedAction in setOf("approve", "correct")) {
+            val reviewId = normalizedItem.toLongOrNull() ?: return false
+            val review = resolutionStore.getReviewItem(reviewId) ?: return false
+            val reviewType = review["review_type"]?.toString().orEmpty()
+            if (reviewType == "character_resolution") {
+                val rawCorrection = payload["correction"]
+                val correction = when (rawCorrection) {
+                    is Map<*, *> -> rawCorrection.entries.mapNotNull { (key, value) ->
+                        key?.toString()?.let { text -> value?.let { text to it } }
+                    }.toMap()
+                    else -> payload.filterKeys { it != "reason" }
+                }
+                if (correction.isEmpty()) return false
+
+                val imageId = (review["image_id"] as? Number)?.toInt() ?: return false
+                val workflow = aiWorkflowCoordinator.applyReviewCorrection(imageId, correction)
+                if (workflow["accepted"] != true) return false
+
+                val organization = organizeAutonomousImage(imageId, workflow)
+                val organized = organization["ok"] == true &&
+                    organization["status"]?.toString() !in setOf("file_operation_failed", "database_update_failed", "folder_failed")
+                if (!organized) {
+                    resolutionStore.queueReview(
+                        imageId = imageId,
+                        reviewType = "organization_failure",
+                        reason = organization["message"]?.toString().orEmpty().ifBlank { "Corrected identity could not be organized." },
+                        payload = mapOf("workflow" to workflow, "organization" to organization),
+                    )
+                    resolutionStore.markAutomationState(
+                        imageId = imageId,
+                        state = "retry_required",
+                        pipelineComplete = true,
+                        organizationComplete = false,
+                        needsReview = true,
+                        lastError = organization["message"]?.toString().orEmpty(),
+                    )
+                    return false
+                }
+
+                resolutionStore.completeReview(reviewId, "approved", correction)
+                resolutionStore.markAutomationState(
+                    imageId = imageId,
+                    state = "complete",
+                    pipelineComplete = true,
+                    organizationComplete = true,
+                    needsReview = false,
+                )
+                repository.rebuildSearchIndex()
+                return true
+            }
         }
-        if (normalizedAction == "undo") {
-            return repository.undoLastReviewUpdate()
-        }
+
         val reason = payload["reason"]?.toString()
         return repository.updateReview(normalizedItem, normalizedAction, reason)
     }
