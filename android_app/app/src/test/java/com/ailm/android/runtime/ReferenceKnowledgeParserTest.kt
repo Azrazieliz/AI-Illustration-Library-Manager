@@ -40,7 +40,7 @@ class ReferenceKnowledgeParserTest {
                       "canonical_name":"Example",
                       "primary_series_code":"SE0001",
                       "attributes":{
-                        "hair_color":["HC015","HC030"],
+                        "hair_color":["HC043","HC015","HC030"],
                         "eye_color":["EC010","EC014"],
                         "eye_traits":["ET001"]
                       }
@@ -51,10 +51,10 @@ class ReferenceKnowledgeParserTest {
 
         val character = bundle.characters.single()
         assertEquals(
-            setOf("HC015", "HC030", "EC010", "EC014", "ET001"),
+            setOf("HC043", "HC015", "HC030", "EC010", "EC014", "ET001"),
             character.attributeIds.toSet(),
         )
-        assertEquals(5, character.attributeIds.size)
+        assertEquals(6, character.attributeIds.size)
     }
 
     @Test

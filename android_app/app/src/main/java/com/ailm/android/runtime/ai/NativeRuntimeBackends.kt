@@ -467,11 +467,14 @@ internal class LlamaCppBackend(
                 prominence is 0..1 and indicates visual prominence. bbox is normalized [x,y,width,height]
                 for that subject and each value must be 0..1. confidence is 0..1.
                 Several IDs from the same attribute family are valid when several values are genuinely visible.
-                This is especially important for hair colour and eye colour. If two distinct canonical colours are
-                clearly visible, emit both specific colour IDs rather than collapsing them to a generic Multicolored
-                value. For heterochromia, emit each visible eye-colour ID and also the canonical heterochromia
-                eye-trait ID when justified. Use a Multicolored fallback only when multiple colours are clearly
-                present but the exact canonical component colours cannot be resolved safely.
+                Colour markers are semantic and mandatory when colours coexist simultaneously:
+                - multicoloured hair: emit HC043 plus every identifiable component HC colour ID;
+                - heterochromia: emit ET001 plus every identifiable EC colour ID for the two eyes;
+                - a multicoloured iris/eye treatment: emit EC027 plus every identifiable component EC colour ID.
+                If simultaneous component colours cannot be resolved safely, emit the applicable marker alone.
+                Never use two specific HC or EC IDs by themselves to mean simultaneous multicolour. In Character
+                Knowledge, multiple specific HC/EC IDs without HC043, EC027, or ET001 are canonical alternatives
+                across appearances rather than a simultaneous visual state.
                 Omit any attribute that is hidden, ambiguous, perspective-dependent, or not safely distinguishable.
                 Use only IDs listed below. Never invent an ID, shade, body measurement, character, or series.
                 Taxonomy:

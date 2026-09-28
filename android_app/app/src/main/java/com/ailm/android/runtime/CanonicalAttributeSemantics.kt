@@ -3,13 +3,25 @@ package com.ailm.android.runtime
 /**
  * Scoring semantics for taxonomy-bound visual attributes.
  *
- * A taxonomy family is not assumed to be single-valued. Hair colour and eye
- * colour explicitly allow several canonical IDs at once (for example red+blue
- * hair, or red+blue eyes with a heterochromia trait). Other families can also
- * carry multiple observations when the taxonomy makes that meaningful.
+ * A taxonomy family is not assumed to be single-valued.
+ *
+ * IMPORTANT COLOR SEMANTICS:
+ * - several specific HC/EC IDs WITHOUT a semantic marker are canonical alternatives
+ *   across appearances; they do not mean that the colours coexist simultaneously;
+ * - simultaneous multicoloured hair requires HC043 in addition to any known
+ *   component HC IDs;
+ * - a multicoloured iris/eye treatment requires EC027 in addition to any known
+ *   component EC IDs;
+ * - heterochromia requires ET001 in addition to the visible EC component IDs.
+ *
+ * The resolver therefore never infers Multicolored or Heterochromia merely from
+ * the number of specific colour IDs present in Character Knowledge.
  */
 internal object CanonicalAttributeSemantics {
-    private val aggregateColorIds = setOf("HC043", "EC027")
+    private val simultaneousColorMarkers = mapOf(
+        "HC" to "HC043",
+        "EC" to "EC027",
+    )
 
     fun family(id: String): String = id
         .trim()
@@ -43,7 +55,7 @@ internal object CanonicalAttributeSemantics {
             val evidence = entries.sumOf { it.value.coerceIn(0.0, 1.0) }.coerceAtLeast(0.0001)
             val covered = entries.sumOf { (id, confidence) ->
                 val bounded = confidence.coerceIn(0.0, 1.0)
-                if (isCovered(id, entries.map { it.key }.toSet(), candidateFamily)) bounded else 0.0
+                if (isCovered(id, candidateFamily)) bounded else 0.0
             }
             val coverage = (covered / evidence).coerceIn(0.0, 1.0)
             val familyWeight = familyEvidenceWeight(family, entries, weight)
@@ -83,7 +95,7 @@ internal object CanonicalAttributeSemantics {
             val totalConfidence = entries.sumOf { it.value.coerceIn(0.0, 1.0) }.coerceAtLeast(0.0001)
             val matchedConfidence = entries.sumOf { (id, confidence) ->
                 val bounded = confidence.coerceIn(0.0, 1.0)
-                if (isCovered(id, entries.map { it.key }.toSet(), candidateFamily)) bounded else 0.0
+                if (isCovered(id, candidateFamily)) bounded else 0.0
             }
             val mismatch = (1.0 - matchedConfidence / totalConfidence).coerceIn(0.0, 1.0)
             contradictionWeight += familyWeight * mismatch
@@ -107,22 +119,21 @@ internal object CanonicalAttributeSemantics {
 
     private fun isCovered(
         observedId: String,
-        observedFamilyIds: Set<String>,
         candidateFamilyIds: Set<String>,
     ): Boolean {
+        // Exact IDs are authoritative. Semantic markers are not inferred from
+        // the mere presence of two or more specific colour IDs.
         if (observedId in candidateFamilyIds) return true
+
         val family = family(observedId)
         if (!isExplicitMultiValueFamily(family)) return false
 
-        val observedAggregate = observedId in aggregateColorIds
-        val candidateHasAggregate = candidateFamilyIds.any { it in aggregateColorIds }
-        val observedSpecificCount = observedFamilyIds.count { it !in aggregateColorIds }
-        val candidateSpecificCount = candidateFamilyIds.count { it !in aggregateColorIds }
+        // A Multicolored marker only matches the same explicit marker.
+        // Conversely, an aggregate marker alone does not stand in for a known
+        // specific component colour.
+        val marker = simultaneousColorMarkers[family]
+        if (observedId == marker || marker in candidateFamilyIds) return false
 
-        // "Multicolored" is a safe fallback when the model can see multiple
-        // colours but cannot resolve each exact component. If exact component
-        // colours are available, the vision prompt emits them instead.
-        return (observedAggregate && candidateSpecificCount >= 2) ||
-            (candidateHasAggregate && observedSpecificCount >= 2)
+        return false
     }
 }

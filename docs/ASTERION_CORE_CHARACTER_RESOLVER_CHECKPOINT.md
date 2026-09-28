@@ -472,7 +472,7 @@ Remaining work belongs to the **next character-population/device-validation phas
 
 - Do not make hair/eye colour single-valued.
 - Do not make character aliases globally unique.
-- Do not treat generic `Multicolored` as superior to exact component colours.
+- Do not infer `Multicolored` or `Heterochromia` from multiple specific colour IDs alone; explicit semantic markers (`HC043`, `EC027`, `ET001`) distinguish simultaneous colour states from canonical alternatives.
 - Do not infer hidden height/breast/body traits from close-ups.
 - Do not let soft evidence such as height/breast size override strong sheet/face/species/weapon evidence.
 - Do not let canonical outfit/weapon knowledge masquerade as “visible now” unless vision observed it.
@@ -695,3 +695,82 @@ User decisions:
 - The 11eyes authoring pass completed with zero taxonomy name↔ID mapping errors, zero duplicate Character IDs, and zero duplicate Character Sheet filenames in the workbook audit.
 
 Next available base Character ID: **`CH000021`**.
+
+
+---
+
+## 15. Character Knowledge compact authoring schema + explicit colour-state markers
+
+This section supersedes any earlier Character Knowledge workbook wording that implies one column per individual hair/eye/body subattribute or that treats Multicolored as an inferred fallback.
+
+### Compact cumulative XLSX
+
+The single cumulative workbook remains the authoritative human-auditable authoring artifact, but the character table should minimize redundant columns and authoring work.
+
+Recommended main character columns:
+
+- `Character_ID`
+- `Series_Code`
+- `Series`
+- `Name` — canonical name only
+- `Aliases` — all alternate spellings / romanizations / merged lookup names
+- `Type` — identity or transformation
+- `Parent_ID` — canonical parent `CHxxxxxx` when Type is transformation
+- `Form` — transformation label when applicable
+- `Hair_IDs`
+- `Hair_Values`
+- `Eye_IDs`
+- `Eye_Values`
+- `Sex_ID`
+- `Sex_Value`
+- `Age_ID`
+- `Age_Value`
+- `Body_IDs` — compact list for skin / height class / body build / bust class / body traits
+- `Body_Values`
+- `Species_IDs`
+- `Species_Values`
+- `Weapon_IDs`
+- `Weapon_Values`
+- `Outfit_IDs`
+- `Outfit_Values`
+- `Sheet`
+- `Sources`
+- `Validation`
+
+The human-readable values remain separate from the canonical IDs so cross-character anomaly checks are easy, while related IDs are compacted into one family cell. For example, Hair may contain `HC...`, `HL...`, and `HS...` IDs together.
+
+Do not keep redundant main-table columns for `display_name`, `Original_List_Entries`, or duplicate canonical-name fields. Source-list decisions remain traceable in the roster-decision sheet. Runtime `display_name` stays computed from canonical name + form.
+
+### Visual completion rule
+
+Character Knowledge is visual recognition data. After roster approval, canonical visual attributes should be resolved primarily from representative canonical imagery when textual sources are absent or conflicting.
+
+For coarse visual taxonomy families such as height class, body build, bust class, hair construction, eye/hair colour, skin and other approximate recognition traits:
+- inspect representative character imagery rather than leaving the field blank merely because no numeric/profile value is published;
+- choose the closest existing taxonomy value;
+- do not invent new taxonomy IDs;
+- use Review only when representative imagery still leaves a genuinely consequential ambiguity.
+
+The goal is a nearly complete canonical visual profile with as little unresolved Review state as safely possible.
+
+### Explicit simultaneous-colour semantics
+
+Multiple specific colour IDs alone mean **canonical alternatives across appearances**.
+
+Examples:
+- `HC001 | HC015` = the character has canonical black-hair and red-hair appearances; not necessarily simultaneous;
+- `EC010 | EC014` = canonical red-eye and blue-eye appearances; not necessarily heterochromia.
+
+Simultaneous visual states require explicit semantic markers:
+- multicoloured hair = `HC043` + identifiable component `HC...` IDs;
+- multicoloured iris/eye treatment = `EC027` + identifiable component `EC...` IDs;
+- heterochromia = `ET001` + identifiable eye-colour `EC...` IDs.
+
+When the component colours cannot be safely identified, the semantic marker may stand alone. The marker must never be inferred merely because two specific colours are stored.
+
+The resolver and vision prompt must preserve this distinction.
+
+
+### 11eyes pilot migration note
+
+The previously generated wide 11eyes pilot workbook is a provisional research/audit artifact only. Before continuing bulk population, rebuild those 20 approved identities into the compact schema above, resolve visual fields from representative imagery, and minimize Review rows. Preserve the assigned base-ID sequence unless a concrete identity correction requires otherwise.
