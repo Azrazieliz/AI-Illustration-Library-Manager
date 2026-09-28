@@ -79,6 +79,17 @@ class LibraryAutomationWorker(
             setForeground(foregroundInfo(0, imageIds.size, "Preparing automation"))
 
             imageIds.forEach { imageId ->
+                if (StandaloneRuntime.automationPauseRequested()) {
+                    StandaloneRuntime.updateAutomationStatus(
+                        status = "paused",
+                        total = imageIds.size,
+                        processed = processed,
+                        failed = failed,
+                        currentImageId = imageId,
+                        message = "Automation paused before the next image.",
+                    )
+                    return Result.success()
+                }
                 if (isStopped) {
                     StandaloneRuntime.updateAutomationStatus(
                         status = "stopped",
@@ -117,6 +128,21 @@ class LibraryAutomationWorker(
                     failed += 1
                 }
                 processed += 1
+
+                // Safe pause: the current image has completed its entire
+                // analysis/review/organization transaction before pausing.
+                if (StandaloneRuntime.automationPauseRequested()) {
+                    StandaloneRuntime.updateAutomationStatus(
+                        status = "paused",
+                        total = imageIds.size,
+                        processed = processed,
+                        failed = failed,
+                        currentImageId = 0,
+                        message = "Automation paused after completing the current image.",
+                    )
+                    setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed))
+                    return Result.success()
+                }
             }
 
             StandaloneRuntime.updateAutomationStatus(
@@ -142,7 +168,7 @@ class LibraryAutomationWorker(
                 currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
                 message = error.message ?: error.javaClass.simpleName,
             )
-            Result.failure()
+            if (runAttemptCount < MAX_AUTOMATION_RETRIES) Result.retry() else Result.failure()
         }
     }
 
@@ -178,5 +204,6 @@ class LibraryAutomationWorker(
         const val FORCE_ALL_KEY = "force_all"
         private const val CHANNEL_ID = "asterion_automation"
         private const val NOTIFICATION_ID = 4207
+        private const val MAX_AUTOMATION_RETRIES = 2
     }
 }
