@@ -37,7 +37,7 @@ internal object AutomationPathPolicy {
 
         val primary = characters.maxWithOrNull(
             compareBy<ResolvedCharacterPathInput> { it.prominence }
-                .thenByDescending { -it.subjectIndex },
+                .thenBy { -it.subjectIndex },
         ) ?: characters.first()
         if (primary.seriesName.isBlank() || primary.canonicalName.isBlank()) return null
 
