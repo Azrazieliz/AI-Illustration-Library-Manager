@@ -143,7 +143,7 @@ internal class AiWorkflowCoordinator(
                         canonicalTags += CanonicalTagObservation(
                             tagId = tag.id,
                             tagName = tag.name,
-                            scope = "character_knowledge",
+                            scope = "character_profile",
                             confidence = subject.confidence,
                             source = "character_knowledge",
                         )
@@ -154,7 +154,7 @@ internal class AiWorkflowCoordinator(
                         canonicalTags += CanonicalTagObservation(
                             tagId = tag.id,
                             tagName = tag.name,
-                            scope = "character_knowledge",
+                            scope = "character_reference",
                             confidence = subject.confidence,
                             source = "character_knowledge",
                         )
@@ -163,7 +163,16 @@ internal class AiWorkflowCoordinator(
             }
         }
         fusion.replaceCanonicalTags(imageId, canonicalTags)
-        repository.setTags(imageId, canonicalTags.map(CanonicalTagObservation::tagName).distinct())
+        // Flatten only actual image tags plus stable physical character profile
+        // tags into the legacy search tag table. Signature weapons/outfits remain
+        // Character Knowledge evidence unless they are visibly detected in this image.
+        repository.setTags(
+            imageId,
+            canonicalTags
+                .filter { it.scope != "character_reference" }
+                .map(CanonicalTagObservation::tagName)
+                .distinct(),
+        )
 
         val imageUri = repository.searchByImageId(imageId)?.get("uri")?.toString().orEmpty()
         if (embedding.isNotEmpty()) {
