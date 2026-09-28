@@ -1319,6 +1319,107 @@ object StandaloneRuntime {
         return cleaned.ifBlank { "Unsorted" }.take(96).trim().ifBlank { "Unsorted" }
     }
 
+    fun indexPendingCharacterSheets(limit: Int = 50): Map<String, Any> {
+        ensureInitialized()
+        val boundedLimit = limit.coerceIn(1, 250)
+        val total = knowledgeDatabase.characterSheetCount()
+        if (total == 0) {
+            return mapOf(
+                "ok" to true,
+                "indexed" to 0,
+                "failed" to 0,
+                "remaining" to 0,
+                "message" to "No canonical character sheets are installed.",
+            )
+        }
+
+        var offset = 0
+        var indexed = 0
+        var failed = 0
+        var examined = 0
+        while (offset < total && examined < boundedLimit * 8 && indexed + failed < boundedLimit) {
+            val page = knowledgeDatabase.listCharacterSheets(limit = minOf(250, boundedLimit * 2), offset = offset)
+            if (page.isEmpty()) break
+            offset += page.size
+            examined += page.size
+
+            page.forEach { sheet ->
+                if (indexed + failed >= boundedLimit) return@forEach
+                val characterId = sheet["character_id"].orEmpty()
+                val assetPath = sheet["asset_path"].orEmpty()
+                val sha256 = sheet["sha256"].orEmpty()
+                if (characterId.isBlank() || assetPath.isBlank()) {
+                    failed += 1
+                    return@forEach
+                }
+                val sourceKey = assetPath + "#" + sha256
+                if (resolutionStore.hasCharacterEvidence(characterId, "canonical_sheet", sourceKey)) {
+                    return@forEach
+                }
+
+                val response = localAiManager.runPipeline(
+                    mapOf(
+                        "task_type" to "embedding_generation",
+                        "stages" to listOf("embedding_generation"),
+                        "path" to assetPath,
+                        "image_path" to assetPath,
+                        "max_retries" to 1,
+                    ),
+                )
+                val result = (response["result"] as? Map<*, *>)?.toStringAnyMap().orEmpty()
+                val embedding = (result["embedding"] as? List<*>)
+                    ?.mapNotNull { (it as? Number)?.toDouble() }
+                    .orEmpty()
+                if (response["ok"] == true && embedding.isNotEmpty()) {
+                    resolutionStore.replaceCanonicalSheetEvidence(
+                        characterId = characterId,
+                        sourceUri = sourceKey,
+                        embedding = embedding,
+                    )
+                    indexed += 1
+                } else {
+                    failed += 1
+                }
+            }
+        }
+
+        val remaining = countPendingCharacterSheetIndexes()
+        return mapOf(
+            "ok" to (failed == 0),
+            "indexed" to indexed,
+            "failed" to failed,
+            "remaining" to remaining,
+            "message" to if (remaining == 0) {
+                "Canonical character sheet visual index is current."
+            } else {
+                "Character sheet indexing can continue in another batch."
+            },
+        )
+    }
+
+    fun countPendingCharacterSheetIndexes(): Int {
+        ensureInitialized()
+        var pending = 0
+        var offset = 0
+        while (true) {
+            val page = knowledgeDatabase.listCharacterSheets(limit = 1000, offset = offset)
+            if (page.isEmpty()) break
+            page.forEach { sheet ->
+                val characterId = sheet["character_id"].orEmpty()
+                val assetPath = sheet["asset_path"].orEmpty()
+                val sha256 = sheet["sha256"].orEmpty()
+                val sourceKey = assetPath + "#" + sha256
+                if (characterId.isNotBlank() && assetPath.isNotBlank() &&
+                    !resolutionStore.hasCharacterEvidence(characterId, "canonical_sheet", sourceKey)
+                ) {
+                    pending += 1
+                }
+            }
+            offset += page.size
+        }
+        return pending
+    }
+
     fun automationImageIds(forceAll: Boolean = false): List<Int> {
         ensureInitialized()
         return resolutionStore.listAutomationImageIds(forceAll)
