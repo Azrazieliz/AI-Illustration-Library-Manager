@@ -651,3 +651,47 @@ Rules:
 - the workbook is only populated after the pre-pass roster has been approved by the user.
 
 Pre-pass chat output is intentionally minimal: character name (including transformation suffix only when relevant) plus a visual link, so the user can approve/remove entries rapidly.
+
+
+---
+
+## 14. Character Knowledge population progress
+
+Character Knowledge population has begun using the single cumulative workbook `Asterion_Character_Knowledge_Master.xlsx`.
+
+### Completed pilot: 11eyes
+
+User-approved final roster: **20 Character Knowledge identities**.
+
+Assigned IDs:
+- `CH000001` Yuka Minase
+- `CH000002` Kukuri Tachibana
+- `CH000003` Misuzu Kusakabe
+- `CH000004` Chiara Francesca
+- `CH000005` Ema Tajima
+- `CH000006` Irene of the Dragon Skeleton
+- `CH000007` Johanna
+- `CH000008` Kanae Kuroshiba
+- `CH000009` Kaori Natsuki
+- `CH000010` Kayano Tajima
+- `CH000011` Lisette Vertorre
+- `CH000012` Mio Kouno
+- `CH000013` Misao Kusakabe
+- `CH000014` Saiko Akamine
+- `CH000015` Scholastica of the Bookshelf
+- `CH000016` Shione Azuma
+- `CH000017` Shiori Momono
+- `CH000018` Sophia Measley
+- `CH000019` Yukiko Hirohara
+- `CH000020` Kukuri Satsuki
+
+User decisions:
+- Invidia: excluded as separate Character Knowledge entry.
+- Superbia: excluded as separate Character Knowledge entry.
+- Lisette Vertorre + Lieselotte Werckmeister + source-list romanization Lizette Weltall: **one Character Knowledge identity**, with alternate names retained as aliases.
+- Of the additional web-found candidates, only Kukuri Satsuki was added.
+- Unselected web-only candidates remain recorded as exclusions in the workbook roster-decision log.
+- Source conflicts/uncertain mappings are preserved as `REVIEW` rows instead of silently forcing taxonomy values.
+- The 11eyes authoring pass completed with zero taxonomy name↔ID mapping errors, zero duplicate Character IDs, and zero duplicate Character Sheet filenames in the workbook audit.
+
+Next available base Character ID: **`CH000021`**.
