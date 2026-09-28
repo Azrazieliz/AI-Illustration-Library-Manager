@@ -66,15 +66,25 @@ internal class CharacterSheetArchiveImporter(
                 }
 
                 val output = File(targetRoot, character.characterId + ".webp")
-                val ok = output.outputStream().use { stream ->
-                    bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, SHEET_WEBP_QUALITY, stream)
+                val sourceExtension = entryName.substringAfterLast('.', "").lowercase(Locale.US)
+                val ok = if (sourceExtension == "webp") {
+                    // Character Sheet workflow already exports Asterion-ready
+                    // WebP. Preserve those bytes exactly instead of introducing
+                    // another lossy encode.
+                    output.writeBytes(bytes)
+                    true
+                } else {
+                    // Compatibility path for legacy sheets only.
+                    output.outputStream().use { stream ->
+                        bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, SHEET_WEBP_QUALITY, stream)
+                    }
                 }
                 val width = bitmap.width
                 val height = bitmap.height
                 bitmap.recycle()
                 if (!ok) {
                     skipped += 1
-                    if (unresolved.size < MAX_REPORTED_ERRORS) unresolved += entryName + " (compression failed)"
+                    if (unresolved.size < MAX_REPORTED_ERRORS) unresolved += entryName + " (storage conversion failed)"
                     output.delete()
                     continue
                 }
@@ -92,7 +102,9 @@ internal class CharacterSheetArchiveImporter(
                         "width" to width,
                         "height" to height,
                         "storage_format" to "webp",
-                        "quality" to SHEET_WEBP_QUALITY,
+                        "source_format" to sourceExtension,
+                        "preserved_source_bytes" to (sourceExtension == "webp"),
+                        "compatibility_quality" to SHEET_WEBP_QUALITY,
                     ),
                 )
                 fusion.markCharacterSheetPending(
