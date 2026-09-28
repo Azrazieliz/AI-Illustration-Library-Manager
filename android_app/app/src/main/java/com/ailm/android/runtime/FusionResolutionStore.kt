@@ -210,6 +210,35 @@ internal class FusionResolutionStore(
         )
     }
 
+    fun replaceCanonicalSheetEvidence(
+        characterId: String,
+        sourceUri: String,
+        embedding: List<Double>,
+    ) {
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete(
+                "fusion_character_visual_evidence",
+                "character_id = ? AND evidence_kind = 'canonical_sheet'",
+                arrayOf(characterId),
+            )
+            addCharacterEvidence(
+                characterId = characterId,
+                imageId = null,
+                evidenceKind = "canonical_sheet",
+                sourceUri = sourceUri,
+                embedding = embedding,
+                attributes = emptyMap(),
+                validated = true,
+                weight = 1.35,
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     fun visualSimilarity(characterId: String, queryEmbedding: List<Double>): Double? {
         if (queryEmbedding.isEmpty()) return null
         val scores = mutableListOf<Pair<Double, Double>>()
