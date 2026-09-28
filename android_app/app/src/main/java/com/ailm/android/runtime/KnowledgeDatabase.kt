@@ -443,6 +443,28 @@ internal class KnowledgeDatabase(
         }
     }
 
+    fun illustrationTaxonomyPromptContext(): String {
+        val prefixes = listOf(
+            "EY", "MO", "EX", "GE", "PO", "EN", "WE", "FR", "OR", "CA", "LI",
+            "OF", "WP", "AC", "RT",
+        )
+        val grouped = linkedMapOf<String, MutableList<String>>()
+        readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category FROM knowledge_tags ORDER BY category, tag_id",
+            emptyArray(),
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                if (prefixes.none { id.startsWith(it, ignoreCase = true) }) continue
+                val category = cursor.getString(2).ifBlank { id.takeWhile(Char::isLetter) }
+                grouped.getOrPut(category) { mutableListOf() } += id + "=" + cursor.getString(1)
+            }
+        }
+        return grouped.entries.joinToString("\n") { (category, entries) ->
+            category + ":[" + entries.joinToString("|") + "]"
+        }
+    }
+
     fun rankByFeatures(observed: Map<String, Double>, limit: Int = 80): List<KnowledgeCandidate> {
         if (observed.isEmpty()) return emptyList()
         val ids = observed.keys.map(String::trim).filter(String::isNotBlank).distinct()
