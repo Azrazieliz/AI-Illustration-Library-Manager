@@ -4,7 +4,12 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import androidx.work.BackoffPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import com.ailm.android.runtime.ai.LocalAiManager
+import com.ailm.android.workers.CharacterSheetIndexWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,6 +23,7 @@ import org.json.JSONObject
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 object StandaloneRuntime {
     private const val RUNTIME_TRACE_TAG = "AilmTraceRuntime"
@@ -582,6 +588,9 @@ object StandaloneRuntime {
                 }
                 if (sheetsImported > 0 || sheetIssues) {
                     referenceResults += sheetResult.orEmpty()
+                }
+                if (sheetsImported > 0) {
+                    scheduleCharacterSheetIndexing()
                 }
             } else {
                 ordinaryUris += uri
@@ -1317,6 +1326,17 @@ object StandaloneRuntime {
             .trim()
             .trim('.')
         return cleaned.ifBlank { "Unsorted" }.take(96).trim().ifBlank { "Unsorted" }
+    }
+
+    private fun scheduleCharacterSheetIndexing() {
+        val request = OneTimeWorkRequestBuilder<CharacterSheetIndexWorker>()
+            .setBackoffCriteria(BackoffPolicy.LINEAR, 10, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(appContext).enqueueUniqueWork(
+            CharacterSheetIndexWorker.UNIQUE_WORK_NAME,
+            ExistingWorkPolicy.KEEP,
+            request,
+        )
     }
 
     fun indexPendingCharacterSheets(limit: Int = 50): Map<String, Any> {
