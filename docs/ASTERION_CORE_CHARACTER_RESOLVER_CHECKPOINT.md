@@ -517,3 +517,42 @@ Authoritative interpretation from the Character Sheet V5 workflow and the user's
 9. The exact external packaging convention for generated sheets may later use filename association, manifest/sidecar metadata, or another explicit mapping, but this packaging detail must not be confused with the ordinary library filename scheme.
 10. Any future code/documentation that describes `Character - Series N.ext` as sheet-source material is wrong.
 
+
+
+---
+
+## 11. Final pre-Character-Knowledge alignment — transformation names and Asterion-ready sheets
+
+Before beginning Character Knowledge population, the runtime was aligned with the final external Character Sheet naming contract.
+
+### Explicit transformation naming
+
+Character Knowledge transformation entries now carry:
+- `canonical_name`: base character name, e.g. `Goku`;
+- `form_name`: visual transformation label, e.g. `Super Saiyan 3`;
+- computed `display_name`: `Goku (Super Saiyan 3)`.
+
+Rules:
+- `form_name` is required for `entry_type=transformation`;
+- it is forbidden for non-transformation entries;
+- `display_name` is indexed as a character lookup alias;
+- therefore an external finished sheet named `Goku (Super Saiyan 3) - Dragon Ball.webp` resolves directly to the corresponding `CHxxxxxx-n` entry;
+- ordinary organized transformation illustrations use the form-aware filename `Goku (Super Saiyan 3) - Dragon Ball N.ext`;
+- their physical folder remains the base character folder `Dragon Ball/Goku/`, because transformations belong to the same individual character family.
+
+Distinct identities remain separate base `CHxxxxxx` records and do not use `form_name` merely because they are related in lore.
+
+### Character Sheet WebP handling
+
+The external Character Sheet workflow now exports finished sheets as:
+- `Character - Series.webp`;
+- `Character (Transformation) - Series.webp` for transformations.
+
+Asterion's sheet importer:
+- resolves these filenames against immutable Character Knowledge;
+- recognizes the transformation form through `display_name`;
+- stores already-WebP input bytes unchanged, avoiding an unnecessary second lossy encode;
+- still supports conversion of legacy non-WebP sheets only as a compatibility path;
+- keeps `Character - Series N.ext` reserved for ordinary library images organized by Core.
+
+This section supersedes any older wording that implied Character Sheets needed pre-renaming to `CH...` filenames. Stable ID filenames remain supported as an optional unambiguous packaging method, but are not required from the external Character Sheet workflow.
