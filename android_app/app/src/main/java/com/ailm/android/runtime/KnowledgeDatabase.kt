@@ -425,7 +425,7 @@ internal class KnowledgeDatabase(
     }
 
     fun taxonomyPromptContext(): String {
-        val prefixes = listOf("HC", "HL", "HS", "EC", "ES", "EP", "ET", "SC", "BH", "BB", "BS", "BT", "SX", "AG", "SP", "SA")
+        val prefixes = listOf("HC", "HL", "HS", "EC", "ET", "SC", "BH", "BT", "BS", "BY", "SX", "AG", "SP", "SA")
         val grouped = linkedMapOf<String, MutableList<String>>()
         readableDatabase.rawQuery(
             "SELECT tag_id, canonical_name, category FROM knowledge_tags ORDER BY category, tag_id",
@@ -632,7 +632,7 @@ internal class KnowledgeDatabase(
             id.startsWith("HL", ignoreCase = true) -> 1.15
             id.startsWith("OF", ignoreCase = true) -> 1.15
             id.startsWith("SC", ignoreCase = true) -> 0.90
-            id.startsWith("BT", ignoreCase = true) || id.startsWith("BB", ignoreCase = true) -> 0.85
+            id.startsWith("BT", ignoreCase = true) || id.startsWith("BY", ignoreCase = true) -> 0.85
             id.startsWith("BS", ignoreCase = true) -> 0.60
             id.startsWith("BH", ignoreCase = true) -> 0.50
             id.startsWith("AG", ignoreCase = true) -> 0.50
