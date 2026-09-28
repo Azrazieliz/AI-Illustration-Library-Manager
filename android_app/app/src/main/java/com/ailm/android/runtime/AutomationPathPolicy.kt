@@ -4,6 +4,7 @@ internal data class ResolvedCharacterPathInput(
     val subjectIndex: Int,
     val prominence: Double,
     val canonicalName: String,
+    val displayName: String = canonicalName,
     val seriesCode: String,
     val seriesName: String,
 )
@@ -51,7 +52,7 @@ internal object AutomationPathPolicy {
         }
         val orderedNames = characters
             .sortedBy(ResolvedCharacterPathInput::subjectIndex)
-            .map(ResolvedCharacterPathInput::canonicalName)
+            .map(ResolvedCharacterPathInput::displayName)
             .filter(String::isNotBlank)
         if (orderedNames.isEmpty()) return null
 
