@@ -56,6 +56,99 @@ class ModelDownloadWorker(
 }
 
 
+class CharacterSheetIndexWorker(
+    appContext: Context,
+    params: WorkerParameters,
+) : CoroutineWorker(appContext, params) {
+    override suspend fun doWork(): Result {
+        return runCatching {
+            StandaloneRuntime.initialize(applicationContext)
+            var remaining = StandaloneRuntime.countPendingCharacterSheetIndexes()
+            if (remaining <= 0) return Result.success()
+
+            val initial = remaining
+            var indexed = 0
+            var failed = 0
+            setForeground(foregroundInfo(indexed, initial, "Preparing character visual index"))
+
+            while (!isStopped && remaining > 0 && indexed + failed < MAX_SHEETS_PER_RUN) {
+                val result = StandaloneRuntime.indexPendingCharacterSheets(BATCH_SIZE)
+                val added = (result["indexed"] as? Number)?.toInt() ?: 0
+                val batchFailed = (result["failed"] as? Number)?.toInt() ?: 0
+                indexed += added
+                failed += batchFailed
+                remaining = (result["remaining"] as? Number)?.toInt()
+                    ?: StandaloneRuntime.countPendingCharacterSheetIndexes()
+
+                setProgress(
+                    workDataOf(
+                        "indexed" to indexed,
+                        "failed" to failed,
+                        "remaining" to remaining,
+                        "initial" to initial,
+                    ),
+                )
+                val label = "Indexed " + indexed + " character sheet" +
+                    (if (indexed == 1) "" else "s") + "; " + remaining + " remaining"
+                setForeground(foregroundInfo(indexed, initial, label))
+
+                if (added == 0 && batchFailed > 0) break
+                if (added == 0 && batchFailed == 0) break
+            }
+
+            when {
+                isStopped -> Result.success()
+                remaining <= 0 -> Result.success(
+                    workDataOf("indexed" to indexed, "failed" to failed, "remaining" to 0),
+                )
+                failed > 0 && runAttemptCount >= MAX_RETRY_ATTEMPTS -> Result.failure(
+                    workDataOf("indexed" to indexed, "failed" to failed, "remaining" to remaining),
+                )
+                else -> Result.retry()
+            }
+        }.getOrElse {
+            if (runAttemptCount < MAX_RETRY_ATTEMPTS) Result.retry() else Result.failure()
+        }
+    }
+
+    private fun foregroundInfo(indexed: Int, total: Int, text: String): ForegroundInfo {
+        val manager = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "AsterionCore character indexing",
+                    NotificationManager.IMPORTANCE_LOW,
+                ),
+            )
+        }
+        val max = total.coerceAtLeast(1)
+        val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("AsterionCore character visual index")
+            .setContentText(text)
+            .setOnlyAlertOnce(true)
+            .setOngoing(indexed < total)
+            .setProgress(max, indexed.coerceIn(0, max), false)
+            .build()
+        return ForegroundInfo(
+            NOTIFICATION_ID,
+            notification,
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+        )
+    }
+
+    companion object {
+        const val UNIQUE_WORK_NAME = "asterion_character_sheet_index"
+        private const val CHANNEL_ID = "asterion_character_index"
+        private const val NOTIFICATION_ID = 4211
+        private const val BATCH_SIZE = 12
+        private const val MAX_SHEETS_PER_RUN = 240
+        private const val MAX_RETRY_ATTEMPTS = 4
+    }
+}
+
+
 class LibraryAutomationWorker(
     appContext: Context,
     params: WorkerParameters,
