@@ -466,6 +466,12 @@ internal class LlamaCppBackend(
                 {"subjects":[{"subject_index":0,"prominence":0.0,"bbox":[0.0,0.0,1.0,1.0],"attributes":[{"id":"HC001","confidence":0.0}]}]}
                 prominence is 0..1 and indicates visual prominence. bbox is normalized [x,y,width,height]
                 for that subject and each value must be 0..1. confidence is 0..1.
+                Several IDs from the same attribute family are valid when several values are genuinely visible.
+                This is especially important for hair colour and eye colour. If two distinct canonical colours are
+                clearly visible, emit both specific colour IDs rather than collapsing them to a generic Multicolored
+                value. For heterochromia, emit each visible eye-colour ID and also the canonical heterochromia
+                eye-trait ID when justified. Use a Multicolored fallback only when multiple colours are clearly
+                present but the exact canonical component colours cannot be resolved safely.
                 Omit any attribute that is hidden, ambiguous, perspective-dependent, or not safely distinguishable.
                 Use only IDs listed below. Never invent an ID, shade, body measurement, character, or series.
                 Taxonomy:
