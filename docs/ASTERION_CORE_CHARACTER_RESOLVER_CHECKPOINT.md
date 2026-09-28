@@ -556,3 +556,35 @@ Asterion's sheet importer:
 - keeps `Character - Series N.ext` reserved for ordinary library images organized by Core.
 
 This section supersedes any older wording that implied Character Sheets needed pre-renaming to `CH...` filenames. Stable ID filenames remain supported as an optional unambiguous packaging method, but are not required from the external Character Sheet workflow.
+
+
+---
+
+## 12. Character Knowledge population — mandatory pre-pass roster validation
+
+Before **every** Character Knowledge population pass, no Character Knowledge records are authored immediately from the user's source list.
+
+Mandatory sequence:
+
+1. Select the next series / bounded batch.
+2. Read every entry for that series in the user's supplied character list.
+3. Independently research the series on the public internet for relevant female characters, including obscure or lightly documented secondary characters.
+4. Merge:
+   - entries from the user's list;
+   - additional researched characters not present in the list;
+   - aliases / alternate spellings / translated names found during research.
+5. Produce a **pre-pass candidate roster** for user validation before assigning final Character Knowledge identities.
+6. The roster must distinguish, where evidence permits:
+   - proposed canonical identity;
+   - source-list name(s);
+   - web-researched additional character;
+   - alias / alternate romanization / translated name;
+   - possible transformation / age form / alternate identity;
+   - likely irrelevant background/generic entry;
+   - unresolved ambiguity requiring user judgment.
+7. Do **not** automatically exclude obscure or minor characters merely because they have little documentation or screen time. A secondary character may still be valuable to the user's illustration library, including obscure manhwa/webtoon characters or characters known under translated/generic lookup names (for example a lookup result such as "Elf").
+8. Do **not** automatically include every background/generic character either. Relevance is a user-curated library decision, not a popularity threshold.
+9. Present the roster to the user and wait for explicit validation/modification.
+10. Only the user-approved roster proceeds to Character Knowledge research, taxonomy mapping, identity/transformation resolution, ID assignment, sheet naming, validation, and compilation.
+
+This pre-pass roster approval is a hard Character Knowledge authoring gate. Popularity, fame, number of appearances, or documentation volume must never be used alone to decide inclusion/exclusion.
