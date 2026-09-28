@@ -1054,7 +1054,7 @@ object StandaloneRuntime {
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
         val organization = organizeAutonomousImage(imageId, workflow)
 
-        val hasCharacterKnowledge = workflow["character_resolution_available"] == true
+        val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
         val needsReview = workflow["queued_for_review"] == true
         val organizationFailed = organization["ok"] == false &&
             organization["status"]?.toString() !in setOf("skipped", "unchanged")
@@ -1398,7 +1398,13 @@ object StandaloneRuntime {
     }
 
     fun runCharacterRecognitionPipeline(payload: Map<String, Any>): Map<String, Any> {
-        return runAiPipeline(payload + mapOf("task_type" to "character_recognition"))
+        ensureInitialized()
+        return runAiPipeline(
+            payload + mapOf(
+                "task_type" to "character_recognition",
+                "character_taxonomy_context" to knowledgeDatabase.taxonomyPromptContext(),
+            ),
+        )
     }
 
     fun runSeriesRecognitionPipeline(payload: Map<String, Any>): Map<String, Any> {
