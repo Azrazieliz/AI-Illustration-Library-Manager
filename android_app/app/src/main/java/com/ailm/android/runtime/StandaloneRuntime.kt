@@ -1321,69 +1321,62 @@ object StandaloneRuntime {
 
     fun indexPendingCharacterSheets(limit: Int = 50): Map<String, Any> {
         ensureInitialized()
-        val boundedLimit = limit.coerceIn(1, 250)
-        val total = knowledgeDatabase.characterSheetCount()
-        if (total == 0) {
+        val pending = resolutionStore.pendingCharacterSheets(limit.coerceIn(1, 250))
+        if (pending.isEmpty()) {
             return mapOf(
                 "ok" to true,
                 "indexed" to 0,
                 "failed" to 0,
                 "remaining" to 0,
-                "message" to "No canonical character sheets are installed.",
+                "message" to "Canonical character sheet visual index is current.",
             )
         }
 
-        var offset = 0
         var indexed = 0
         var failed = 0
-        var examined = 0
-        while (offset < total && examined < boundedLimit * 8 && indexed + failed < boundedLimit) {
-            val page = knowledgeDatabase.listCharacterSheets(limit = minOf(250, boundedLimit * 2), offset = offset)
-            if (page.isEmpty()) break
-            offset += page.size
-            examined += page.size
-
-            page.forEach { sheet ->
-                if (indexed + failed >= boundedLimit) return@forEach
-                val characterId = sheet["character_id"].orEmpty()
-                val assetPath = sheet["asset_path"].orEmpty()
-                val sha256 = sheet["sha256"].orEmpty()
-                if (characterId.isBlank() || assetPath.isBlank()) {
-                    failed += 1
-                    return@forEach
+        pending.forEach { sheet ->
+            val characterId = sheet["character_id"].orEmpty()
+            val sourceKey = sheet["source_uri"].orEmpty()
+            val assetPath = sourceKey.substringBeforeLast('#', sourceKey)
+            if (characterId.isBlank() || assetPath.isBlank()) {
+                failed += 1
+                if (characterId.isNotBlank()) {
+                    resolutionStore.failCharacterSheetIndex(characterId, "Character sheet index entry is missing an asset path.", retryable = false)
                 }
-                val sourceKey = assetPath + "#" + sha256
-                if (resolutionStore.hasCharacterEvidence(characterId, "canonical_sheet", sourceKey)) {
-                    return@forEach
-                }
+                return@forEach
+            }
 
-                val response = localAiManager.runPipeline(
-                    mapOf(
-                        "task_type" to "embedding_generation",
-                        "stages" to listOf("embedding_generation"),
-                        "path" to assetPath,
-                        "image_path" to assetPath,
-                        "max_retries" to 1,
-                    ),
+            val response = localAiManager.runPipeline(
+                mapOf(
+                    "task_type" to "embedding_generation",
+                    "stages" to listOf("embedding_generation"),
+                    "path" to assetPath,
+                    "image_path" to assetPath,
+                    "max_retries" to 1,
+                ),
+            )
+            val result = (response["result"] as? Map<*, *>)?.toStringAnyMap().orEmpty()
+            val embedding = (result["embedding"] as? List<*>)
+                ?.mapNotNull { (it as? Number)?.toDouble() }
+                .orEmpty()
+
+            if (response["ok"] == true && embedding.isNotEmpty()) {
+                resolutionStore.replaceCanonicalSheetEvidence(
+                    characterId = characterId,
+                    sourceUri = sourceKey,
+                    embedding = embedding,
                 )
-                val result = (response["result"] as? Map<*, *>)?.toStringAnyMap().orEmpty()
-                val embedding = (result["embedding"] as? List<*>)
-                    ?.mapNotNull { (it as? Number)?.toDouble() }
-                    .orEmpty()
-                if (response["ok"] == true && embedding.isNotEmpty()) {
-                    resolutionStore.replaceCanonicalSheetEvidence(
-                        characterId = characterId,
-                        sourceUri = sourceKey,
-                        embedding = embedding,
-                    )
-                    indexed += 1
-                } else {
-                    failed += 1
-                }
+                resolutionStore.completeCharacterSheetIndex(characterId, sourceKey)
+                indexed += 1
+            } else {
+                val message = response["message"]?.toString().orEmpty()
+                    .ifBlank { "Embedding generation returned no character-sheet vector." }
+                resolutionStore.failCharacterSheetIndex(characterId, message, retryable = true)
+                failed += 1
             }
         }
 
-        val remaining = countPendingCharacterSheetIndexes()
+        val remaining = resolutionStore.characterSheetIndexRemaining()
         return mapOf(
             "ok" to (failed == 0),
             "indexed" to indexed,
@@ -1399,25 +1392,7 @@ object StandaloneRuntime {
 
     fun countPendingCharacterSheetIndexes(): Int {
         ensureInitialized()
-        var pending = 0
-        var offset = 0
-        while (true) {
-            val page = knowledgeDatabase.listCharacterSheets(limit = 1000, offset = offset)
-            if (page.isEmpty()) break
-            page.forEach { sheet ->
-                val characterId = sheet["character_id"].orEmpty()
-                val assetPath = sheet["asset_path"].orEmpty()
-                val sha256 = sheet["sha256"].orEmpty()
-                val sourceKey = assetPath + "#" + sha256
-                if (characterId.isNotBlank() && assetPath.isNotBlank() &&
-                    !resolutionStore.hasCharacterEvidence(characterId, "canonical_sheet", sourceKey)
-                ) {
-                    pending += 1
-                }
-            }
-            offset += page.size
-        }
-        return pending
+        return resolutionStore.characterSheetIndexRemaining()
     }
 
     fun automationImageIds(forceAll: Boolean = false): List<Int> {
