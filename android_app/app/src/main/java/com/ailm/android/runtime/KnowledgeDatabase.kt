@@ -318,6 +318,38 @@ internal class KnowledgeDatabase(
         }
     }
 
+    fun listCharacterSheets(limit: Int = 500, offset: Int = 0): List<Map<String, String>> {
+        val boundedLimit = limit.coerceIn(1, 5_000)
+        val boundedOffset = offset.coerceAtLeast(0)
+        return buildList {
+            readableDatabase.rawQuery(
+                """
+                SELECT s.sheet_asset_id, s.character_id, s.asset_path, s.sha256
+                FROM knowledge_character_sheets s
+                ORDER BY s.character_id
+                LIMIT ? OFFSET ?
+                """.trimIndent(),
+                arrayOf(boundedLimit.toString(), boundedOffset.toString()),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    add(
+                        mapOf(
+                            "sheet_asset_id" to cursor.getString(0),
+                            "character_id" to cursor.getString(1),
+                            "asset_path" to cursor.getString(2),
+                            "sha256" to cursor.getString(3),
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun characterSheetCount(): Int = readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM knowledge_character_sheets",
+        emptyArray(),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+
     fun hasCharacters(): Boolean = readableDatabase.rawQuery(
         "SELECT EXISTS(SELECT 1 FROM knowledge_characters LIMIT 1)",
         emptyArray(),
