@@ -1177,68 +1177,50 @@ object StandaloneRuntime {
         }
 
         val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
-        val targetFolder: String
-        val relativeFolder: String
-        val prefix: String
-        val primarySeries: String
-        val primaryCharacter: String
-
-        if (originalCharacter) {
-            val folderName = "Original Characters"
-            targetFolder = getOrCreateAutomationFolder(root, folderName)
-                ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create Original Characters folder.")
-            relativeFolder = folderName
-            prefix = "Original Character"
-            primarySeries = ""
-            primaryCharacter = workflow["original_character_cluster_id"]?.toString().orEmpty()
-        } else {
-            val primary = resolvedCharacters.maxByOrNull {
-                (it["prominence"] as? Number)?.toDouble() ?: 0.0
-            } ?: resolvedCharacters.first()
-            primarySeries = primary["series_name"]?.toString()?.trim().orEmpty()
-            primaryCharacter = primary["canonical_name"]?.toString()?.trim().orEmpty()
-            if (primarySeries.isBlank() || primaryCharacter.isBlank()) {
-                return mapOf(
-                    "ok" to true,
-                    "status" to "unchanged",
-                    "message" to "Resolved character is missing canonical Character Knowledge path data.",
+        val pathInputs = resolvedCharacters.mapNotNull { character ->
+            val canonicalName = character["canonical_name"]?.toString()?.trim().orEmpty()
+            val seriesCode = character["series_code"]?.toString()?.trim().orEmpty()
+            val seriesName = character["series_name"]?.toString()?.trim().orEmpty()
+            if (canonicalName.isBlank() || seriesCode.isBlank() || seriesName.isBlank()) {
+                null
+            } else {
+                ResolvedCharacterPathInput(
+                    subjectIndex = (character["subject_index"] as? Number)?.toInt() ?: Int.MAX_VALUE,
+                    prominence = (character["prominence"] as? Number)?.toDouble()?.coerceIn(0.0, 1.0) ?: 0.0,
+                    canonicalName = canonicalName,
+                    seriesCode = seriesCode,
+                    seriesName = seriesName,
                 )
             }
-
-            val seriesFolderName = safeAutomationPathSegment(primarySeries)
-            val seriesFolder = getOrCreateAutomationFolder(root, seriesFolderName)
-                ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create series folder '" + seriesFolderName + "'.")
-
-            val seriesCodes = resolvedCharacters
-                .mapNotNull { it["series_code"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
-                .distinct()
-            val singleCharacter = resolvedCharacters.size == 1
-            val intraSeriesGroup = resolvedCharacters.size > 1 && seriesCodes.size == 1
-
-            if (singleCharacter) {
-                val characterFolderName = safeAutomationPathSegment(primaryCharacter)
-                targetFolder = getOrCreateAutomationFolder(seriesFolder, characterFolderName)
-                    ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create character folder '" + characterFolderName + "'.")
-                relativeFolder = seriesFolderName + "/" + characterFolderName
-            } else if (intraSeriesGroup) {
-                targetFolder = seriesFolder
-                relativeFolder = seriesFolderName
-            } else {
-                // Inter-series images are owned physically by the most prominent
-                // character. Every other identity remains attached in Fusion and
-                // remains present in the multi-character filename.
-                val characterFolderName = safeAutomationPathSegment(primaryCharacter)
-                targetFolder = getOrCreateAutomationFolder(seriesFolder, characterFolderName)
-                    ?: return mapOf("ok" to false, "status" to "folder_failed", "message" to "Unable to create primary character folder '" + characterFolderName + "'.")
-                relativeFolder = seriesFolderName + "/" + characterFolderName
-            }
-
-            val names = resolvedCharacters
-                .sortedBy { (it["subject_index"] as? Number)?.toInt() ?: Int.MAX_VALUE }
-                .mapNotNull { it["canonical_name"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
-                .map(::safeAutomationPathSegment)
-            prefix = names.joinToString(" - ") + " - " + safeAutomationPathSegment(primarySeries)
         }
+        val pathPlan = AutomationPathPolicy.plan(
+            characters = pathInputs,
+            originalCharacter = originalCharacter,
+            originalCharacterClusterId = workflow["original_character_cluster_id"]?.toString().orEmpty(),
+        ) ?: return mapOf(
+            "ok" to true,
+            "status" to "unchanged",
+            "message" to "Resolved character is missing canonical Character Knowledge path data.",
+        )
+
+        var targetFolder = root
+        val safeFolderSegments = mutableListOf<String>()
+        pathPlan.folderSegments.forEach { rawSegment ->
+            val safeSegment = safeAutomationPathSegment(rawSegment)
+            targetFolder = getOrCreateAutomationFolder(targetFolder, safeSegment)
+                ?: return mapOf(
+                    "ok" to false,
+                    "status" to "folder_failed",
+                    "message" to "Unable to create automation folder '" + safeSegment + "'.",
+                )
+            safeFolderSegments += safeSegment
+        }
+        val relativeFolder = safeFolderSegments.joinToString("/")
+        val prefix = pathPlan.filenameParts
+            .map(::safeAutomationPathSegment)
+            .joinToString(" - ")
+        val primarySeries = pathPlan.primarySeries
+        val primaryCharacter = pathPlan.primaryCharacter
 
         val sequence = nextAutomationSequenceNumber(targetFolder, prefix, extension)
         val stem = prefix + " " + sequence
