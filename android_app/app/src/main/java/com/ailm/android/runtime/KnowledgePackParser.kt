@@ -128,11 +128,28 @@ class KnowledgePackParser {
     private fun parseRawEntry(index: Int, objectText: String): ParsedKnowledgeEntry? {
         val properties = LocalAiJson.decodeMap(objectText)
         if (properties.isEmpty()) return null
+        val normalizedId = firstNonBlank(
+            properties["id"].stringValue(),
+            properties["canonical_id"].stringValue(),
+            properties["knowledge_id"].stringValue(),
+            properties["entry_id"].stringValue(),
+            properties["tag_id"].stringValue(),
+            properties["series_code"].stringValue(),
+            properties["character_id"].stringValue(),
+            properties["outfit_id"].stringValue(),
+            properties["weapon_id"].stringValue(),
+        )
+        val normalizedName = firstNonBlank(
+            properties["name"].stringValue(),
+            properties["canonical_name"].stringValue(),
+            properties["character_name"].stringValue(),
+            properties["title"].stringValue(),
+        )
         return ParsedKnowledgeEntry(
             index = index,
             raw = ParsedJsonObject(properties),
-            id = properties["id"].stringValue(),
-            name = properties["name"].stringValue(),
+            id = normalizedId,
+            name = normalizedName,
             categories = properties["categories"].stringListValue(),
             taxonomy = ParsedJsonObject(properties["taxonomy"].mapValue()),
             metadata = ParsedJsonObject(properties["metadata"].mapValue()),
