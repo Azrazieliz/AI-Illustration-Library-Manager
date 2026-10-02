@@ -1172,14 +1172,16 @@ object StandaloneRuntime {
                 ?.toMap()
             }
             .orEmpty()
-        val qwenFailed = if (qwenResponse["ok"] == true) {
+        val qwenParseError = qwenResult["parse_error"]?.toString().orEmpty()
+        val qwenSucceeded = qwenResponse["ok"] == true && qwenParseError.isBlank()
+        val qwenFailed = if (qwenSucceeded) {
             emptyList()
         } else {
             listOf(
                 mapOf(
                     "stage_type" to "qwen_semantic_bundle",
-                    "status" to qwenResponse["status"].toString(),
-                    "message" to qwenResponse["message"]?.toString().orEmpty(),
+                    "status" to if (qwenParseError.isNotBlank()) "invalid_output" else qwenResponse["status"].toString(),
+                    "message" to qwenParseError.ifBlank { qwenResponse["message"]?.toString().orEmpty() },
                 ),
             )
         }
@@ -1198,7 +1200,7 @@ object StandaloneRuntime {
                             "stage_type" to "qwen_semantic_bundle",
                             "model_id" to qwenModel.first,
                             "model_version" to qwenModel.second,
-                            "status" to if (qwenResponse["ok"] == true) "succeeded" else qwenResponse["status"].toString(),
+                            "status" to if (qwenSucceeded) "succeeded" else if (qwenParseError.isNotBlank()) "invalid_output" else qwenResponse["status"].toString(),
                             "message" to qwenResponse["message"]?.toString().orEmpty(),
                         ),
                     )
