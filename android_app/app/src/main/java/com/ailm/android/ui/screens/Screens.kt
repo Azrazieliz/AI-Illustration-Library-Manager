@@ -148,11 +148,15 @@ fun ScreenScaffold(
     ) { uris ->
         if (uris.isNotEmpty()) {
             uris.forEach { uri ->
-                runCatching {
-                    context.contentResolver.takePersistableUriPermission(
-                        uri,
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                    )
+                val resolver = context.contentResolver
+                val readWrite = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                val persisted = runCatching {
+                    resolver.takePersistableUriPermission(uri, readWrite)
+                }.isSuccess
+                if (!persisted) {
+                    runCatching {
+                        resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
                 }
             }
             appViewModel.importCloudImages(uris)
