@@ -8,6 +8,7 @@ import androidx.work.BackoffPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.documentfile.provider.DocumentFile
 import com.ailm.android.runtime.ai.LocalAiManager
 import com.ailm.android.workers.CharacterSheetIndexWorker
 import kotlinx.coroutines.CoroutineScope
@@ -1609,6 +1610,76 @@ object StandaloneRuntime {
         }
         repository.registerFolder(uri, enabled = true)
         return true
+    }
+
+    /**
+     * Imports images exposed through Android's document picker (including cloud
+     * providers such as TeraBox when they register for ACTION_OPEN_DOCUMENT)
+     * into a writable SAF library. Cloud document URIs are copied locally first
+     * so later rename/move organization is fully under Asterion's control.
+     */
+    fun importCloudImages(uris: List<Uri>, targetRootUri: String): Map<String, Any> {
+        ensureInitialized()
+        val root = targetRootUri.trim()
+        if (root.isBlank()) {
+            return mapOf("ok" to false, "imported" to 0, "failed" to uris.size, "message" to "Choose a writable library folder first.")
+        }
+        if (!storageProvider.exists(root)) {
+            return mapOf("ok" to false, "imported" to 0, "failed" to uris.size, "message" to "Selected library folder is no longer available.")
+        }
+
+        val importFolderName = "Cloud Imports"
+        val importFolder = storageProvider.listChildren(root)
+            .firstOrNull { node -> node.isDirectory && node.name.equals(importFolderName, ignoreCase = true) }
+            ?.uri
+            ?: storageProvider.createFolder(root, importFolderName).takeIf { it.ok }?.uri
+            ?: return mapOf("ok" to false, "imported" to 0, "failed" to uris.size, "message" to "Unable to create Cloud Imports folder.")
+
+        var imported = 0
+        var failed = 0
+        val failures = mutableListOf<String>()
+
+        uris.distinctBy(Uri::toString).forEach { sourceUri ->
+            val source = DocumentFile.fromSingleUri(appContext, sourceUri)
+            val sourceName = source?.name
+                ?.trim()
+                ?.takeIf(String::isNotBlank)
+                ?: sourceUri.lastPathSegment?.substringAfterLast('/')?.trim().orEmpty().ifBlank { "cloud_image" }
+
+            if (!sourceName.isImageName()) {
+                failed += 1
+                failures += "$sourceName: unsupported image type"
+                return@forEach
+            }
+
+            val copied = runCatching {
+                storageProvider.copy(sourceUri.toString(), importFolder, sourceName)
+            }.getOrElse { error ->
+                StorageWriteResult(ok = false, message = error.message ?: error.javaClass.simpleName)
+            }
+
+            if (copied.ok) {
+                imported += 1
+            } else {
+                failed += 1
+                failures += "$sourceName: " + copied.message.ifBlank { "copy failed" }
+            }
+        }
+
+        val scan = if (imported > 0) synchronizeFolderIncremental(root) else emptyMap()
+        return mapOf(
+            "ok" to (imported > 0 && failed == 0),
+            "imported" to imported,
+            "failed" to failed,
+            "import_folder_uri" to importFolder,
+            "scan" to scan,
+            "failures" to failures,
+            "message" to when {
+                imported == 0 -> "No cloud images were imported."
+                failed == 0 -> "Imported $imported cloud image(s)."
+                else -> "Imported $imported cloud image(s); $failed failed."
+            },
+        )
     }
 
     fun setLibraryFolderEnabled(folderUri: String, enabled: Boolean): Boolean {
