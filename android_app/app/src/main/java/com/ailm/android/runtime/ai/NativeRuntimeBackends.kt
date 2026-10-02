@@ -406,8 +406,13 @@ internal class LlamaCppBackend(
         if (prompt.isBlank()) {
             return incompatible("tokenization_failed: request text is missing")
         }
+        val semanticBundle = request.payload["asterion_semantic_bundle"] == true
         val maxNewTokens = ((request.payload["max_new_tokens"] as? Number)?.toInt()
-            ?: if (normalizedTask == "tag_prediction") 192 else 128).coerceIn(1, 4096)
+            ?: when {
+                semanticBundle -> 1024
+                normalizedTask == "tag_prediction" -> 192
+                else -> 128
+            }).coerceIn(1, 4096)
         return try {
             activeHandles[request.sessionId] = bridge to nativeHandle
             val multimodal = handle.metadata["multimodal"] == true
@@ -433,7 +438,7 @@ internal class LlamaCppBackend(
                     "sampling_policy" to "greedy",
                     "native_backend" to "llama.cpp",
                     "llama_cpp_revision" to "5266f24da75dc449bd56cbed7addb9c8e4a6a73e",
-                    "result" to semanticQwenResult(normalizedTask, generated),
+                    "result" to semanticQwenResult(normalizedTask, generated, request.payload),
                 ),
             )
         } catch (error: Throwable) {
@@ -453,8 +458,56 @@ internal class LlamaCppBackend(
             if (ocr.isNotBlank()) append("\nDetected text: ").append(ocr)
         }
         return when (taskType) {
-            "captioning" ->
-                "Describe the image accurately in one concise sentence. Mention the main subject, appearance, clothing, pose, and setting when visible. Return only the caption."
+            "captioning" -> {
+                if (payload["asterion_semantic_bundle"] == true) {
+                    val characterTaxonomy = payload["character_taxonomy_context"]?.toString()?.trim().orEmpty()
+                    val illustrationTaxonomy = payload["illustration_taxonomy_context"]?.toString()?.trim().orEmpty()
+                    val nsfw = payload["nsfw_result"]?.toString()?.trim().orEmpty()
+                    """
+                    Analyze this image once for Asterion Core and return STRICT JSON only.
+                    Do not identify a character or series by name. Character identity is resolved later by Character Knowledge.
+
+                    Required JSON schema:
+                    {
+                      "caption":"one concise factual sentence",
+                      "normalized_context":"concise canonical visual description",
+                      "tags":["canonical illustration taxonomy ID", "..."],
+                      "subjects":[
+                        {
+                          "subject_index":0,
+                          "prominence":0.0,
+                          "bbox":[0.0,0.0,1.0,1.0],
+                          "attributes":[{"id":"canonical character taxonomy ID","confidence":0.0}]
+                        }
+                      ]
+                    }
+
+                    Rules:
+                    - caption: visible facts only.
+                    - normalized_context: preserve visible meaning; invent nothing.
+                    - tags: use ONLY IDs from Illustration Taxonomy; omit uncertain concepts.
+                    - subjects: use ONLY IDs from Character Taxonomy; describe visible physical attributes only.
+                    - Never emit character names, series names, guessed identities, or IDs not present in the supplied taxonomies.
+                    - confidence and prominence are 0..1. bbox is normalized [x,y,width,height].
+                    - If Character Taxonomy is empty, return "subjects":[].
+                    - Return JSON only, no markdown.
+
+                    OCR context:
+                    ${payload["ocr_text"]?.toString()?.trim().orEmpty()}
+
+                    NSFW classifier context:
+                    $nsfw
+
+                    Illustration Taxonomy:
+                    $illustrationTaxonomy
+
+                    Character Taxonomy:
+                    $characterTaxonomy
+                    """.trimIndent()
+                } else {
+                    "Describe the image accurately in one concise sentence. Mention the main subject, appearance, clothing, pose, and setting when visible. Return only the caption."
+                }
+            }
             "series_recognition" ->
                 "Series identity is not an autonomous source of truth. This diagnostic task may suggest a title, but automation derives series from resolved Character Knowledge. Return only one title or UNKNOWN." + context
             "character_recognition" -> {
@@ -495,10 +548,18 @@ internal class LlamaCppBackend(
         }
     }
 
-    private fun semanticQwenResult(taskType: String, generated: String): Map<String, Any> {
+    private fun semanticQwenResult(
+        taskType: String,
+        generated: String,
+        payload: Map<String, Any> = emptyMap(),
+    ): Map<String, Any> {
         val clean = generated.trim()
         return when (taskType) {
-            "captioning" -> mapOf("caption" to clean)
+            "captioning" -> if (payload["asterion_semantic_bundle"] == true) {
+                parseAsterionSemanticBundle(clean)
+            } else {
+                mapOf("caption" to clean)
+            }
             "character_recognition" -> parseCharacterObservationJson(clean)
             "series_recognition" -> {
                 val top = clean.lineSequence().firstOrNull()?.trim()?.trim('"', '\'', '.', ',').orEmpty()
@@ -524,6 +585,80 @@ internal class LlamaCppBackend(
             "normalization" -> mapOf("text" to clean)
             "prompt_generation" -> mapOf("prompt" to clean)
             else -> mapOf("text" to clean)
+        }
+    }
+
+    private fun parseAsterionSemanticBundle(generated: String): Map<String, Any> {
+        val candidate = generated
+            .substringAfter('`', generated)
+            .replace("json\n", "", ignoreCase = true)
+            .trim()
+            .let { text ->
+                val start = text.indexOf('{')
+                val end = text.lastIndexOf('}')
+                if (start >= 0 && end > start) text.substring(start, end + 1) else text
+            }
+
+        return runCatching {
+            val root = JSONObject(candidate)
+            val tagsArray = root.optJSONArray("tags") ?: JSONArray()
+            val tags = buildList {
+                for (index in 0 until tagsArray.length()) {
+                    tagsArray.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+                }
+            }.distinct()
+
+            val subjectsArray = root.optJSONArray("subjects") ?: JSONArray()
+            val subjects = buildList {
+                for (index in 0 until subjectsArray.length()) {
+                    val subject = subjectsArray.optJSONObject(index) ?: continue
+                    val attributesArray = subject.optJSONArray("attributes") ?: JSONArray()
+                    val attributes = buildList {
+                        for (attrIndex in 0 until attributesArray.length()) {
+                            val attribute = attributesArray.optJSONObject(attrIndex) ?: continue
+                            val id = attribute.optString("id").trim()
+                            if (id.isBlank()) continue
+                            add(
+                                mapOf(
+                                    "id" to id,
+                                    "confidence" to attribute.optDouble("confidence", 0.70).coerceIn(0.0, 1.0),
+                                ),
+                            )
+                        }
+                    }
+                    val bboxArray = subject.optJSONArray("bbox") ?: JSONArray()
+                    val bbox = (0 until minOf(4, bboxArray.length()))
+                        .map { bboxArray.optDouble(it, Double.NaN) }
+                        .takeIf { values -> values.size == 4 && values.all(Double::isFinite) }
+                        ?.map { it.coerceIn(0.0, 1.0) }
+                        .orEmpty()
+                    add(
+                        mapOf(
+                            "subject_index" to subject.optInt("subject_index", index),
+                            "prominence" to subject.optDouble("prominence", 1.0).coerceIn(0.0, 1.0),
+                            "bbox" to bbox,
+                            "attributes" to attributes,
+                        ),
+                    )
+                }
+            }
+
+            mapOf(
+                "caption" to root.optString("caption").trim(),
+                "normalized_context" to root.optString("normalized_context").trim(),
+                "tags" to tags,
+                "subjects" to subjects,
+                "raw_semantic_json" to candidate,
+            )
+        }.getOrElse { error ->
+            mapOf(
+                "caption" to "",
+                "normalized_context" to "",
+                "tags" to emptyList<String>(),
+                "subjects" to emptyList<Map<String, Any>>(),
+                "raw_semantic_json" to generated.trim(),
+                "parse_error" to (error.message ?: error.javaClass.simpleName),
+            )
         }
     }
 
