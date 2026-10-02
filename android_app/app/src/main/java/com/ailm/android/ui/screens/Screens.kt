@@ -213,14 +213,29 @@ fun ScreenScaffold(
             val mime = runCatching {
                 context.contentResolver.getType(uri)?.lowercase().orEmpty()
             }.getOrDefault("")
-            selectedKnowledgeDocumentName = displayName
+            val hasZipSignature = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    val signature = ByteArray(4)
+                    val count = input.read(signature)
+                    count == 4 &&
+                        signature[0] == 0x50.toByte() &&
+                        signature[1] == 0x4B.toByte() &&
+                        (
+                            (signature[2] == 0x03.toByte() && signature[3] == 0x04.toByte()) ||
+                                (signature[2] == 0x05.toByte() && signature[3] == 0x06.toByte()) ||
+                                (signature[2] == 0x07.toByte() && signature[3] == 0x08.toByte())
+                            )
+                } ?: false
+            }.getOrDefault(false)
+            selectedKnowledgeDocumentName = displayName.ifBlank { "Selected document" }
             selectedKnowledgeDocumentIsArchive =
                 displayName.lowercase().endsWith(".zip") ||
                     mime in setOf(
                         "application/zip",
                         "application/x-zip-compressed",
                         "application/x-zip",
-                    )
+                    ) ||
+                    hasZipSignature
         }
     }
 
@@ -552,6 +567,7 @@ fun ScreenScaffold(
             onSetActiveModel = appViewModel::setActiveAiModel,
             onClearActiveModel = appViewModel::clearActiveAiModel,
             selectedKnowledgeDocumentName = selectedKnowledgeDocumentName,
+            selectedKnowledgeDocumentAvailable = selectedKnowledgeDocument != null,
             selectedKnowledgeDocumentIsArchive = selectedKnowledgeDocumentIsArchive,
             onChooseKnowledgeDocument = chooseKnowledgeDocument,
             onPreviewKnowledgeDocument = { form ->
@@ -2710,6 +2726,7 @@ private fun AiModelManagerScreen(
     onSetActiveModel: (String, String, String) -> Unit,
     onClearActiveModel: (String) -> Unit,
     selectedKnowledgeDocumentName: String,
+    selectedKnowledgeDocumentAvailable: Boolean,
     selectedKnowledgeDocumentIsArchive: Boolean,
     onChooseKnowledgeDocument: () -> Unit,
     onPreviewKnowledgeDocument: (Map<String, String>) -> Unit,
@@ -2741,7 +2758,7 @@ private fun AiModelManagerScreen(
     var fusionPrettyExport by rememberSaveable { mutableStateOf(true) }
 
     val hasSelectedModelDocument = selectedModelDocumentName.isNotBlank()
-    val hasSelectedKnowledgeDocument = selectedKnowledgeDocumentName.isNotBlank()
+    val hasSelectedKnowledgeDocument = selectedKnowledgeDocumentAvailable
     val hasSelectedFusionDocument = selectedFusionDocumentName.isNotBlank()
     val latestImportId = state.aiLastPipelineResult["import_id"]?.toString().orEmpty()
     val importControlId = latestImportId
@@ -3070,7 +3087,7 @@ private fun AiModelManagerScreen(
                 Text("Knowledge packs are installed and managed here without affecting Fusion database maintenance.", style = MaterialTheme.typography.bodySmall)
                 Text(
                     if (hasSelectedKnowledgeDocument) {
-                        "Selected knowledge file: $selectedKnowledgeDocumentName"
+                        "Selected knowledge file: ${selectedKnowledgeDocumentName.ifBlank { "Selected document" }}"
                     } else {
                         "Select a Knowledge JSON or ZIP reference release."
                     },
