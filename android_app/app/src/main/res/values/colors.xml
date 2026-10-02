@@ -8,4 +8,5 @@
     <color name="asterion_gold_shadow">#A67C1A</color>
     <color name="ic_launcher_background">#080808</color>
     <color name="asterion_splash_bg">#080808</color>
+    <color name="asterion_splash_center">#12100C</color>
 </resources>
