@@ -47,18 +47,13 @@ object StandaloneRuntime {
     // next library image. The execution planner selects the installed model for
     // each task (PaddleOCR, NSFW classifier, Qwen-VL, Nomic, etc.) automatically.
     private val autonomousImageStageCandidates = listOf(
-        // Cheap/specialized analysis first; their outputs are available to the
-        // later semantic stages for the same image.
         "ocr",
         "nsfw_classification",
         "embedding_generation",
         "aesthetic_scoring",
-        // Keep the Qwen-VL semantic stages contiguous so the runtime can reuse
-        // a warm model/session rather than bouncing between large backends.
+        // One Qwen-VL inference emits caption + canonical illustration tags +
+        // normalized visual context + observable character attributes.
         "captioning",
-        "tag_prediction",
-        "normalization",
-        "character_recognition",
     )
 
     private val stateMutex = Mutex()
@@ -1056,23 +1051,158 @@ object StandaloneRuntime {
         ensureInitialized()
         val imageId = payload["image_id"].toIntOrNullValue()
             ?: return mapOf("ok" to false, "status" to "invalid", "message" to "image_id is required")
-        val stages = resolvedAutonomousImageStages()
-        if (stages.isEmpty()) {
+
+        val readiness = automationReadiness()
+        if (readiness["ready"] != true) {
             return mapOf(
                 "ok" to false,
                 "status" to "incompatible",
-                "message" to "No installed execution-ready model can run an automation stage.",
+                "message" to readiness["message"]?.toString().orEmpty().ifBlank { "Automation is not ready." },
+                "missing_stages" to (readiness["missing_stages"] ?: emptyList<String>()),
             )
         }
-        val prepared = prepareAiPipelinePayload(payload + mapOf(
-            "task_type" to "autonomous_image_workflow",
-            "stages" to stages,
-            "continue_on_stage_error" to true,
-            "character_taxonomy_context" to knowledgeDatabase.taxonomyPromptContext(),
-            "illustration_taxonomy_context" to knowledgeDatabase.illustrationTaxonomyPromptContext(),
-        ))
-        val response = localAiManager.runMultiStagePipeline(prepared)
-        val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
+
+        val earlyStages = resolvedAutonomousImageStages().filter {
+            it in setOf("ocr", "nsfw_classification", "embedding_generation", "aesthetic_scoring")
+        }
+        val preparedBase = prepareAiPipelinePayload(
+            payload + mapOf(
+                "task_type" to "autonomous_image_workflow",
+                "character_taxonomy_context" to knowledgeDatabase.taxonomyPromptContext(),
+                "illustration_taxonomy_context" to knowledgeDatabase.illustrationTaxonomyPromptContext(),
+            ),
+        )
+
+        val earlyResponse = localAiManager.runMultiStagePipeline(
+            preparedBase + mapOf(
+                "stages" to earlyStages,
+                "continue_on_stage_error" to true,
+            ),
+        )
+        val earlyOutputs = (earlyResponse["stage_outputs"] as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (key, value) ->
+                val stage = key?.toString()?.trim().orEmpty()
+                val output = (value as? Map<*, *>)?.entries
+                    ?.mapNotNull { (nestedKey, nestedValue) ->
+                        nestedKey?.toString()?.let { text -> nestedValue?.let { text to it } }
+                    }
+                    ?.toMap()
+                    .orEmpty()
+                if (stage.isBlank()) null else stage to output
+            }
+            ?.toMap()
+            .orEmpty()
+
+        val ocrText = earlyOutputs["ocr"].resultMap()["text"]?.toString().orEmpty()
+        val nsfwResult = earlyOutputs["nsfw_classification"].resultMap()
+
+        val qwenModel = resolvedQwenSemanticModel()
+            ?: return mapOf(
+                "ok" to false,
+                "status" to "incompatible",
+                "message" to "No execution-ready Qwen-VL model is installed for the semantic image pass.",
+            )
+
+        val qwenResponse = localAiManager.runPipeline(
+            preparedBase + mapOf(
+                "task_type" to "captioning",
+                "stages" to listOf("captioning"),
+                "model_id" to qwenModel.first,
+                "version" to qwenModel.second,
+                "asterion_semantic_bundle" to true,
+                "ocr_text" to ocrText,
+                "nsfw_result" to nsfwResult,
+                "max_new_tokens" to 1024,
+                "continue_on_stage_error" to false,
+            ),
+        )
+
+        val qwenRaw = (qwenResponse["raw_result"] as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
+            ?.toMap()
+            .orEmpty()
+        val qwenResult = qwenRaw.resultMap()
+
+        val syntheticOutputs = linkedMapOf<String, Map<String, Any>>()
+        syntheticOutputs.putAll(earlyOutputs)
+        if (qwenResponse["ok"] == true) {
+            val caption = qwenResult["caption"]?.toString().orEmpty()
+            val normalized = qwenResult["normalized_context"]?.toString().orEmpty()
+            val tags = (qwenResult["tags"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+            val subjects = (qwenResult["subjects"] as? List<*>)?.mapNotNull { subject ->
+                (subject as? Map<*, *>)?.entries
+                    ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
+                    ?.toMap()
+            }.orEmpty()
+
+            syntheticOutputs["captioning"] = mapOf(
+                "result" to mapOf("caption" to caption),
+                "message" to "Qwen-VL bundled semantic pass",
+            )
+            syntheticOutputs["tag_prediction"] = mapOf(
+                "result" to mapOf("tags" to tags),
+                "message" to "Qwen-VL bundled semantic pass",
+            )
+            syntheticOutputs["normalization"] = mapOf(
+                "result" to mapOf("text" to normalized),
+                "message" to "Qwen-VL bundled semantic pass",
+            )
+            syntheticOutputs["character_recognition"] = mapOf(
+                "result" to mapOf(
+                    "subjects" to subjects,
+                    "raw_observation_json" to (qwenResult["raw_semantic_json"]?.toString().orEmpty()),
+                ),
+                "message" to "Qwen-VL bundled semantic pass",
+            )
+        }
+
+        val earlyFailed = (earlyResponse["failed_stages"] as? List<*>)
+            ?.mapNotNull { (it as? Map<*, *>)?.entries
+                ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
+                ?.toMap()
+            }
+            .orEmpty()
+        val qwenFailed = if (qwenResponse["ok"] == true) {
+            emptyList()
+        } else {
+            listOf(
+                mapOf(
+                    "stage_type" to "qwen_semantic_bundle",
+                    "status" to qwenResponse["status"].toString(),
+                    "message" to qwenResponse["message"]?.toString().orEmpty(),
+                ),
+            )
+        }
+        val failedStages = earlyFailed + qwenFailed
+
+        val combinedResponse = mapOf(
+            "ok" to (failedStages.isEmpty()),
+            "status" to if (failedStages.isEmpty()) "succeeded" else "partial",
+            "pipeline_type" to "autonomous_image_workflow",
+            "stage_outputs" to syntheticOutputs,
+            "failed_stages" to failedStages,
+            "stages" to (
+                ((earlyResponse["stages"] as? List<*>) ?: emptyList<Any>()) +
+                    listOf(
+                        mapOf(
+                            "stage_type" to "qwen_semantic_bundle",
+                            "model_id" to qwenModel.first,
+                            "model_version" to qwenModel.second,
+                            "status" to if (qwenResponse["ok"] == true) "succeeded" else qwenResponse["status"].toString(),
+                            "message" to qwenResponse["message"]?.toString().orEmpty(),
+                        ),
+                    )
+                ),
+            "result" to qwenResult,
+            "message" to when {
+                failedStages.isEmpty() -> "Autonomous image analysis completed."
+                else -> "Autonomous image analysis completed with one or more failed stages."
+            },
+        )
+
+        val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, combinedResponse)
 
         val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
         val organization = if (hasCharacterKnowledge) {
@@ -1088,9 +1218,9 @@ object StandaloneRuntime {
         val organizationStatus = organization["status"]?.toString().orEmpty()
         val organizationFailed = organization["ok"] == false &&
             organizationStatus !in setOf("skipped", "unchanged", "waiting_for_knowledge")
-        val completedStages = (response["stage_outputs"] as? Map<*, *>)?.size ?: 0
-        val stageFailures = (response["failed_stages"] as? List<*>)?.size ?: 0
-        val pipelineFailed = response["ok"] != true || stageFailures > 0
+        val completedStages = syntheticOutputs.size
+        val stageFailures = failedStages.size
+        val pipelineFailed = failedStages.isNotEmpty()
 
         val state = when {
             pipelineFailed -> "retry_required"
@@ -1115,20 +1245,52 @@ object StandaloneRuntime {
             needsReview = needsReview || organizationFailed || pipelineFailed,
             lastError = when {
                 organizationFailed -> organization["message"]?.toString().orEmpty()
-                pipelineFailed -> response["message"]?.toString().orEmpty().ifBlank {
-                    "One or more required automation stages failed."
-                }
+                pipelineFailed -> combinedResponse["message"]?.toString().orEmpty()
                 else -> ""
             },
         )
-        return response + mapOf(
-            "automation_stages" to stages,
+
+        return combinedResponse + mapOf(
+            "automation_stages" to (earlyStages + "qwen_semantic_bundle"),
             "automation_completed_stages" to completedStages,
             "automation_stage_failures" to stageFailures,
             "workflow" to workflow,
             "organization" to organization,
             "automation_state" to state,
         )
+    }
+
+    private fun resolvedQwenSemanticModel(): Pair<String, String>? {
+        return localAiManager.listInstalledModels()
+            .asSequence()
+            .filter { model ->
+                val metadata = model["metadata"] as? Map<*, *>
+                val readiness = metadata?.get("execution_readiness") as? Map<*, *>
+                readiness?.get("ready") != false
+            }
+            .mapNotNull { model ->
+                val modelId = model["model_id"]?.toString()?.trim().orEmpty()
+                val version = model["version"]?.toString()?.trim().orEmpty()
+                val displayName = model["display_name"]?.toString()?.trim().orEmpty()
+                val installPath = model["install_path"]?.toString()?.trim().orEmpty()
+                val identity = "$modelId $displayName $installPath".lowercase()
+                val metadata = model["metadata"] as? Map<*, *>
+                val llama = metadata?.get("llama_cpp") as? Map<*, *>
+                val supported = (model["supported_tasks"] as? List<*>)
+                    ?.mapNotNull { it?.toString()?.let(AiTaskTypes::normalize) }
+                    .orEmpty()
+                if (
+                    modelId.isNotBlank() &&
+                    "qwen" in identity &&
+                    llama?.get("multimodal") == true &&
+                    ("captioning" in supported || "text_generation" in supported)
+                ) {
+                    modelId to version
+                } else {
+                    null
+                }
+            }
+            .firstOrNull()
     }
 
     private fun resolvedAutonomousImageStages(): List<String> {
@@ -1435,16 +1597,17 @@ object StandaloneRuntime {
         ensureInitialized()
         val stages = resolvedAutonomousImageStages()
         val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
-        val requiredStages = autonomousImageStageCandidates.filter { stage ->
-            stage != "character_recognition" || hasCharacterKnowledge
+        val requiredStages = autonomousImageStageCandidates
+        val missingStages = requiredStages.filterNot(stages::contains).toMutableList()
+        if (resolvedQwenSemanticModel() == null && "qwen_semantic_bundle" !in missingStages) {
+            missingStages += "qwen_semantic_bundle"
         }
-        val missingStages = requiredStages.filterNot(stages::contains)
 
         return when {
             stages.isEmpty() -> mapOf(
                 "ready" to false,
                 "stages" to emptyList<String>(),
-                "missing_stages" to requiredStages,
+                "missing_stages" to missingStages.ifEmpty { requiredStages },
                 "character_knowledge_ready" to hasCharacterKnowledge,
                 "message" to "No installed execution-ready model can run the automation pipeline.",
             )
@@ -1457,11 +1620,11 @@ object StandaloneRuntime {
             )
             else -> mapOf(
                 "ready" to true,
-                "stages" to stages,
+                "stages" to (stages + "qwen_semantic_bundle"),
                 "missing_stages" to emptyList<String>(),
                 "character_knowledge_ready" to hasCharacterKnowledge,
                 "message" to if (hasCharacterKnowledge) {
-                    "Automation is ready, including character resolution and organization."
+                    "Automation is ready, including one-pass Qwen-VL semantics, character resolution, and organization."
                 } else {
                     "Analysis automation is ready. Character-based rename/move will wait for Character Knowledge."
                 },
