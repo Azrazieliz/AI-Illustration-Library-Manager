@@ -9,6 +9,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.documentfile.provider.DocumentFile
+import com.ailm.android.runtime.ai.AiTaskTypes
 import com.ailm.android.runtime.ai.LocalAiManager
 import com.ailm.android.workers.CharacterSheetIndexWorker
 import kotlinx.coroutines.CoroutineScope
@@ -3419,6 +3420,10 @@ object StandaloneRuntime {
                 map.toStringAnyMap()
             }
             ?: emptyList()
+    }
+
+    private fun Map<String, Any>.resultMap(): Map<String, Any> {
+        return (this["result"] as? Map<*, *>)?.toStringAnyMap() ?: this
     }
 
     private fun Map<*, *>.toStringAnyMap(): Map<String, Any> {
