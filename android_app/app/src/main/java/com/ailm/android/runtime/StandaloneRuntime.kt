@@ -130,6 +130,7 @@ object StandaloneRuntime {
                     storageProvider = SafStorageProvider(context.applicationContext)
                     database = LocalDatabase(context.applicationContext)
                     repository = LocalRepository(database)
+                    repository.removeLegacyScanDiscoveryReviews()
                     knowledgeDatabase = KnowledgeDatabase(context.applicationContext)
                     resolutionStore = FusionResolutionStore(database)
                     aiWorkflowCoordinator = AiWorkflowCoordinator(
@@ -1401,6 +1402,24 @@ object StandaloneRuntime {
     fun automationImageIds(forceAll: Boolean = false): List<Int> {
         ensureInitialized()
         return resolutionStore.listAutomationImageIds(forceAll)
+    }
+
+    fun automationReadiness(): Map<String, Any> {
+        ensureInitialized()
+        val stages = resolvedAutonomousImageStages()
+        return if (stages.isEmpty()) {
+            mapOf(
+                "ready" to false,
+                "stages" to emptyList<String>(),
+                "message" to "No installed execution-ready model can run an automation stage.",
+            )
+        } else {
+            mapOf(
+                "ready" to true,
+                "stages" to stages,
+                "message" to "Automation is ready.",
+            )
+        }
     }
 
     fun requestAutomationPause() {
