@@ -1102,8 +1102,8 @@ object StandaloneRuntime {
             ?.toMap()
             .orEmpty()
 
-        val ocrText = earlyOutputs["ocr"].resultMap()["text"]?.toString().orEmpty()
-        val nsfwResult = earlyOutputs["nsfw_classification"].resultMap()
+        val ocrText = earlyOutputs["ocr"].orEmpty().resultMap()["text"]?.toString().orEmpty()
+        val nsfwResult = earlyOutputs["nsfw_classification"].orEmpty().resultMap()
 
         val qwenModel = resolvedQwenSemanticModel()
         if (qwenModel == null) {
