@@ -1280,19 +1280,47 @@ class AppViewModel : ViewModel() {
 
     fun importKnowledgePackDocuments(uris: List<Uri>) {
         if (uris.isEmpty()) {
-            _uiState.value = _uiState.value.copy(errorMessage = "Choose at least one Knowledge Pack.")
+            _uiState.value = _uiState.value.copy(errorMessage = "Choose at least one Knowledge file.")
             return
         }
         runIoAction {
             val results = StandaloneRuntime.importKnowledgePackDocuments(uris)
-            val imported = results.count { result -> result["ok"].asBooleanOrFalse() }
-            val duplicates = results.count { result -> result["message"]?.toString() == "Knowledge Pack already installed." }
+            val successful = results.filter { result -> result["ok"].asBooleanOrFalse() }
+            val failures = results.filterNot { result -> result["ok"].asBooleanOrFalse() }
+            val reference = successful.firstOrNull { result ->
+                result["kind"]?.toString() == "immutable_knowledge_release"
+            }
+            val installedPacks = successful.count { result ->
+                result["kind"]?.toString() != "immutable_knowledge_release"
+            }
+            val message = when {
+                reference != null -> {
+                    val series = (reference["series_entries"] as? Number)?.toInt() ?: 0
+                    val tags = (reference["tag_entries"] as? Number)?.toInt() ?: 0
+                    val characters = (reference["character_entries"] as? Number)?.toInt() ?: 0
+                    "Reference Knowledge imported: $series series, $tags taxonomy/tag entries" +
+                        if (characters > 0) ", $characters characters." else "."
+                }
+                installedPacks > 0 -> "Imported $installedPacks Knowledge Pack(s)."
+                failures.isNotEmpty() -> "Knowledge import failed."
+                else -> "No Knowledge content was imported."
+            }
+            val failureMessage = failures
+                .mapNotNull { it["message"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                .distinct()
+                .joinToString("\n")
+                .takeIf(String::isNotBlank)
+
             withContext(Dispatchers.Main) {
                 _uiState.value = _uiState.value.copy(
                     aiLastPipelineResult = mapOf("kind" to "knowledge_pack_import", "results" to results),
-                    lastActionMessage = "Imported $imported Knowledge Pack(s)${if (duplicates > 0) "; $duplicates already installed." else "."}",
-                    knowledgeAutomationStatus = if (imported > 0) "Knowledge changed\nPending Fusion rebuild" else _uiState.value.knowledgeAutomationStatus,
-                    errorMessage = null,
+                    lastActionMessage = message,
+                    knowledgeAutomationStatus = if (successful.isNotEmpty()) {
+                        "Knowledge changed\nPending Fusion rebuild"
+                    } else {
+                        _uiState.value.knowledgeAutomationStatus
+                    },
+                    errorMessage = failureMessage,
                 )
             }
             refreshResourceArtifacts()
