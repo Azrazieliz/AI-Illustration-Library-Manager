@@ -143,6 +143,22 @@ fun ScreenScaffold(
         }
     }
 
+    val cloudImagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+            }
+            appViewModel.importCloudImages(uris)
+        }
+    }
+
     var selectedModelDocument by remember { mutableStateOf<Uri?>(null) }
     var selectedModelPackageTree by remember { mutableStateOf<Uri?>(null) }
     var selectedFusionDocument by remember { mutableStateOf<Uri?>(null) }
@@ -217,6 +233,7 @@ fun ScreenScaffold(
 
     val chooseFolder: () -> Unit = { folderPickerLauncher.launch(null) }
     val addFolderToManager: () -> Unit = { folderManagerAddLauncher.launch(null) }
+    val importCloudImages: () -> Unit = { cloudImagePickerLauncher.launch(arrayOf("image/*")) }
     val chooseModelDocument: () -> Unit = {
         modelDocumentPickerLauncher.launch(arrayOf("application/octet-stream", "*/*"))
     }
@@ -284,6 +301,7 @@ fun ScreenScaffold(
             state = state,
             onChooseFolder = chooseFolder,
             onAddFolder = addFolderToManager,
+            onImportCloudImages = importCloudImages,
             onStartScan = appViewModel::startScan,
             onRescanFolder = appViewModel::rescanFolder,
             onRescanEnabledFolders = appViewModel::rescanEnabledFolders,
@@ -870,6 +888,7 @@ private fun FolderBrowserScreen(
     state: AppUiState,
     onChooseFolder: () -> Unit,
     onAddFolder: () -> Unit,
+    onImportCloudImages: () -> Unit,
     onStartScan: () -> Unit,
     onRescanFolder: (String) -> Unit,
     onRescanEnabledFolders: () -> Unit,
@@ -900,6 +919,12 @@ private fun FolderBrowserScreen(
                     }
                     Button(onClick = onAddFolder) {
                         Text("Add Folder")
+                    }
+                    Button(
+                        onClick = onImportCloudImages,
+                        enabled = state.selectedLibraryUri.isNotBlank(),
+                    ) {
+                        Text("Import from TeraBox / Cloud")
                     }
                     Button(onClick = onRefreshStatus) {
                         Text("Refresh Status")
