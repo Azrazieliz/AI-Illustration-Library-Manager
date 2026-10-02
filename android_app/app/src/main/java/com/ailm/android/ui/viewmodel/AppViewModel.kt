@@ -57,6 +57,7 @@ data class AppUiState(
     val aiLastPipelineResult: Map<String, Any> = emptyMap(),
     val knowledgeAutomationStatus: String? = null,
     val settingsValues: Map<String, String> = emptyMap(),
+    val teraBoxStatus: Map<String, Any> = emptyMap(),
     val lastMaintenanceResult: Map<String, Any> = emptyMap(),
     val lastActionMessage: String? = null,
     val selectedLibraryUri: String = "",
@@ -137,6 +138,7 @@ class AppViewModel : ViewModel() {
                 val knowledgePacks = StandaloneRuntime.listKnowledgePacks()
                 val reviewQueue = StandaloneRuntime.getReviewQueue()
                 val tags = StandaloneRuntime.getTags()
+                val teraBoxStatus = StandaloneRuntime.teraBoxStatus()
                 val ai = collectLocalAiSnapshot(previous)
 
                 withContext(Dispatchers.Main) {
@@ -183,6 +185,7 @@ class AppViewModel : ViewModel() {
                         aiLastPipelineResult = current.aiLastPipelineResult,
                         knowledgeAutomationStatus = current.knowledgeAutomationStatus,
                         settingsValues = current.settingsValues,
+                        teraBoxStatus = teraBoxStatus,
                         lastMaintenanceResult = current.lastMaintenanceResult,
                         lastActionMessage = current.lastActionMessage,
                         selectedLibraryUri = current.selectedLibraryUri,
@@ -361,6 +364,59 @@ class AppViewModel : ViewModel() {
             searchResults = _uiState.value.images,
             totalResults = _uiState.value.images.size,
         )
+    }
+
+    fun configureTeraBox(clientId: String, clientSecret: String, privateSecret: String) {
+        runIoAction {
+            val result = StandaloneRuntime.configureTeraBox(clientId, clientSecret, privateSecret)
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    teraBoxStatus = StandaloneRuntime.teraBoxStatus(),
+                    lastActionMessage = result["message"]?.toString().orEmpty(),
+                    errorMessage = if (result["ok"] == true) null else result["message"]?.toString(),
+                )
+            }
+        }
+    }
+
+    fun teraBoxAuthorizationUrl(): String {
+        return runCatching { StandaloneRuntime.teraBoxAuthorizationUrl() }.getOrDefault("")
+    }
+
+    fun refreshTeraBoxStatus() {
+        runIoAction {
+            val status = StandaloneRuntime.teraBoxStatus()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(teraBoxStatus = status)
+            }
+        }
+    }
+
+    fun disconnectTeraBox() {
+        runIoAction {
+            StandaloneRuntime.disconnectTeraBox()
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    teraBoxStatus = StandaloneRuntime.teraBoxStatus(),
+                    lastActionMessage = "TeraBox disconnected.",
+                    errorMessage = null,
+                )
+            }
+        }
+    }
+
+    fun addTeraBoxLibraryRoot(path: String) {
+        runIoAction {
+            val result = StandaloneRuntime.addTeraBoxLibraryRoot(path)
+            val ok = result["ok"] == true
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = result["message"]?.toString().orEmpty(),
+                    errorMessage = if (ok) null else result["message"]?.toString(),
+                )
+            }
+            if (ok) refreshDashboard()
+        }
     }
 
     fun addLibraryFolder(folderUri: String) {
