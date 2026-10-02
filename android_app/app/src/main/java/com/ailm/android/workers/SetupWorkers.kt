@@ -157,6 +157,21 @@ class LibraryAutomationWorker(
         return runCatching {
             StandaloneRuntime.initialize(applicationContext)
             StandaloneRuntime.resumeAiQueue()
+
+            val readiness = StandaloneRuntime.automationReadiness()
+            if (readiness["ready"] != true) {
+                StandaloneRuntime.updateAutomationStatus(
+                    status = "failed",
+                    total = 0,
+                    processed = 0,
+                    failed = 0,
+                    currentImageId = 0,
+                    message = readiness["message"]?.toString().orEmpty()
+                        .ifBlank { "Automation is not ready." },
+                )
+                return Result.failure()
+            }
+
             val forceAll = inputData.getBoolean(FORCE_ALL_KEY, false)
             val imageIds = StandaloneRuntime.automationImageIds(forceAll)
             var processed = 0
