@@ -302,20 +302,33 @@ internal class TeraBoxClient(
 
     fun openDownloadStream(path: String): InputStream? {
         val session = refreshSessionIfNeeded() ?: return null
+        val normalizedPath = normalizePath(path)
+        val parent = normalizedPath.substringBeforeLast('/', "").ifBlank { "/" }
+        val remote = list(parent).firstOrNull { it.path == normalizedPath && !it.directory } ?: return null
+        if (remote.fsId.isBlank()) return null
+
         val domain = session.apiDomain.ifBlank { "www.terabox.com" }
         val json = requestJson(
             "https://$domain/openapi/api/download?access_tokens=" + enc(session.accessToken) +
-                "&path=" + enc(normalizePath(path)),
+                "&fidlist=" + enc("[${remote.fsId}]") +
+                "&type=dlink",
             "GET",
         )
-        val list = json.optJSONArray("list") ?: JSONArray()
-        val dlink = list.optJSONObject(0)?.optString("dlink").orEmpty()
+        if (json.optInt("errno", -1) != 0) return null
+
+        val links = json.optJSONArray("dlink")
+            ?: json.optJSONArray("list")
+            ?: JSONArray()
+        val dlink = links.optJSONObject(0)?.optString("dlink").orEmpty()
+            .ifBlank { links.optString(0).orEmpty() }
             .ifBlank { json.optString("dlink") }
         if (dlink.isBlank()) return null
+
         val connection = URL(dlink).openConnection() as HttpURLConnection
         connection.connectTimeout = 20_000
         connection.readTimeout = 120_000
         connection.instanceFollowRedirects = true
+        connection.setRequestProperty("Accept", "*/*")
         return connection.inputStream
     }
 
