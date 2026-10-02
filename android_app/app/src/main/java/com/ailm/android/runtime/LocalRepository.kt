@@ -244,18 +244,6 @@ class LocalRepository(
             }
             existing.imageId
         }
-        val reviewValues = ContentValues().apply {
-            put("image_uri", node.uri)
-            put("status", "pending")
-            put("reason", "Discovered during scan")
-            put("last_updated_ms", scannedAtMs)
-        }
-        database.writableDatabase.insertWithOnConflict(
-            "review_items",
-            null,
-            reviewValues,
-            SQLiteDatabase.CONFLICT_IGNORE,
-        )
         return ImageUpsertResult(
             imageId = imageId,
             needsAiProcessing = existing == null,
@@ -738,6 +726,19 @@ class LocalRepository(
             }
         }
         return rows
+    }
+
+    /**
+     * Removes legacy placeholder review rows that were created merely because an
+     * image was discovered by a scan. Real Review entries are created only by
+     * recognition/runtime/organization logic when human attention is required.
+     */
+    fun removeLegacyScanDiscoveryReviews(): Int {
+        return database.writableDatabase.delete(
+            "review_items",
+            "status = ? AND review_type = ? AND reason = ?",
+            arrayOf("pending", "generic", "Discovered during scan"),
+        )
     }
 
     fun reviewQueue(limit: Int = 250): List<Map<String, Any>> {
