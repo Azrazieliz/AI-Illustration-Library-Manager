@@ -176,12 +176,14 @@ class LibraryAutomationWorker(
             val imageIds = StandaloneRuntime.automationImageIds(forceAll)
             var processed = 0
             var failed = 0
+            var review = 0
 
             StandaloneRuntime.updateAutomationStatus(
                 status = if (imageIds.isEmpty()) "completed" else "running",
                 total = imageIds.size,
                 processed = 0,
                 failed = 0,
+                review = 0,
                 message = if (imageIds.isEmpty()) "Nothing to process." else "Starting library automation.",
             )
             setForeground(foregroundInfo(0, imageIds.size, "Preparing automation"))
@@ -193,6 +195,7 @@ class LibraryAutomationWorker(
                         total = imageIds.size,
                         processed = processed,
                         failed = failed,
+                        review = review,
                         currentImageId = imageId,
                         message = "Automation paused before the next image.",
                     )
@@ -204,6 +207,7 @@ class LibraryAutomationWorker(
                         total = imageIds.size,
                         processed = processed,
                         failed = failed,
+                        review = review,
                         currentImageId = imageId,
                         message = "Automation stopped.",
                     )
@@ -215,6 +219,7 @@ class LibraryAutomationWorker(
                     total = imageIds.size,
                     processed = processed,
                     failed = failed,
+                    review = review,
                     currentImageId = imageId,
                     message = "Processing image ${processed + 1} of ${imageIds.size}",
                 )
@@ -222,6 +227,7 @@ class LibraryAutomationWorker(
                     "processed" to processed,
                     "total" to imageIds.size,
                     "failed" to failed,
+                    "review" to review,
                     "current_image_id" to imageId,
                 ))
                 setForeground(foregroundInfo(processed, imageIds.size, "Processing image ${processed + 1} of ${imageIds.size}"))
@@ -231,9 +237,13 @@ class LibraryAutomationWorker(
                 val organization = result["organization"] as? Map<*, *>
                 val needsReview = workflow?.get("queued_for_review") == true
                 val organizationFailed = organization?.get("ok") == false &&
-                    organization["status"]?.toString() !in setOf("skipped", "unchanged")
-                if (result["ok"] != true || needsReview || organizationFailed) {
-                    failed += 1
+                    organization["status"]?.toString() !in setOf("skipped", "unchanged", "waiting_for_knowledge")
+                val stageFailures = (result["automation_stage_failures"] as? Number)?.toInt() ?: 0
+                val pipelineFailed = result["ok"] != true || stageFailures > 0
+
+                when {
+                    pipelineFailed || organizationFailed -> failed += 1
+                    needsReview -> review += 1
                 }
                 processed += 1
 
@@ -245,10 +255,11 @@ class LibraryAutomationWorker(
                         total = imageIds.size,
                         processed = processed,
                         failed = failed,
+                        review = review,
                         currentImageId = 0,
                         message = "Automation paused after completing the current image.",
                     )
-                    setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed))
+                    setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed, "review" to review))
                     return Result.success()
                 }
             }
@@ -258,13 +269,15 @@ class LibraryAutomationWorker(
                 total = imageIds.size,
                 processed = processed,
                 failed = failed,
-                message = if (failed == 0) {
-                    "Automation completed."
-                } else {
-                    "Automation completed with $failed image(s) needing review or retry."
+                review = review,
+                message = when {
+                    failed == 0 && review == 0 -> "Automation completed."
+                    failed == 0 -> "Automation completed with $review image(s) waiting for Review."
+                    review == 0 -> "Automation completed with $failed actual failure(s)."
+                    else -> "Automation completed with $review image(s) in Review and $failed actual failure(s)."
                 },
             )
-            setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed))
+            setProgress(workDataOf("processed" to processed, "total" to imageIds.size, "failed" to failed, "review" to review))
             Result.success()
         }.getOrElse { error ->
             val current = runCatching { StandaloneRuntime.automationStatus() }.getOrDefault(emptyMap())
@@ -273,6 +286,7 @@ class LibraryAutomationWorker(
                 total = (current["automation_total"] as? Number)?.toInt() ?: 0,
                 processed = (current["automation_processed"] as? Number)?.toInt() ?: 0,
                 failed = ((current["automation_failed"] as? Number)?.toInt() ?: 0) + 1,
+                review = (current["automation_review"] as? Number)?.toInt() ?: 0,
                 currentImageId = (current["automation_current_image_id"] as? Number)?.toInt() ?: 0,
                 message = error.message ?: error.javaClass.simpleName,
             )
