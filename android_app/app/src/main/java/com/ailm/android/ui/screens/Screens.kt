@@ -2395,6 +2395,7 @@ private fun AiAutomationScreen(
     val total = (state.aiOverview["automation_total"] as? Number)?.toInt() ?: 0
     val processed = (state.aiOverview["automation_processed"] as? Number)?.toInt() ?: 0
     val failed = (state.aiOverview["automation_failed"] as? Number)?.toInt() ?: 0
+    val review = (state.aiOverview["automation_review"] as? Number)?.toInt() ?: 0
     val currentImageId = (state.aiOverview["automation_current_image_id"] as? Number)?.toInt() ?: 0
     val message = state.aiOverview["automation_message"]?.toString().orEmpty()
     val active = automationStatus in setOf("queued", "running", "pausing", "stopping")
@@ -2461,12 +2462,23 @@ private fun AiAutomationScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (failed > 0) {
-                        Text(
-                            "$failed issue${if (failed == 1) "" else "s"}",
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.labelLarge,
-                        )
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (review > 0) {
+                            Text(
+                                "$review review${if (review == 1) "" else "s"}",
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                        }
+                        if (failed > 0) {
+                            Text(
+                                "$failed failure${if (failed == 1) "" else "s"}",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                        }
                     }
                 }
 
@@ -2535,7 +2547,7 @@ private fun AiAutomationScreen(
             ) {
                 Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Each image is completed before Asterion moves to the next. Vision extracts observable taxonomy-bound character attributes and illustration tags; Character Knowledge filters and ranks possible identities, visual references/Fusion evidence rerank them, and the canonical series comes from the resolved character rather than a free-form series guess. Above threshold the image is organized into its canonical series/character path; below threshold it stays in place for editable Review. Pause finishes the current image safely.",
+                    "Each image is completed before Asterion moves to the next. Required installed models are selected and loaded automatically stage by stage (for example OCR, NSFW classification, Qwen-VL analysis, embeddings and scoring). Character Knowledge then filters and ranks possible identities, and the canonical series comes from the resolved character rather than a free-form series guess. With Character Knowledge available, a resolved image is renamed and moved into its created canonical series/character path before the next image starts. Without Character Knowledge, analysis can complete but identity-based rename/move waits instead of guessing. Low-confidence identity goes to Review; runtime or file-operation failures are reported separately. Pause finishes the current image safely.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
