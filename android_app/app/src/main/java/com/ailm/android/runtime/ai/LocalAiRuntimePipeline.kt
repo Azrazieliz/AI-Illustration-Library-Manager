@@ -763,7 +763,8 @@ class LocalAiExecutionPlanner(
         } - (concurrentTasks.coerceAtLeast(0) * 3).coerceAtMost(12)
         val fallbackPenalty = if (model.metadata["builtin"] == true || model.requiredRuntime.equals(AiRuntimeType.CUSTOM.raw, ignoreCase = true)) -40 else 0
         val modelIdentity = (model.modelId + " " + model.displayName + " " + model.installPath).lowercase()
-        val imageEmbeddingPreference = if (AiTaskTypes.normalize(taskType) == "embedding_generation") {
+        val normalizedTask = AiTaskTypes.normalize(taskType)
+        val imageEmbeddingPreference = if (normalizedTask == "embedding_generation") {
             when {
                 "nomic" in modelIdentity && "vision" in modelIdentity -> 30
                 "nomic" in modelIdentity && "text" in modelIdentity -> -20
@@ -772,7 +773,17 @@ class LocalAiExecutionPlanner(
         } else {
             0
         }
-        return capabilityScore + quantizationScore + memoryScore + benchmarkScore + contextScore + backendScore + deviceScore + fallbackPenalty + imageEmbeddingPreference
+        val qwenVisionPreference = if (normalizedTask in setOf("captioning", "character_recognition", "tag_prediction", "normalization")) {
+            val llama = model.metadata["llama_cpp"] as? Map<*, *>
+            when {
+                "qwen" in modelIdentity && llama?.get("multimodal") == true -> 45
+                "qwen" in modelIdentity -> 20
+                else -> 0
+            }
+        } else {
+            0
+        }
+        return capabilityScore + quantizationScore + memoryScore + benchmarkScore + contextScore + backendScore + deviceScore + fallbackPenalty + imageEmbeddingPreference + qwenVisionPreference
     }
 
     private fun hasExecutableBackend(model: AiModelDescriptor): Boolean = providersFor(model).isNotEmpty()
