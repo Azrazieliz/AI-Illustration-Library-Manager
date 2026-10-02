@@ -568,9 +568,12 @@ object StandaloneRuntime {
         if (uris.isEmpty()) return emptyList()
 
         val referenceResults = mutableListOf<Map<String, Any>>()
+        val rawReferenceDocuments = linkedMapOf<String, String>()
         val ordinaryUris = mutableListOf<Uri>()
+
         uris.distinct().forEach { uri ->
             val filename = safeKnowledgePackFileName(uri)
+
             if (isZipKnowledgeDocument(uri, filename)) {
                 val knowledgeResult = runCatching {
                     appContext.contentResolver.openInputStream(uri)?.use { input ->
@@ -607,8 +610,33 @@ object StandaloneRuntime {
                 if (sheetsImported > 0) {
                     scheduleCharacterSheetIndexing()
                 }
+                return@forEach
+            }
+
+            val raw = if (isJsonKnowledgeDocument(uri, filename)) {
+                readKnowledgeDocumentText(uri)
+            } else {
+                null
+            }
+            if (raw != null && ReferenceKnowledgeParser.looksLikeReferenceDocument(filename, raw)) {
+                rawReferenceDocuments[filename] = raw
             } else {
                 ordinaryUris += uri
+            }
+        }
+
+        if (rawReferenceDocuments.isNotEmpty()) {
+            val sourceName = if (rawReferenceDocuments.size == 1) {
+                rawReferenceDocuments.keys.first()
+            } else {
+                "selected-reference-jsons"
+            }
+            val result = ReferenceKnowledgeImporter(knowledgeDatabase)
+                .importDocuments(rawReferenceDocuments, sourceName)
+            referenceResults += result
+            if (result["ok"] == true) {
+                resolutionStore.resetWaitingForKnowledge()
+                repository.rebuildSearchIndex()
             }
         }
 
@@ -2930,6 +2958,22 @@ object StandaloneRuntime {
             temporary.delete()
             null
         }
+    }
+
+    private fun isJsonKnowledgeDocument(uri: Uri, filename: String): Boolean {
+        if (filename.lowercase().endsWith(".json")) return true
+        val mime = runCatching {
+            appContext.contentResolver.getType(uri)?.trim()?.lowercase().orEmpty()
+        }.getOrDefault("")
+        return mime.contains("json") || mime.startsWith("text/")
+    }
+
+    private fun readKnowledgeDocumentText(uri: Uri): String? {
+        return runCatching {
+            appContext.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { reader ->
+                reader.readText()
+            }
+        }.getOrNull()
     }
 
     private fun safeKnowledgePackFileName(uri: Uri): String {
