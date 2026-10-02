@@ -3,6 +3,7 @@ package com.ailm.android.runtime
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.work.BackoffPolicy
 import androidx.work.ExistingWorkPolicy
@@ -570,7 +571,7 @@ object StandaloneRuntime {
         val ordinaryUris = mutableListOf<Uri>()
         uris.distinct().forEach { uri ->
             val filename = safeKnowledgePackFileName(uri)
-            if (filename.lowercase().endsWith(".zip")) {
+            if (isZipKnowledgeDocument(uri, filename)) {
                 val knowledgeResult = runCatching {
                     appContext.contentResolver.openInputStream(uri)?.use { input ->
                         ReferenceKnowledgeImporter(knowledgeDatabase).importZip(input, filename)
@@ -2932,8 +2933,66 @@ object StandaloneRuntime {
     }
 
     private fun safeKnowledgePackFileName(uri: Uri): String {
-        val candidate = uri.lastPathSegment?.substringAfterLast('/').orEmpty()
-        return candidate.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "knowledge-pack.json" }
+        val resolver = appContext.contentResolver
+        val displayName = runCatching {
+            resolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) cursor.getString(index) else null
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()?.trim().orEmpty()
+
+        val fallback = uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+        val candidate = displayName.ifBlank { fallback }
+        val sanitized = candidate.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return sanitized.ifBlank {
+            if (isZipKnowledgeDocument(uri, "")) "knowledge-release.zip" else "knowledge-pack.json"
+        }
+    }
+
+    private fun isZipKnowledgeDocument(uri: Uri, filename: String): Boolean {
+        if (filename.trim().lowercase().endsWith(".zip")) {
+            return true
+        }
+
+        val mime = runCatching {
+            appContext.contentResolver.getType(uri)?.trim()?.lowercase().orEmpty()
+        }.getOrDefault("")
+        if (mime in setOf(
+                "application/zip",
+                "application/x-zip-compressed",
+                "application/x-zip",
+            )
+        ) {
+            return true
+        }
+
+        return runCatching {
+            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                val signature = ByteArray(4)
+                val count = input.read(signature)
+                if (count < 4) {
+                    false
+                } else {
+                    signature[0] == 0x50.toByte() &&
+                        signature[1] == 0x4B.toByte() &&
+                        (
+                            (signature[2] == 0x03.toByte() && signature[3] == 0x04.toByte()) ||
+                                (signature[2] == 0x05.toByte() && signature[3] == 0x06.toByte()) ||
+                                (signature[2] == 0x07.toByte() && signature[3] == 0x08.toByte())
+                            )
+                }
+            } ?: false
+        }.getOrDefault(false)
     }
 
     private fun describeKnowledgePack(file: File): Map<String, Any> {
