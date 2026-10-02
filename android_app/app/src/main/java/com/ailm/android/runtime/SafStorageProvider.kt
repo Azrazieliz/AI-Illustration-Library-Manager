@@ -73,14 +73,16 @@ class SafStorageProvider(
 
     override fun exists(uri: String): Boolean {
         val parsed = Uri.parse(uri)
-        if (!hasPersistedTreePermission(parsed)) {
+        if (!hasPersistedPermission(parsed, requireWrite = false)) {
             Log.w(TAG, "Persisted SAF permission missing for $uri")
             return false
         }
 
-        val treeDocument = DocumentFile.fromTreeUri(appContext, parsed)
-        if (treeDocument != null) {
-            return treeDocument.exists()
+        if (DocumentsContract.isTreeUri(parsed)) {
+            val treeDocument = DocumentFile.fromTreeUri(appContext, parsed)
+            if (treeDocument != null) {
+                return treeDocument.exists()
+            }
         }
 
         val document = DocumentFile.fromSingleUri(appContext, parsed)
@@ -93,18 +95,38 @@ class SafStorageProvider(
         if (cleaned.isBlank()) {
             return StorageWriteResult(ok = false, message = "new name is required")
         }
+        val parsedUri = Uri.parse(uri)
+        if (!hasPersistedPermission(parsedUri, requireWrite = true)) {
+            return StorageWriteResult(ok = false, message = "write permission is not available for this document provider")
+        }
+
         val cache = mutableMapOf<String, DocumentFile?>()
         val stage1Start = SystemClock.elapsedRealtime()
         val document = resolveDocument(uri, cache) ?: return StorageWriteResult(ok = false, message = "source not found")
         val parent = parentUri.trim().takeIf { it.isNotBlank() }?.let { resolveDocument(it, cache) } ?: document.parentFile
         val stage1Ms = SystemClock.elapsedRealtime() - stage1Start
 
+        val directRenameStart = SystemClock.elapsedRealtime()
+        val directRenamedUri = runCatching {
+            DocumentsContract.renameDocument(resolver, parsedUri, cleaned)
+        }.getOrNull()
+        if (directRenamedUri != null) {
+            val totalMs = SystemClock.elapsedRealtime() - totalStart
+            val directRenameMs = SystemClock.elapsedRealtime() - directRenameStart
+            Log.d(TIMING_TAG, "rename stage1_resolve_source_ms=$stage1Ms")
+            Log.d(TIMING_TAG, "rename stage2_resolve_destination_ms=0")
+            Log.d(TIMING_TAG, "rename stage3_conflict_detection_ms=0")
+            Log.d(TIMING_TAG, "rename stage4_saf_call_ms=$directRenameMs")
+            Log.d(TIMING_TAG, "rename stage1to4_total_ms=$totalMs")
+            return StorageWriteResult(ok = true, uri = directRenamedUri.toString(), changed = true)
+        }
+
         val stage4Start = SystemClock.elapsedRealtime()
         val ok = document.renameTo(cleaned)
         val stage4Ms = SystemClock.elapsedRealtime() - stage4Start
         if (ok) {
             val renamedUri = resolveRenamedUri(parent, cleaned)
-                ?: return StorageWriteResult(ok = false, message = "renamed document URI could not be resolved")
+                ?: document.uri.toString()
             val totalMs = SystemClock.elapsedRealtime() - totalStart
             Log.d(TIMING_TAG, "rename stage1_resolve_source_ms=$stage1Ms")
             Log.d(TIMING_TAG, "rename stage2_resolve_destination_ms=0")
@@ -169,6 +191,18 @@ class SafStorageProvider(
     }
 
     override fun delete(uri: String): StorageWriteResult {
+        val parsed = Uri.parse(uri)
+        if (!hasPersistedPermission(parsed, requireWrite = true)) {
+            return StorageWriteResult(ok = false, message = "write permission is not available for this document provider")
+        }
+
+        val directDeleted = runCatching {
+            DocumentsContract.deleteDocument(resolver, parsed)
+        }.getOrDefault(false)
+        if (directDeleted) {
+            return StorageWriteResult(ok = true, changed = true)
+        }
+
         val cache = mutableMapOf<String, DocumentFile?>()
         val document = resolveDocument(uri, cache) ?: return StorageWriteResult(ok = false, message = "target not found")
         val ok = document.delete()
@@ -361,16 +395,22 @@ class SafStorageProvider(
         }
     }
 
-    private fun hasPersistedTreePermission(uri: Uri): Boolean {
+    private fun hasPersistedTreePermission(uri: Uri): Boolean =
+        hasPersistedPermission(uri, requireWrite = true)
+
+    private fun hasPersistedPermission(uri: Uri, requireWrite: Boolean): Boolean {
         val target = uri.normalizeScheme().toString()
         return resolver.persistedUriPermissions.any { permission ->
-            if (!permission.isReadPermission || !permission.isWritePermission) {
+            if (!permission.isReadPermission) {
+                return@any false
+            }
+            if (requireWrite && !permission.isWritePermission) {
                 return@any false
             }
             if (permission.uri.normalizeScheme().toString() == target) {
                 return@any true
             }
-            containsDocument(permission.uri, uri)
+            DocumentsContract.isTreeUri(permission.uri) && containsDocument(permission.uri, uri)
         }
     }
 
