@@ -5,7 +5,10 @@ plugins {
 }
 
 import java.io.FileInputStream
+import java.util.ArrayDeque
 import java.util.Properties
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -41,6 +44,66 @@ val prepareAsterionBrandingResources by tasks.registering(Sync::class) {
 		into("mipmap-nodpi")
 	}
 	into(generatedBrandingResources)
+
+	doLast {
+		val source = generatedBrandingResources.resolve("drawable-nodpi/asterioncore_logo.png")
+		val target = generatedBrandingResources.resolve("drawable-nodpi/asterioncore_logo_splash.png")
+		val input = ImageIO.read(source)
+		require(input != null) { "Unable to decode canonical AsterionCore logo." }
+
+		val width = input.width
+		val height = input.height
+		val output = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+		for (y in 0 until height) {
+			for (x in 0 until width) {
+				output.setRGB(x, y, input.getRGB(x, y))
+			}
+		}
+
+		fun removableBackground(argb: Int): Boolean {
+			val alpha = (argb ushr 24) and 0xFF
+			if (alpha == 0) return true
+			val red = (argb ushr 16) and 0xFF
+			val green = (argb ushr 8) and 0xFF
+			val blue = argb and 0xFF
+			val maximum = maxOf(red, green, blue)
+			val minimum = minOf(red, green, blue)
+			return maximum <= 44 && (maximum - minimum) <= 18
+		}
+
+		val visited = BooleanArray(width * height)
+		val queue = ArrayDeque<Int>()
+		fun enqueue(x: Int, y: Int) {
+			if (x !in 0 until width || y !in 0 until height) return
+			val index = y * width + x
+			if (visited[index]) return
+			if (!removableBackground(output.getRGB(x, y))) return
+			visited[index] = true
+			queue.addLast(index)
+		}
+
+		for (x in 0 until width) {
+			enqueue(x, 0)
+			enqueue(x, height - 1)
+		}
+		for (y in 0 until height) {
+			enqueue(0, y)
+			enqueue(width - 1, y)
+		}
+
+		while (queue.isNotEmpty()) {
+			val index = queue.removeFirst()
+			val x = index % width
+			val y = index / width
+			output.setRGB(x, y, output.getRGB(x, y) and 0x00FFFFFF)
+			enqueue(x - 1, y)
+			enqueue(x + 1, y)
+			enqueue(x, y - 1)
+			enqueue(x, y + 1)
+		}
+
+		ImageIO.write(output, "png", target)
+	}
 }
 
 android {
