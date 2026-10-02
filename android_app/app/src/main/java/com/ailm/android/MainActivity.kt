@@ -1,6 +1,11 @@
 package com.ailm.android
 
+import android.content.Intent
 import android.os.Bundle
+import androidx.lifecycle.lifecycleScope
+import com.ailm.android.runtime.StandaloneRuntime
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -43,11 +48,31 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition { !contentReady.value }
 
         super.onCreate(savedInstanceState)
+        handleTeraBoxCallback(intent)
 
         setContent {
             AsterionTheme {
                 AsterionCoreApp(onComposeVisible = { contentReady.value = true })
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleTeraBoxCallback(intent)
+    }
+
+    private fun handleTeraBoxCallback(intent: Intent?) {
+        val uri = intent?.data ?: return
+        if (!uri.scheme.equals("asterioncore", ignoreCase = true) ||
+            !uri.host.equals("teraboxOauth", ignoreCase = true)
+        ) {
+            return
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            StandaloneRuntime.initialize(applicationContext)
+            StandaloneRuntime.completeTeraBoxAuthorization(uri)
         }
     }
 }
