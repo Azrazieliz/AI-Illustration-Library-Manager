@@ -1106,11 +1106,14 @@ object StandaloneRuntime {
         val nsfwResult = earlyOutputs["nsfw_classification"].resultMap()
 
         val qwenModel = resolvedQwenSemanticModel()
-            ?: return mapOf(
+        if (qwenModel == null) {
+            cleanupPreparedRemoteImage(preparedBase)
+            return mapOf(
                 "ok" to false,
                 "status" to "incompatible",
                 "message" to "No execution-ready Qwen-VL model is installed for the semantic image pass.",
             )
+        }
 
         val qwenResponse = localAiManager.runPipeline(
             preparedBase + mapOf(
@@ -1260,7 +1263,7 @@ object StandaloneRuntime {
             },
         )
 
-        return combinedResponse + mapOf(
+        val result = combinedResponse + mapOf(
             "automation_stages" to (earlyStages + "qwen_semantic_bundle"),
             "automation_completed_stages" to completedStages,
             "automation_stage_failures" to stageFailures,
@@ -1268,6 +1271,8 @@ object StandaloneRuntime {
             "organization" to organization,
             "automation_state" to state,
         )
+        cleanupPreparedRemoteImage(preparedBase)
+        return result
     }
 
     private fun resolvedQwenSemanticModel(): Pair<String, String>? {
@@ -3362,6 +3367,43 @@ object StandaloneRuntime {
         )
     }
 
+    private fun materializeRemoteImageForAi(
+        imageId: Int,
+        sourceUri: String,
+        filename: String,
+    ): File? {
+        if (!TeraBoxUris.isTeraBox(sourceUri)) return null
+        val extension = filename.substringAfterLast('.', "").lowercase().take(10)
+        val suffix = extension.takeIf(String::isNotBlank)?.let { ".$it" }.orEmpty()
+        val directory = File(appContext.cacheDir, "remote_ai").apply { mkdirs() }
+        val target = File(directory, "image_${imageId}_${System.currentTimeMillis()}$suffix")
+        return runCatching {
+            storageProvider.openInputStream(sourceUri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            } ?: return null
+            if (!target.exists() || target.length() <= 0L) {
+                target.delete()
+                null
+            } else {
+                target
+            }
+        }.getOrElse {
+            target.delete()
+            null
+        }
+    }
+
+    private fun cleanupPreparedRemoteImage(payload: Map<String, Any>) {
+        val staged = payload["_asterion_staged_remote_path"]?.toString()?.trim().orEmpty()
+        if (staged.isBlank()) return
+        runCatching {
+            val file = File(staged)
+            if (file.exists() && file.parentFile?.name == "remote_ai") {
+                file.delete()
+            }
+        }
+    }
+
     private fun prepareAiPipelinePayload(payload: Map<String, Any>): Map<String, Any> {
         val prepared = linkedMapOf<String, Any>()
         prepared.putAll(payload)
@@ -3374,6 +3416,26 @@ object StandaloneRuntime {
                 prepared.putIfAbsent("filename", image["filename"]?.toString().orEmpty())
                 prepared.putIfAbsent("path", image["path"]?.toString().orEmpty())
                 prepared.putIfAbsent("uri", image["uri"]?.toString().orEmpty())
+
+                val originalUri = image["uri"]?.toString().orEmpty()
+                if (TeraBoxUris.isTeraBox(originalUri)) {
+                    val staged = materializeRemoteImageForAi(
+                        imageId = imageId,
+                        sourceUri = originalUri,
+                        filename = image["filename"]?.toString().orEmpty(),
+                    )
+                    if (staged != null) {
+                        prepared["original_uri"] = originalUri
+                        prepared["remote_source_uri"] = originalUri
+                        prepared["image_uri"] = staged.absolutePath
+                        prepared["uri"] = staged.absolutePath
+                        prepared["path"] = staged.absolutePath
+                        prepared["source_path"] = staged.absolutePath
+                        prepared["image_path"] = staged.absolutePath
+                        prepared["file_path"] = staged.absolutePath
+                        prepared["_asterion_staged_remote_path"] = staged.absolutePath
+                    }
+                }
 
                 val metadata = (image["metadata"] as? Map<*, *>)?.toStringAnyMap() ?: emptyMap()
                 if (metadata.isNotEmpty() && (prepared["metadata"] as? Map<*, *>) == null) {
