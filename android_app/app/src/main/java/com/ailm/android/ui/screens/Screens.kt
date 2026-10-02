@@ -76,6 +76,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.ImageLoader
@@ -238,6 +239,14 @@ fun ScreenScaffold(
     val chooseFolder: () -> Unit = { folderPickerLauncher.launch(null) }
     val addFolderToManager: () -> Unit = { folderManagerAddLauncher.launch(null) }
     val importCloudImages: () -> Unit = { cloudImagePickerLauncher.launch(arrayOf("image/*")) }
+    val startTeraBoxLogin: () -> Unit = {
+        val url = appViewModel.teraBoxAuthorizationUrl()
+        if (url.isNotBlank()) {
+            runCatching {
+                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            }
+        }
+    }
     val chooseModelDocument: () -> Unit = {
         modelDocumentPickerLauncher.launch(arrayOf("application/octet-stream", "*/*"))
     }
@@ -593,6 +602,11 @@ fun ScreenScaffold(
             state = state,
             onChooseFolder = chooseFolder,
             onAddFolder = addFolderToManager,
+            onConfigureTeraBox = appViewModel::configureTeraBox,
+            onStartTeraBoxLogin = startTeraBoxLogin,
+            onRefreshTeraBox = appViewModel::refreshTeraBoxStatus,
+            onDisconnectTeraBox = appViewModel::disconnectTeraBox,
+            onAddTeraBoxLibraryRoot = appViewModel::addTeraBoxLibraryRoot,
             onSetFolderEnabled = appViewModel::setLibraryFolderEnabled,
             onRemoveFolder = appViewModel::removeLibraryFolder,
             onRescanFolder = appViewModel::rescanFolder,
@@ -3821,6 +3835,11 @@ private fun SettingsScreen(
     state: AppUiState,
     onChooseFolder: () -> Unit,
     onAddFolder: () -> Unit,
+    onConfigureTeraBox: (String, String, String) -> Unit,
+    onStartTeraBoxLogin: () -> Unit,
+    onRefreshTeraBox: () -> Unit,
+    onDisconnectTeraBox: () -> Unit,
+    onAddTeraBoxLibraryRoot: (String) -> Unit,
     onSetFolderEnabled: (String, Boolean) -> Unit,
     onRemoveFolder: (String) -> Unit,
     onRescanFolder: (String) -> Unit,
@@ -3837,6 +3856,10 @@ private fun SettingsScreen(
     var cacheMbText by rememberSaveable { mutableStateOf("256") }
     var settingKey by rememberSaveable { mutableStateOf("") }
     var settingValue by rememberSaveable { mutableStateOf("") }
+    var teraBoxClientId by rememberSaveable { mutableStateOf("") }
+    var teraBoxClientSecret by rememberSaveable { mutableStateOf("") }
+    var teraBoxPrivateSecret by rememberSaveable { mutableStateOf("") }
+    var teraBoxRootPath by rememberSaveable { mutableStateOf("/") }
 
     Column(
         modifier = Modifier
@@ -3909,6 +3932,99 @@ private fun SettingsScreen(
                         }
                     }
                 }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("TeraBox Open Platform", style = MaterialTheme.typography.titleMedium)
+                val configured = state.teraBoxStatus["configured"] == true
+                val connected = state.teraBoxStatus["connected"] == true
+                Text(
+                    when {
+                        connected -> "Connected"
+                        configured -> "Credentials saved — login required"
+                        else -> "Not configured"
+                    },
+                    color = if (connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = teraBoxClientId,
+                    onValueChange = { teraBoxClientId = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("client_id") },
+                )
+                OutlinedTextField(
+                    value = teraBoxClientSecret,
+                    onValueChange = { teraBoxClientSecret = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("client_secret") },
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                OutlinedTextField(
+                    value = teraBoxPrivateSecret,
+                    onValueChange = { teraBoxPrivateSecret = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("private_secret") },
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Button(
+                        onClick = {
+                            onConfigureTeraBox(teraBoxClientId, teraBoxClientSecret, teraBoxPrivateSecret)
+                            teraBoxClientSecret = ""
+                            teraBoxPrivateSecret = ""
+                        },
+                        enabled = teraBoxClientId.isNotBlank() &&
+                            teraBoxClientSecret.isNotBlank() &&
+                            teraBoxPrivateSecret.isNotBlank(),
+                    ) {
+                        Text("Save Credentials")
+                    }
+                    Button(onClick = onStartTeraBoxLogin, enabled = configured) {
+                        Text(if (connected) "Reconnect" else "Login to TeraBox")
+                    }
+                    Button(onClick = onRefreshTeraBox) {
+                        Text("Refresh Status")
+                    }
+                    if (connected) {
+                        Button(onClick = onDisconnectTeraBox) {
+                            Text("Disconnect")
+                        }
+                    }
+                }
+
+                if (connected) {
+                    OutlinedTextField(
+                        value = teraBoxRootPath,
+                        onValueChange = { teraBoxRootPath = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("TeraBox API library root path") },
+                    )
+                    Button(onClick = { onAddTeraBoxLibraryRoot(teraBoxRootPath) }) {
+                        Text("Add TeraBox as Library")
+                    }
+                    val domain = state.teraBoxStatus["api_domain"]?.toString().orEmpty()
+                    val expires = state.teraBoxStatus["expires_at_ms"]?.toString().orEmpty()
+                    if (domain.isNotBlank()) Text("API domain: $domain", style = MaterialTheme.typography.bodySmall)
+                    if (expires.isNotBlank() && expires != "0") {
+                        Text("Token expiry: $expires", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                Text(
+                    "Credentials and OAuth tokens are stored with Android Keystore-backed encryption. TeraBox authorization returns through asterioncore://teraboxOauth.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
