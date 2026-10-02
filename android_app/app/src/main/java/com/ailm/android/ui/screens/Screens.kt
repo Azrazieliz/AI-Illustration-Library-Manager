@@ -254,7 +254,14 @@ fun ScreenScaffold(
         fusionDocumentPickerLauncher.launch(arrayOf("application/json", "text/*"))
     }
     val chooseKnowledgeDocument: () -> Unit = {
-        knowledgeDocumentPickerLauncher.launch(arrayOf("application/json", "text/*"))
+        knowledgeDocumentPickerLauncher.launch(
+            arrayOf(
+                "application/json",
+                "application/zip",
+                "application/octet-stream",
+                "text/*",
+            ),
+        )
     }
     val chooseKnowledgePacks: () -> Unit = {
         knowledgePackDocumentPickerLauncher.launch(arrayOf("application/json", "application/zip", "application/octet-stream", "text/*"))
