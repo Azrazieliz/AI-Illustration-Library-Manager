@@ -380,6 +380,30 @@ class AppViewModel : ViewModel() {
         }
     }
 
+    fun importCloudImages(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            return
+        }
+        val root = _uiState.value.selectedLibraryUri.trim()
+        if (root.isBlank()) {
+            _uiState.value = _uiState.value.copy(errorMessage = "Choose a writable library folder before importing cloud images.")
+            return
+        }
+        runIoAction {
+            val result = StandaloneRuntime.importCloudImages(uris, root)
+            val failed = (result["failed"] as? Number)?.toInt() ?: 0
+            withContext(Dispatchers.Main) {
+                _uiState.value = _uiState.value.copy(
+                    lastActionMessage = result["message"]?.toString().orEmpty().ifBlank { "Cloud import completed." },
+                    errorMessage = if (failed > 0 && result["imported"] == 0) {
+                        result["message"]?.toString() ?: "Cloud import failed."
+                    } else null,
+                )
+            }
+            refreshDashboard()
+        }
+    }
+
     fun setLibraryFolderEnabled(folderUri: String, enabled: Boolean) {
         runIoAction {
             val ok = StandaloneRuntime.setLibraryFolderEnabled(folderUri, enabled)
