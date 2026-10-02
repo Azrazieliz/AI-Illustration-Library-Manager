@@ -266,4 +266,3 @@ internal class ReferenceKnowledgeImporter(
         }
     }
 }
-}
