@@ -32,6 +32,7 @@ object StandaloneRuntime {
     private const val AUTOMATION_TOTAL_KEY = "total"
     private const val AUTOMATION_PROCESSED_KEY = "processed"
     private const val AUTOMATION_FAILED_KEY = "failed"
+    private const val AUTOMATION_REVIEW_KEY = "review"
     private const val AUTOMATION_CURRENT_IMAGE_KEY = "current_image_id"
     private const val AUTOMATION_MESSAGE_KEY = "message"
     private const val AUTOMATION_UPDATED_AT_KEY = "updated_at_ms"
@@ -40,15 +41,19 @@ object StandaloneRuntime {
     private val imageExtensions = setOf(
         "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "heif", "heic",
     )
+    // Canonical per-image order. Each stage is completed before the next one is
+    // scheduled, and the whole image finishes before automation advances to the
+    // next library image. The execution planner selects the installed model for
+    // each task (PaddleOCR, NSFW classifier, Qwen-VL, Nomic, etc.) automatically.
     private val autonomousImageStageCandidates = listOf(
-        "character_recognition",
         "ocr",
+        "nsfw_classification",
         "captioning",
         "tag_prediction",
-        "embedding_generation",
         "normalization",
-        "nsfw_classification",
+        "embedding_generation",
         "aesthetic_scoring",
+        "character_recognition",
     )
 
     private val stateMutex = Mutex()
@@ -1063,9 +1068,17 @@ object StandaloneRuntime {
         ))
         val response = localAiManager.runMultiStagePipeline(prepared)
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, response)
-        val organization = organizeAutonomousImage(imageId, workflow)
 
         val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
+        val organization = if (hasCharacterKnowledge) {
+            organizeAutonomousImage(imageId, workflow)
+        } else {
+            mapOf(
+                "ok" to true,
+                "status" to "waiting_for_knowledge",
+                "message" to "Analysis completed; character-based rename/move is deferred until Character Knowledge is available.",
+            )
+        }
         val needsReview = workflow["queued_for_review"] == true
         val organizationFailed = organization["ok"] == false &&
             organization["status"]?.toString() !in setOf("skipped", "unchanged")
@@ -1407,17 +1420,24 @@ object StandaloneRuntime {
     fun automationReadiness(): Map<String, Any> {
         ensureInitialized()
         val stages = resolvedAutonomousImageStages()
+        val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
         return if (stages.isEmpty()) {
             mapOf(
                 "ready" to false,
                 "stages" to emptyList<String>(),
+                "character_knowledge_ready" to hasCharacterKnowledge,
                 "message" to "No installed execution-ready model can run an automation stage.",
             )
         } else {
             mapOf(
                 "ready" to true,
                 "stages" to stages,
-                "message" to "Automation is ready.",
+                "character_knowledge_ready" to hasCharacterKnowledge,
+                "message" to if (hasCharacterKnowledge) {
+                    "Automation is ready, including character resolution and organization."
+                } else {
+                    "Analysis automation is ready. Character-based rename/move will wait for Character Knowledge."
+                },
             )
         }
     }
@@ -1452,6 +1472,7 @@ object StandaloneRuntime {
             "automation_total" to prefs.getInt(AUTOMATION_TOTAL_KEY, 0),
             "automation_processed" to prefs.getInt(AUTOMATION_PROCESSED_KEY, 0),
             "automation_failed" to prefs.getInt(AUTOMATION_FAILED_KEY, 0),
+            "automation_review" to prefs.getInt(AUTOMATION_REVIEW_KEY, 0),
             "automation_current_image_id" to prefs.getInt(AUTOMATION_CURRENT_IMAGE_KEY, 0),
             "automation_message" to prefs.getString(AUTOMATION_MESSAGE_KEY, "").orEmpty(),
             "automation_updated_at_ms" to prefs.getLong(AUTOMATION_UPDATED_AT_KEY, 0L),
@@ -1463,6 +1484,7 @@ object StandaloneRuntime {
         total: Int,
         processed: Int,
         failed: Int,
+        review: Int = 0,
         currentImageId: Int = 0,
         message: String = "",
     ) {
@@ -1473,6 +1495,7 @@ object StandaloneRuntime {
             .putInt(AUTOMATION_TOTAL_KEY, total.coerceAtLeast(0))
             .putInt(AUTOMATION_PROCESSED_KEY, processed.coerceAtLeast(0))
             .putInt(AUTOMATION_FAILED_KEY, failed.coerceAtLeast(0))
+            .putInt(AUTOMATION_REVIEW_KEY, review.coerceAtLeast(0))
             .putInt(AUTOMATION_CURRENT_IMAGE_KEY, currentImageId.coerceAtLeast(0))
             .putString(AUTOMATION_MESSAGE_KEY, message)
             .putLong(AUTOMATION_UPDATED_AT_KEY, System.currentTimeMillis())
