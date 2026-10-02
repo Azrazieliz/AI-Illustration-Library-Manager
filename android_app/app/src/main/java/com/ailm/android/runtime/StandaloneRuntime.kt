@@ -1080,12 +1080,18 @@ object StandaloneRuntime {
             )
         }
         val needsReview = workflow["queued_for_review"] == true
+        val organizationStatus = organization["status"]?.toString().orEmpty()
         val organizationFailed = organization["ok"] == false &&
-            organization["status"]?.toString() !in setOf("skipped", "unchanged")
+            organizationStatus !in setOf("skipped", "unchanged", "waiting_for_knowledge")
+        val completedStages = (response["stage_outputs"] as? Map<*, *>)?.size ?: 0
+        val stageFailures = (response["failed_stages"] as? List<*>)?.size ?: 0
+        val pipelineFailed = response["ok"] != true || stageFailures > 0
+
         val state = when {
+            pipelineFailed -> "retry_required"
+            organizationFailed -> "retry_required"
             !hasCharacterKnowledge -> "waiting_for_knowledge"
             needsReview -> "review_pending"
-            organizationFailed -> "retry_required"
             else -> "complete"
         }
         if (organizationFailed) {
@@ -1099,14 +1105,17 @@ object StandaloneRuntime {
         resolutionStore.markAutomationState(
             imageId = imageId,
             state = state,
-            pipelineComplete = response["ok"] == true,
-            organizationComplete = organization["ok"] == true || organization["status"]?.toString() == "unchanged",
-            needsReview = needsReview || organizationFailed,
-            lastError = if (organizationFailed) organization["message"]?.toString().orEmpty() else "",
+            pipelineComplete = !pipelineFailed,
+            organizationComplete = organizationStatus in setOf("organized", "already_organized", "unchanged"),
+            needsReview = needsReview || organizationFailed || pipelineFailed,
+            lastError = when {
+                organizationFailed -> organization["message"]?.toString().orEmpty()
+                pipelineFailed -> response["message"]?.toString().orEmpty().ifBlank {
+                    "One or more required automation stages failed."
+                }
+                else -> ""
+            },
         )
-
-        val completedStages = (response["stage_outputs"] as? Map<*, *>)?.size ?: 0
-        val stageFailures = (response["stage_errors"] as? Map<*, *>)?.size ?: 0
         return response + mapOf(
             "automation_stages" to stages,
             "automation_completed_stages" to completedStages,
@@ -1421,17 +1430,30 @@ object StandaloneRuntime {
         ensureInitialized()
         val stages = resolvedAutonomousImageStages()
         val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
-        return if (stages.isEmpty()) {
-            mapOf(
+        val requiredStages = autonomousImageStageCandidates.filter { stage ->
+            stage != "character_recognition" || hasCharacterKnowledge
+        }
+        val missingStages = requiredStages.filterNot(stages::contains)
+
+        return when {
+            stages.isEmpty() -> mapOf(
                 "ready" to false,
                 "stages" to emptyList<String>(),
+                "missing_stages" to requiredStages,
                 "character_knowledge_ready" to hasCharacterKnowledge,
-                "message" to "No installed execution-ready model can run an automation stage.",
+                "message" to "No installed execution-ready model can run the automation pipeline.",
             )
-        } else {
-            mapOf(
+            missingStages.isNotEmpty() -> mapOf(
+                "ready" to false,
+                "stages" to stages,
+                "missing_stages" to missingStages,
+                "character_knowledge_ready" to hasCharacterKnowledge,
+                "message" to "Automation is missing required model stage(s): " + missingStages.joinToString(", "),
+            )
+            else -> mapOf(
                 "ready" to true,
                 "stages" to stages,
+                "missing_stages" to emptyList<String>(),
                 "character_knowledge_ready" to hasCharacterKnowledge,
                 "message" to if (hasCharacterKnowledge) {
                     "Automation is ready, including character resolution and organization."
