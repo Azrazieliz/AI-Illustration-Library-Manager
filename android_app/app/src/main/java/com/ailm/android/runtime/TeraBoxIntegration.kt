@@ -209,34 +209,46 @@ internal class TeraBoxClient(
 
     fun connectionStatus(): Map<String, Any> = store.status()
 
-    fun list(path: String, page: Int = 1, num: Int = 100): List<TeraBoxRemoteNode> {
+    fun list(path: String, page: Int = 1, num: Int = 1000): List<TeraBoxRemoteNode> {
         val session = refreshSessionIfNeeded() ?: return emptyList()
-        val domain = session.apiDomain.ifBlank { "www.terabox.com" }
-        val url = "https://$domain/openapi/api/list" +
-            "?access_tokens=" + enc(session.accessToken) +
-            "&order=name&desc=0&dir=" + enc(normalizePath(path)) +
-            "&num=" + num.coerceIn(1, 1000) +
-            "&page=" + page.coerceAtLeast(1)
-        val json = requestJson(url, "GET")
-        if (json.optInt("errno", -1) != 0) return emptyList()
-        val array = json.optJSONArray("list") ?: json.optJSONArray("info") ?: JSONArray()
-        return buildList {
+        val pageSize = num.coerceIn(1, 10_000)
+        var currentPage = page.coerceAtLeast(1)
+        val results = mutableListOf<TeraBoxRemoteNode>()
+
+        while (true) {
+            val response = listPage(session, path, currentPage, pageSize)
+            if (response.optInt("errno", -1) != 0) break
+            val array = response.optJSONArray("list") ?: response.optJSONArray("info") ?: JSONArray()
             for (index in 0 until array.length()) {
                 val item = array.optJSONObject(index) ?: continue
                 val remotePath = item.optString("path").trim()
                 if (remotePath.isBlank()) continue
-                add(
-                    TeraBoxRemoteNode(
-                        path = remotePath,
-                        name = item.optString("server_filename").ifBlank { remotePath.substringAfterLast('/') },
-                        directory = item.optInt("isdir", 0) == 1,
-                        size = item.optLong("size", 0L),
-                        modifiedAtMs = item.optLong("server_mtime", item.optLong("local_mtime", 0L)) * 1000L,
-                        fsId = item.optString("fs_id"),
-                    ),
+                results += TeraBoxRemoteNode(
+                    path = remotePath,
+                    name = item.optString("server_filename").ifBlank { remotePath.substringAfterLast('/') },
+                    directory = item.optInt("isdir", 0) == 1,
+                    size = item.optLong("size", 0L),
+                    modifiedAtMs = item.optLong("server_mtime", item.optLong("local_mtime", 0L)) * 1000L,
+                    fsId = item.optString("fs_id"),
                 )
             }
+
+            val hasMore = response.optInt("has_more", 0) == 1
+            if (!hasMore || array.length() == 0) break
+            currentPage += 1
+            if (currentPage - page > 10_000) break
         }
+        return results.distinctBy(TeraBoxRemoteNode::path)
+    }
+
+    private fun listPage(session: TeraBoxSession, path: String, page: Int, num: Int): JSONObject {
+        val domain = session.apiDomain.ifBlank { "www.terabox.com" }
+        val url = "https://$domain/openapi/api/list" +
+            "?access_tokens=" + enc(session.accessToken) +
+            "&order=name&desc=0&dir=" + enc(normalizePath(path)) +
+            "&num=" + num.coerceIn(1, 10_000) +
+            "&page=" + page.coerceAtLeast(1)
+        return requestJson(url, "GET")
     }
 
     fun fileManager(operation: String, fileList: JSONArray): Map<String, Any> {
@@ -320,13 +332,21 @@ internal class TeraBoxClient(
             )
         }
 
+        val current = store.readSession()
+        val tokenInfo = tokenInfo(accessToken)
+        val tokenInfoData = tokenInfo.optJSONObject("data") ?: JSONObject()
         val expiresIn = data.optLong("expires_in", 172800L).coerceAtLeast(60L)
         val session = TeraBoxSession(
             accessToken = accessToken,
-            refreshToken = refreshToken,
+            refreshToken = refreshToken.ifBlank { current?.refreshToken.orEmpty() },
             expiresAtMs = System.currentTimeMillis() + expiresIn * 1000L,
-            apiDomain = data.optString("api_domain").ifBlank { "www.terabox.com" },
-            userId = data.optString("user_id"),
+            apiDomain = tokenInfoData.optString("api_domain")
+                .ifBlank { data.optString("api_domain") }
+                .ifBlank { current?.apiDomain.orEmpty() }
+                .ifBlank { "www.terabox.com" },
+            userId = tokenInfoData.optString("user_id")
+                .ifBlank { data.optString("user_id") }
+                .ifBlank { current?.userId.orEmpty() },
         )
         store.saveSession(session)
         return mapOf(
@@ -334,6 +354,13 @@ internal class TeraBoxClient(
             "expires_at_ms" to session.expiresAtMs,
             "api_domain" to session.apiDomain,
             "user_id" to session.userId,
+        )
+    }
+
+    private fun tokenInfo(accessToken: String): JSONObject {
+        return postForm(
+            "https://www.terabox.com/oauth/tokeninfo",
+            mapOf("access_token" to accessToken),
         )
     }
 
