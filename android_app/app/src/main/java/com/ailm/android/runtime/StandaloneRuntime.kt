@@ -63,6 +63,8 @@ object StandaloneRuntime {
     @Volatile
     private var initialized = false
     private lateinit var storageProvider: StorageProvider
+    private lateinit var teraBoxStore: TeraBoxSecureStore
+    private lateinit var teraBoxClient: TeraBoxClient
     private lateinit var database: LocalDatabase
     private lateinit var repository: LocalRepository
     private lateinit var knowledgeDatabase: KnowledgeDatabase
@@ -133,7 +135,12 @@ object StandaloneRuntime {
             stateMutex.withLock {
                 if (!initialized) {
                     appContext = context.applicationContext
-                    storageProvider = SafStorageProvider(context.applicationContext)
+                    teraBoxStore = TeraBoxSecureStore(context.applicationContext)
+                    teraBoxClient = TeraBoxClient(teraBoxStore)
+                    storageProvider = RoutingStorageProvider(
+                        saf = SafStorageProvider(context.applicationContext),
+                        teraBox = TeraBoxStorageProvider(teraBoxClient),
+                    )
                     database = LocalDatabase(context.applicationContext)
                     repository = LocalRepository(database)
                     repository.removeLegacyScanDiscoveryReviews()
@@ -1763,6 +1770,67 @@ object StandaloneRuntime {
 
     fun runFaceFeatureExtractionPipeline(payload: Map<String, Any>): Map<String, Any> {
         return runAiPipeline(payload + mapOf("task_type" to "face_feature_extraction"))
+    }
+
+    fun configureTeraBox(clientId: String, clientSecret: String, privateSecret: String): Map<String, Any> {
+        ensureInitialized()
+        val config = TeraBoxConfig(
+            clientId = clientId.trim(),
+            clientSecret = clientSecret.trim(),
+            privateSecret = privateSecret.trim(),
+        )
+        if (config.clientId.isBlank() || config.clientSecret.isBlank() || config.privateSecret.isBlank()) {
+            return mapOf("ok" to false, "message" to "client_id, client_secret, and private_secret are required.")
+        }
+        teraBoxStore.saveConfig(config)
+        return mapOf(
+            "ok" to true,
+            "message" to "TeraBox application credentials saved securely on this device.",
+            "status" to teraBoxClient.connectionStatus(),
+        )
+    }
+
+    fun teraBoxAuthorizationUrl(): String {
+        ensureInitialized()
+        return teraBoxClient.authorizationUrl()
+    }
+
+    fun completeTeraBoxAuthorization(callbackUri: Uri): Map<String, Any> {
+        ensureInitialized()
+        if (!callbackUri.scheme.equals("asterioncore", ignoreCase = true) ||
+            !callbackUri.host.equals("teraboxOauth", ignoreCase = true)
+        ) {
+            return mapOf("ok" to false, "message" to "Unsupported OAuth callback.")
+        }
+        val code = callbackUri.getQueryParameter("code").orEmpty()
+        return teraBoxClient.exchangeAuthorizationCode(code)
+    }
+
+    fun teraBoxStatus(): Map<String, Any> {
+        ensureInitialized()
+        return teraBoxClient.connectionStatus()
+    }
+
+    fun disconnectTeraBox(): Boolean {
+        ensureInitialized()
+        teraBoxStore.clearSession()
+        return true
+    }
+
+    fun addTeraBoxLibraryRoot(path: String = "/"): Map<String, Any> {
+        ensureInitialized()
+        val status = teraBoxClient.connectionStatus()
+        if (status["connected"] != true) {
+            return mapOf("ok" to false, "message" to "Connect TeraBox first.")
+        }
+        val normalized = path.trim().ifBlank { "/" }.let { if (it.startsWith('/')) it else "/$it" }
+        val uri = TeraBoxUris.fromPath(normalized)
+        repository.registerFolder(uri, enabled = true)
+        return mapOf(
+            "ok" to true,
+            "folder_uri" to uri,
+            "message" to "TeraBox library root added: $normalized",
+        )
     }
 
     fun listLibraryFolders(includeDisabled: Boolean = true): List<Map<String, Any>> {
