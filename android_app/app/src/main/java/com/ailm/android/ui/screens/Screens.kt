@@ -11,6 +11,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.documentfile.provider.DocumentFile
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -168,6 +169,8 @@ fun ScreenScaffold(
     var selectedModelPackageTree by remember { mutableStateOf<Uri?>(null) }
     var selectedFusionDocument by remember { mutableStateOf<Uri?>(null) }
     var selectedKnowledgeDocument by remember { mutableStateOf<Uri?>(null) }
+    var selectedKnowledgeDocumentName by remember { mutableStateOf("") }
+    var selectedKnowledgeDocumentIsArchive by remember { mutableStateOf(false) }
     var selectedKnowledgePackDocuments by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var replacingKnowledgePackName by remember { mutableStateOf("") }
 
@@ -202,6 +205,22 @@ fun ScreenScaffold(
     ) { uri ->
         if (uri != null) {
             selectedKnowledgeDocument = uri
+            val displayName = runCatching {
+                DocumentFile.fromSingleUri(context, uri)?.name
+            }.getOrNull().orEmpty().ifBlank {
+                uri.lastPathSegment?.substringAfterLast('/').orEmpty()
+            }
+            val mime = runCatching {
+                context.contentResolver.getType(uri)?.lowercase().orEmpty()
+            }.getOrDefault("")
+            selectedKnowledgeDocumentName = displayName
+            selectedKnowledgeDocumentIsArchive =
+                displayName.lowercase().endsWith(".zip") ||
+                    mime in setOf(
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "application/x-zip",
+                    )
         }
     }
 
@@ -532,7 +551,8 @@ fun ScreenScaffold(
             onRegisterModelDownload = appViewModel::registerAiModelDownload,
             onSetActiveModel = appViewModel::setActiveAiModel,
             onClearActiveModel = appViewModel::clearActiveAiModel,
-            selectedKnowledgeDocumentName = selectedKnowledgeDocument?.lastPathSegment.orEmpty(),
+            selectedKnowledgeDocumentName = selectedKnowledgeDocumentName,
+            selectedKnowledgeDocumentIsArchive = selectedKnowledgeDocumentIsArchive,
             onChooseKnowledgeDocument = chooseKnowledgeDocument,
             onPreviewKnowledgeDocument = { form ->
                 selectedKnowledgeDocument?.let { uri ->
@@ -2690,6 +2710,7 @@ private fun AiModelManagerScreen(
     onSetActiveModel: (String, String, String) -> Unit,
     onClearActiveModel: (String) -> Unit,
     selectedKnowledgeDocumentName: String,
+    selectedKnowledgeDocumentIsArchive: Boolean,
     onChooseKnowledgeDocument: () -> Unit,
     onPreviewKnowledgeDocument: (Map<String, String>) -> Unit,
     onValidateKnowledgeDocument: (Map<String, String>) -> Unit,
@@ -3048,14 +3069,33 @@ private fun AiModelManagerScreen(
                 Text("Knowledge Management", style = MaterialTheme.typography.titleMedium)
                 Text("Knowledge packs are installed and managed here without affecting Fusion database maintenance.", style = MaterialTheme.typography.bodySmall)
                 Text(
-                    if (hasSelectedKnowledgeDocument) "Selected knowledge JSON: $selectedKnowledgeDocumentName" else "Select a knowledge JSON file to enable validation and installation.",
+                    if (hasSelectedKnowledgeDocument) {
+                        "Selected knowledge file: $selectedKnowledgeDocumentName"
+                    } else {
+                        "Select a Knowledge JSON or ZIP reference release."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
+                if (selectedKnowledgeDocumentIsArchive) {
+                    Text(
+                        "ZIP reference release detected. It will be unpacked and parsed as a grouped series/taxonomy release; it will not be read as JSON text.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onChooseKnowledgeDocument) { Text("Browse Knowledge JSON") }
-                    Button(onClick = { onPreviewKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Preview Knowledge Pack") }
-                    Button(onClick = { onValidateKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Validate Knowledge Pack") }
-                    Button(onClick = { onImportKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) { Text("Install Knowledge Pack") }
+                    Button(onClick = onChooseKnowledgeDocument) { Text("Browse Knowledge File") }
+                    Button(
+                        onClick = { onPreviewKnowledgeDocument(importForm) },
+                        enabled = hasSelectedKnowledgeDocument && !selectedKnowledgeDocumentIsArchive,
+                    ) { Text("Preview JSON Pack") }
+                    Button(
+                        onClick = { onValidateKnowledgeDocument(importForm) },
+                        enabled = hasSelectedKnowledgeDocument && !selectedKnowledgeDocumentIsArchive,
+                    ) { Text("Validate JSON Pack") }
+                    Button(onClick = { onImportKnowledgeDocument(importForm) }, enabled = hasSelectedKnowledgeDocument) {
+                        Text(if (selectedKnowledgeDocumentIsArchive) "Import Reference ZIP" else "Install Knowledge Pack")
+                    }
                 }
 
                 Text("Installed knowledge packs", style = MaterialTheme.typography.titleSmall)
