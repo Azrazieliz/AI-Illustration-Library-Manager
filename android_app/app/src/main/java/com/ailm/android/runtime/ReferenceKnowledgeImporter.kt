@@ -30,6 +30,36 @@ internal data class ReferenceKnowledgeBundle(
 )
 
 internal object ReferenceKnowledgeParser {
+    fun looksLikeReferenceDocument(filename: String, raw: String): Boolean {
+        return runCatching {
+            collectObjects(raw).any { obj ->
+                val canonicalName = obj.optString("canonical_name").trim()
+                    .ifBlank { obj.optString("character_name").trim() }
+                if (canonicalName.isBlank()) {
+                    false
+                } else {
+                    val explicitReferenceId = listOf(
+                        "series_code",
+                        "tag_id",
+                        "character_id",
+                        "outfit_id",
+                        "weapon_id",
+                    ).any { key -> obj.optString(key).trim().isNotBlank() }
+                    val genericTaxonomyId = obj.optString("id").trim().isNotBlank() &&
+                        (
+                            obj.optString("attribute").trim().isNotBlank() ||
+                                obj.has("parent_tag") ||
+                                obj.has("parent_action") ||
+                                obj.has("parent_outfit") ||
+                                obj.has("parent_weapon") ||
+                                inferCategory(filename, obj) != "tag"
+                            )
+                    explicitReferenceId || genericTaxonomyId
+                }
+            }
+        }.getOrDefault(false)
+    }
+
     fun parseDocuments(documents: Map<String, String>): ReferenceKnowledgeBundle {
         val series = linkedMapOf<String, ReferenceSeriesEntry>()
         val tags = linkedMapOf<String, ReferenceTagEntry>()
@@ -188,6 +218,13 @@ internal class ReferenceKnowledgeImporter(
         if (documents.isEmpty()) {
             return mapOf("ok" to false, "message" to "No JSON knowledge files were found in $sourceName.")
         }
+        return importDocuments(documents, sourceName)
+    }
+
+    fun importDocuments(documents: Map<String, String>, sourceName: String): Map<String, Any> {
+        if (documents.isEmpty()) {
+            return mapOf("ok" to false, "message" to "No Knowledge JSON documents were supplied.")
+        }
 
         val bundle = ReferenceKnowledgeParser.parseDocuments(documents)
         if (bundle.series.isEmpty() && bundle.tags.isEmpty() && bundle.characters.isEmpty()) {
@@ -197,7 +234,7 @@ internal class ReferenceKnowledgeImporter(
         return runCatching {
             if (bundle.series.isNotEmpty() || bundle.tags.isNotEmpty()) {
                 require(bundle.series.isNotEmpty() && bundle.tags.isNotEmpty()) {
-                    "A taxonomy release must contain both canonical series and taxonomy values."
+                    "A reference taxonomy release must contain both canonical series and taxonomy values. Select the series JSON and taxonomy JSON files together."
                 }
                 knowledgeDatabase.replaceReferenceKnowledge(
                     ReferenceKnowledgeBundle(bundle.series, bundle.tags),
@@ -212,6 +249,7 @@ internal class ReferenceKnowledgeImporter(
                 "message" to "Immutable Knowledge release imported.",
                 "kind" to "immutable_knowledge_release",
                 "source" to sourceName,
+                "documents" to documents.size,
                 "series_entries" to bundle.series.size,
                 "tag_entries" to bundle.tags.size,
                 "character_entries" to bundle.characters.size,
@@ -227,4 +265,5 @@ internal class ReferenceKnowledgeImporter(
             )
         }
     }
+}
 }
