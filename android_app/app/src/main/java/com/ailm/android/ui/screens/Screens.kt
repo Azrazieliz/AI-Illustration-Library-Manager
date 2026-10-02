@@ -2590,7 +2590,7 @@ private fun AiAutomationScreen(
             ) {
                 Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Each image is completed before Asterion moves to the next. Required installed models are selected and loaded automatically stage by stage (for example OCR, NSFW classification, Qwen-VL analysis, embeddings and scoring). Character Knowledge then filters and ranks possible identities, and the canonical series comes from the resolved character rather than a free-form series guess. With Character Knowledge available, a resolved image is renamed and moved into its created canonical series/character path before the next image starts. Without Character Knowledge, analysis can complete but identity-based rename/move waits instead of guessing. Low-confidence identity goes to Review; runtime or file-operation failures are reported separately. Pause finishes the current image safely.",
+                    "Each image is completed before Asterion moves to the next. Specialized stages run first (OCR, NSFW classification, visual embedding and aesthetic scoring), then Qwen-VL is loaded once for one structured semantic pass that returns the caption, canonical illustration tags, normalized visual context and observable character attributes. Character Knowledge resolves identity afterward; Qwen never becomes the identity source of truth. With Character Knowledge available, the image is renamed and moved into its canonical series/character path before the next image starts. Without Character Knowledge, analysis completes and organization waits instead of guessing. Review outcomes and actual runtime/file failures are tracked separately.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -4007,7 +4007,12 @@ private fun SettingsScreen(
                         onValueChange = { teraBoxRootPath = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("TeraBox API library root path") },
+                        label = { Text("TeraBox assigned app library path") },
+                    )
+                    Text(
+                        "Use the Open Platform path assigned to this TeraBox app. Asterion will scan and modify files in that API-visible tree directly.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Button(onClick = { onAddTeraBoxLibraryRoot(teraBoxRootPath) }) {
                         Text("Add TeraBox as Library")
