@@ -7,7 +7,6 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -435,7 +434,7 @@ internal class TeraBoxStorageProvider(
                 ),
             )
             val children = client.list(path)
-            children.asReversed().forEach { child ->
+            for (child in children.asReversed()) {
                 val childUri = TeraBoxUris.fromPath(child.path)
                 if (child.directory) {
                     stack.add(child.path to TeraBoxUris.fromPath(path))
@@ -511,7 +510,7 @@ internal class TeraBoxStorageProvider(
     override fun copy(sourceUri: String, targetFolderUri: String, preferredName: String?): StorageWriteResult {
         val source = TeraBoxUris.path(sourceUri) ?: return StorageWriteResult(false, message = "invalid source TeraBox URI")
         val destination = TeraBoxUris.path(targetFolderUri) ?: return StorageWriteResult(false, message = "invalid destination TeraBox URI")
-        val name = preferredName?.trim().takeUnless(String::isNullOrBlank) ?: source.substringAfterLast('/')
+        val name = preferredName?.trim()?.takeIf { it.isNotBlank() } ?: source.substringAfterLast('/')
         val result = client.copy(source, destination, name)
         return StorageWriteResult(
             ok = result["ok"] == true,
@@ -524,7 +523,7 @@ internal class TeraBoxStorageProvider(
     override fun move(sourceUri: String, targetFolderUri: String, preferredName: String?): StorageWriteResult {
         val source = TeraBoxUris.path(sourceUri) ?: return StorageWriteResult(false, message = "invalid source TeraBox URI")
         val destination = TeraBoxUris.path(targetFolderUri) ?: return StorageWriteResult(false, message = "invalid destination TeraBox URI")
-        val name = preferredName?.trim().takeUnless(String::isNullOrBlank) ?: source.substringAfterLast('/')
+        val name = preferredName?.trim()?.takeIf { it.isNotBlank() } ?: source.substringAfterLast('/')
         val result = client.move(source, destination, name)
         return StorageWriteResult(
             ok = result["ok"] == true,
