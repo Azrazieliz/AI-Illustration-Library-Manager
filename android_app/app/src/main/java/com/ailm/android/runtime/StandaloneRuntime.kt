@@ -47,13 +47,17 @@ object StandaloneRuntime {
     // next library image. The execution planner selects the installed model for
     // each task (PaddleOCR, NSFW classifier, Qwen-VL, Nomic, etc.) automatically.
     private val autonomousImageStageCandidates = listOf(
+        // Cheap/specialized analysis first; their outputs are available to the
+        // later semantic stages for the same image.
         "ocr",
         "nsfw_classification",
+        "embedding_generation",
+        "aesthetic_scoring",
+        // Keep the Qwen-VL semantic stages contiguous so the runtime can reuse
+        // a warm model/session rather than bouncing between large backends.
         "captioning",
         "tag_prediction",
         "normalization",
-        "embedding_generation",
-        "aesthetic_scoring",
         "character_recognition",
     )
 
