@@ -43,6 +43,7 @@ internal class FusionResolutionStore(
         } else {
             """
             i.active = 1 AND (
+                fp.image_id IS NULL OR
                 s.image_id IS NULL OR
                 s.state IN ('pending', 'retry_required', 'failed') OR
                 (
@@ -56,6 +57,7 @@ internal class FusionResolutionStore(
             SELECT i.image_id
             FROM images i
             LEFT JOIN fusion_automation_state s ON s.image_id = i.image_id
+            LEFT JOIN ${FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS} fp ON fp.image_id = i.image_id
             WHERE $predicate
             ORDER BY i.imported_order ASC, i.image_id ASC
         """.trimIndent()
