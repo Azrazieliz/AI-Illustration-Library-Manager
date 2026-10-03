@@ -1171,6 +1171,11 @@ object StandaloneRuntime {
             val caption = qwenResult["caption"]?.toString().orEmpty()
             val normalized = qwenResult["normalized_context"]?.toString().orEmpty()
             val tags = (qwenResult["tags"] as? List<*>)?.mapNotNull { it?.toString() }.orEmpty()
+            val routing = (qwenResult["routing"] as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
+                ?.toMap()
+                .orEmpty()
             val subjects = (qwenResult["subjects"] as? List<*>)?.mapNotNull { subject ->
                 (subject as? Map<*, *>)?.entries
                     ?.mapNotNull { (key, value) -> key?.toString()?.let { text -> value?.let { text to it } } }
@@ -1192,6 +1197,7 @@ object StandaloneRuntime {
             syntheticOutputs["character_recognition"] = mapOf(
                 "result" to mapOf(
                     "subjects" to subjects,
+                    "routing" to routing,
                     "raw_observation_json" to (qwenResult["raw_semantic_json"]?.toString().orEmpty()),
                 ),
                 "message" to "Qwen-VL bundled semantic pass",
