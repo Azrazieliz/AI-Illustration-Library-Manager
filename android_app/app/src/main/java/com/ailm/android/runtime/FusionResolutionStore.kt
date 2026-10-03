@@ -24,6 +24,16 @@ internal data class SubjectResolutionRecord(
     val status: String,
 )
 
+internal data class ImageFingerprintMatch(
+    val imageId: Int,
+    val uri: String,
+    val filename: String,
+    val perceptualHash: String,
+    val width: Int,
+    val height: Int,
+    val sizeBytes: Long,
+)
+
 internal class FusionResolutionStore(
     private val database: LocalDatabase,
 ) {
@@ -70,6 +80,97 @@ internal class FusionResolutionStore(
             """.trimIndent(),
             arrayOf(System.currentTimeMillis()),
         )
+    }
+
+    fun upsertImageFingerprint(
+        imageId: Int,
+        sha256: String,
+        perceptualHash: String,
+        width: Int,
+        height: Int,
+        sizeBytes: Long,
+    ) {
+        database.writableDatabase.insertWithOnConflict(
+            FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS,
+            null,
+            ContentValues().apply {
+                put("image_id", imageId)
+                put("sha256", sha256.trim().lowercase())
+                put("perceptual_hash", perceptualHash.trim().lowercase())
+                put("pixel_width", width.coerceAtLeast(0))
+                put("pixel_height", height.coerceAtLeast(0))
+                put("source_size_bytes", sizeBytes.coerceAtLeast(0L))
+                put("updated_at_ms", System.currentTimeMillis())
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+    }
+
+    fun findExactDuplicate(imageId: Int, sha256: String): ImageFingerprintMatch? {
+        val clean = sha256.trim().lowercase()
+        if (clean.isBlank()) return null
+        return database.readableDatabase.rawQuery(
+            """
+            SELECT f.image_id, i.uri, i.filename, f.perceptual_hash,
+                   f.pixel_width, f.pixel_height, f.source_size_bytes
+            FROM ${FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS} f
+            JOIN images i ON i.image_id = f.image_id
+            WHERE f.sha256 = ? AND f.image_id != ? AND i.active = 1
+            ORDER BY f.image_id ASC
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(clean, imageId.toString()),
+        ).use { cursor ->
+            if (!cursor.moveToFirst()) null else ImageFingerprintMatch(
+                imageId = cursor.getInt(0),
+                uri = cursor.getString(1),
+                filename = cursor.getString(2),
+                perceptualHash = cursor.getString(3).orEmpty(),
+                width = cursor.getInt(4),
+                height = cursor.getInt(5),
+                sizeBytes = cursor.getLong(6),
+            )
+        }
+    }
+
+    fun perceptualDuplicateCandidates(
+        imageId: Int,
+        width: Int,
+        height: Int,
+        limit: Int = 500,
+    ): List<ImageFingerprintMatch> {
+        if (width <= 0 || height <= 0) return emptyList()
+        val bounded = limit.coerceIn(1, 5000)
+        return buildList {
+            database.readableDatabase.rawQuery(
+                """
+                SELECT f.image_id, i.uri, i.filename, f.perceptual_hash,
+                       f.pixel_width, f.pixel_height, f.source_size_bytes
+                FROM ${FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS} f
+                JOIN images i ON i.image_id = f.image_id
+                WHERE f.image_id != ? AND i.active = 1
+                  AND f.pixel_width = ? AND f.pixel_height = ?
+                  AND f.perceptual_hash != ''
+                ORDER BY f.image_id ASC
+                LIMIT ?
+                """.trimIndent(),
+                arrayOf(imageId.toString(), width.toString(), height.toString(), bounded.toString()),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    add(
+                        ImageFingerprintMatch(
+                            imageId = cursor.getInt(0),
+                            uri = cursor.getString(1),
+                            filename = cursor.getString(2),
+                            perceptualHash = cursor.getString(3).orEmpty(),
+                            width = cursor.getInt(4),
+                            height = cursor.getInt(5),
+                            sizeBytes = cursor.getLong(6),
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     fun markAutomationState(
