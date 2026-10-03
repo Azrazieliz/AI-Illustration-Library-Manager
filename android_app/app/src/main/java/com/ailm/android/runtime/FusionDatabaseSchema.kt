@@ -30,6 +30,7 @@ object FusionDatabaseSchema {
     const val TABLE_IMAGE_OUTFITS = "fusion_image_outfits"
     const val TABLE_IMAGE_WEAPONS = "fusion_image_weapons"
     const val TABLE_IMAGE_ARTISTS = "fusion_image_artists"
+    const val TABLE_IMAGE_FINGERPRINTS = "fusion_image_fingerprints"
 
     val DOMAIN_TABLE_ORDER: List<String> = listOf(
         TABLE_FRANCHISES,
@@ -572,6 +573,22 @@ object FusionDatabaseSchema {
             )
             """.trimIndent(),
         )
+
+        db.execSQL(
+            """
+            CREATE TABLE ${ifNotExistsSql}$TABLE_IMAGE_FINGERPRINTS (
+                image_id INTEGER PRIMARY KEY,
+                sha256 TEXT NOT NULL DEFAULT '',
+                perceptual_hash TEXT NOT NULL DEFAULT '',
+                pixel_width INTEGER NOT NULL DEFAULT 0,
+                pixel_height INTEGER NOT NULL DEFAULT 0,
+                source_size_bytes INTEGER NOT NULL DEFAULT 0,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(image_id) REFERENCES images(image_id)
+                    ON UPDATE RESTRICT ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
     }
 
     private fun createFusionIndexes(db: SQLiteDatabase, ifNotExists: Boolean) {
@@ -624,6 +641,9 @@ object FusionDatabaseSchema {
         db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_outfits_outfit ON $TABLE_IMAGE_OUTFITS(outfit_id)")
         db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_weapons_weapon ON $TABLE_IMAGE_WEAPONS(weapon_id)")
         db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_artists_artist ON $TABLE_IMAGE_ARTISTS(artist_id)")
+        db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_fingerprints_sha256 ON $TABLE_IMAGE_FINGERPRINTS(sha256)")
+        db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_fingerprints_phash ON $TABLE_IMAGE_FINGERPRINTS(perceptual_hash)")
+        db.execSQL("CREATE INDEX ${ifNotExistsSql}idx_fusion_image_fingerprints_dimensions ON $TABLE_IMAGE_FINGERPRINTS(pixel_width, pixel_height)")
     }
 
     private fun createImmutableIdTriggers(db: SQLiteDatabase, ifNotExists: Boolean) {
