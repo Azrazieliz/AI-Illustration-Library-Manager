@@ -1253,10 +1253,11 @@ object StandaloneRuntime {
         val workflow = aiWorkflowCoordinator.applyImageWorkflow(imageId, combinedResponse)
 
         val hasCharacterKnowledge = knowledgeDatabase.hasCharacters()
-        val organization = if (hasCharacterKnowledge) {
-            organizeAutonomousImage(imageId, workflow)
-        } else {
-            mapOf(
+        val terminalContentRoute = workflow["content_route_terminal"] == true
+        val organization = when {
+            terminalContentRoute -> organizeAutonomousImage(imageId, workflow)
+            hasCharacterKnowledge -> organizeAutonomousImage(imageId, workflow)
+            else -> mapOf(
                 "ok" to true,
                 "status" to "waiting_for_knowledge",
                 "message" to "Analysis completed; character-based rename/move is deferred until Character Knowledge is available.",
@@ -1273,6 +1274,7 @@ object StandaloneRuntime {
         val state = when {
             pipelineFailed -> "retry_required"
             organizationFailed -> "retry_required"
+            terminalContentRoute -> "complete"
             !hasCharacterKnowledge -> "waiting_for_knowledge"
             needsReview -> "review_pending"
             else -> "complete"
@@ -1289,7 +1291,13 @@ object StandaloneRuntime {
             imageId = imageId,
             state = state,
             pipelineComplete = !pipelineFailed,
-            organizationComplete = organizationStatus in setOf("organized", "already_organized", "unchanged"),
+            organizationComplete = organizationStatus in setOf(
+                "organized",
+                "already_organized",
+                "unchanged",
+                "routed_content",
+                "already_routed",
+            ),
             needsReview = needsReview || organizationFailed || pipelineFailed,
             lastError = when {
                 organizationFailed -> organization["message"]?.toString().orEmpty()
