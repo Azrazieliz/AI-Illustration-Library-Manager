@@ -64,6 +64,30 @@ internal object ImageFingerprinting {
         )
     }
 
+    fun isConservativeVisualDuplicate(
+        current: ImageFingerprint,
+        candidate: ImageFingerprintMatch,
+        maxBitDistance: Int = 4,
+    ): Boolean {
+        if (current.width <= 0 || current.height <= 0) return false
+        if (current.width != candidate.width || current.height != candidate.height) return false
+        if (current.perceptualHash.isBlank() || candidate.perceptualHash.isBlank()) return false
+        return perceptualHashDistance(current.perceptualHash, candidate.perceptualHash) <= maxBitDistance
+    }
+
+    fun perceptualHashDistance(first: String, second: String): Int {
+        val a = first.trim().lowercase()
+        val b = second.trim().lowercase()
+        if (a.length != b.length || a.isBlank()) return Int.MAX_VALUE
+        var distance = 0
+        for (index in a.indices) {
+            val left = a[index].digitToIntOrNull(16) ?: return Int.MAX_VALUE
+            val right = b[index].digitToIntOrNull(16) ?: return Int.MAX_VALUE
+            distance += Integer.bitCount(left xor right)
+        }
+        return distance
+    }
+
     private fun sha256(storage: StorageProvider, uri: String): String? = runCatching {
         val digest = MessageDigest.getInstance("SHA-256")
         storage.openInputStream(uri)?.use { input ->
