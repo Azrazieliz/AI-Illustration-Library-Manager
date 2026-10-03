@@ -1331,12 +1331,31 @@ object StandaloneRuntime {
                 "automation_stage_failures" to 0,
             )
 
-        val fingerprint = ImageFingerprinting.inspect(
+        val inspection = ImageFingerprinting.inspect(
             storage = storageProvider,
             uri = record.uri,
             reportedSizeBytes = record.sizeBytes ?: 0L,
         )
-        if (fingerprint == null) {
+        if (inspection.status == "unreadable") {
+            resolutionStore.markAutomationState(
+                imageId = imageId,
+                state = "retry_required",
+                pipelineComplete = false,
+                organizationComplete = false,
+                needsReview = false,
+                lastError = "Image could not be read for integrity checking.",
+            )
+            return mapOf(
+                "ok" to false,
+                "status" to "retry_required",
+                "message" to "Image could not be read; it was left untouched for a later retry.",
+                "automation_stage_failures" to 0,
+                "automation_state" to "retry_required",
+            )
+        }
+
+        val fingerprint = inspection.fingerprint
+        if (inspection.status == "invalid_image" || fingerprint == null) {
             val corrupt = ContentTriagePolicy.corruptDecision()
             val workflow = mapOf<String, Any>(
                 "accepted" to false,
