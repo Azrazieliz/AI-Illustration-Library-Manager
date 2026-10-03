@@ -3,8 +3,10 @@ package com.ailm.android.runtime
 internal data class ContentRoutingObservation(
     val contentClass: String = "other",
     val peopleCount: Int = 0,
+    val identifiableCharacterCount: Int = -1,
     val promotionOrPreview: Boolean = false,
-    val landscapeOrScenery: Boolean = false,
+    val sceneryOrEnvironment: Boolean = false,
+    val environmentDominant: Boolean = false,
     val qualityFlags: List<String> = emptyList(),
     val ocrText: String = "",
 )
@@ -20,8 +22,9 @@ internal data class ContentTriageDecision(
 
 internal object ContentTriagePolicy {
     const val ROUTE_CHARACTER = "character"
-    const val ROUTE_LANDSCAPE = "landscape"
+    const val ROUTE_SCENERY = "scenery"
     const val ROUTE_PROMOTION_TRASH = "promotion_trash"
+    const val ROUTE_JUNK_TRASH = "junk_trash"
     const val ROUTE_NO_CHARACTER_TRASH = "no_character_trash"
     const val ROUTE_UNIDENTIFIED_GROUP = "unidentified_group"
     const val ROUTE_SINGLE_UNIDENTIFIED = "single_unidentified"
@@ -35,7 +38,11 @@ internal object ContentTriagePolicy {
     ): ContentTriageDecision {
         val contentClass = observation.contentClass.trim().lowercase()
         val flags = observation.qualityFlags.map { it.trim().lowercase() }.toSet()
-        val people = observation.peopleCount.coerceAtLeast(0)
+        val visiblePeople = observation.peopleCount.coerceAtLeast(0)
+        val identifiableCharacters = observation.identifiableCharacterCount
+            .takeIf { it >= 0 }
+            ?.coerceAtLeast(0)
+            ?: visiblePeople
 
         val promotion = observation.promotionOrPreview ||
             contentClass in PROMOTION_CLASSES ||
@@ -51,6 +58,18 @@ internal object ContentTriagePolicy {
             )
         }
 
+        val junk = contentClass in JUNK_CLASSES || flags.any { it in JUNK_FLAGS }
+        if (junk) {
+            return ContentTriageDecision(
+                route = ROUTE_JUNK_TRASH,
+                folderSegments = listOf("Trash", "Junk"),
+                filenamePrefix = "Junk",
+                terminal = true,
+                reason = "Blank, broken, placeholder, or otherwise non-library image content.",
+            )
+        }
+
+        // Canonical Character Knowledge always wins over generic visual routing.
         if (resolvedCharacterCount > 0) {
             return ContentTriageDecision(
                 route = ROUTE_CHARACTER,
@@ -58,35 +77,44 @@ internal object ContentTriagePolicy {
             )
         }
 
-        val landscape = observation.landscapeOrScenery ||
-            contentClass in LANDSCAPE_CLASSES
-        if (landscape && people == 0) {
+        val scenery = observation.sceneryOrEnvironment ||
+            observation.environmentDominant ||
+            contentClass in SCENERY_CLASSES
+
+        // Scenery is defined by composition, not by a literal zero-person count.
+        // Tiny silhouettes, decorative figures, statues, angel-like light forms,
+        // distant crowds, etc. may be visible without being character subjects.
+        if (scenery && (identifiableCharacters == 0 || observation.environmentDominant)) {
             return ContentTriageDecision(
-                route = ROUTE_LANDSCAPE,
-                folderSegments = listOf("Landscapes"),
-                filenamePrefix = "Landscape",
+                route = ROUTE_SCENERY,
+                folderSegments = listOf("Scenery"),
+                filenamePrefix = "Scenery",
                 terminal = true,
-                reason = "Scenery/landscape with no character subject.",
+                reason = "Environment/scenery is the primary image content and no canonical character identity resolved.",
             )
         }
 
-        if (people == 0) {
+        if (visiblePeople == 0 && identifiableCharacters == 0) {
             return ContentTriageDecision(
                 route = ROUTE_NO_CHARACTER_TRASH,
                 folderSegments = listOf("Trash", "No Character"),
                 filenamePrefix = "No Character",
                 terminal = true,
-                reason = "No visible character/person and not classified as landscape.",
+                reason = "No visible character/person and not classified as scenery.",
             )
         }
 
-        if (people >= 2 || contentClass in MULTI_CHARACTER_CLASSES) {
+        if (
+            identifiableCharacters >= 2 ||
+            (identifiableCharacters < 0 && visiblePeople >= 2) ||
+            contentClass in MULTI_CHARACTER_CLASSES
+        ) {
             return ContentTriageDecision(
                 route = ROUTE_UNIDENTIFIED_GROUP,
                 folderSegments = listOf("Unidentified Groups"),
                 filenamePrefix = "Unidentified Group",
                 terminal = true,
-                reason = "Multiple visible characters/people without a specific resolved identity.",
+                reason = "Multiple identifiable character subjects are visible but none resolved to Character Knowledge.",
             )
         }
 
@@ -94,12 +122,12 @@ internal object ContentTriagePolicy {
             ContentTriageDecision(
                 route = ROUTE_SINGLE_UNIDENTIFIED,
                 requiresReview = true,
-                reason = "One visible character/person could not be resolved confidently.",
+                reason = "One identifiable character subject could not be resolved confidently.",
             )
         } else {
             ContentTriageDecision(
                 route = ROUTE_WAITING_FOR_KNOWLEDGE,
-                reason = "One visible character/person is waiting for Character Knowledge.",
+                reason = "One identifiable character subject is waiting for Character Knowledge.",
             )
         }
     }
@@ -128,19 +156,31 @@ internal object ContentTriagePolicy {
         "contact_sheet",
     )
 
-    private val LANDSCAPE_CLASSES = setOf(
-        "landscape",
+    private val SCENERY_CLASSES = setOf(
         "scenery",
         "environment",
         "background",
         "cityscape",
         "nature",
+        "landscape",
+        "architecture",
+        "interior",
+        "space",
+        "abstract_environment",
     )
 
     private val MULTI_CHARACTER_CLASSES = setOf(
         "multi_character",
         "group",
         "crowd",
+    )
+
+    private val JUNK_CLASSES = setOf(
+        "blank",
+        "broken_image",
+        "error_screen",
+        "loading_screen",
+        "thumbnail_placeholder",
     )
 
     private val PROMOTION_FLAGS = setOf(
@@ -151,6 +191,15 @@ internal object ContentTriagePolicy {
         "contact_sheet",
         "blurred_preview",
         "sample_grid",
+    )
+
+    private val JUNK_FLAGS = setOf(
+        "blank",
+        "broken_image",
+        "decode_artifact",
+        "loading_screen",
+        "thumbnail_placeholder",
+        "solid_color_placeholder",
     )
 
     private val PROMOTION_TEXT_MARKERS = setOf(
