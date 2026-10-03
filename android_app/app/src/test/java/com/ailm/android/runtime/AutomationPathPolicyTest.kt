@@ -67,4 +67,56 @@ class AutomationPathPolicyTest {
         assertEquals("Original Character", plan.filenamePrefix)
         assertEquals("OC000123", plan.primaryCharacter)
     }
+
+    @Test
+    fun `automation triage preserves landscapes and separates unknown groups`() {
+        val landscape = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "landscape",
+                peopleCount = 0,
+                landscapeOrScenery = true,
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+        assertEquals(ContentTriagePolicy.ROUTE_LANDSCAPE, landscape.route)
+        assertEquals(listOf("Landscapes"), landscape.folderSegments)
+
+        val group = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "multi_character",
+                peopleCount = 3,
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+        assertEquals(ContentTriagePolicy.ROUTE_UNIDENTIFIED_GROUP, group.route)
+        assertEquals(listOf("Unidentified Groups"), group.folderSegments)
+    }
+
+    @Test
+    fun `automation triage sends promotions and generic no character content to trash`() {
+        val promotion = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                peopleCount = 0,
+                ocrText = "FULL VERSION PATREON.COM/example",
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+        assertEquals(ContentTriagePolicy.ROUTE_PROMOTION_TRASH, promotion.route)
+        assertEquals(listOf("Trash", "Promotion"), promotion.folderSegments)
+
+        val generic = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "non_character",
+                peopleCount = 0,
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+        assertEquals(ContentTriagePolicy.ROUTE_NO_CHARACTER_TRASH, generic.route)
+        assertEquals(listOf("Trash", "No Character"), generic.folderSegments)
+    }
+
 }
