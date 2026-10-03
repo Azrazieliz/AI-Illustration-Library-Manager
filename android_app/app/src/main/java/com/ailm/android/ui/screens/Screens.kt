@@ -88,6 +88,8 @@ import com.ailm.android.runtime.FolderUriUtils
 import com.ailm.android.ui.components.AsterionEmptyState
 import com.ailm.android.ui.components.AsterionProgressCard
 import com.ailm.android.ui.components.AsterionStatusNotice
+import com.ailm.android.ui.components.AsterionSectionHeader
+import com.ailm.android.ui.components.AsterionMetric
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -791,14 +793,10 @@ private fun DashboardScreen(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("AsterionCore", style = MaterialTheme.typography.headlineMedium)
-            Text(
-                "Library overview",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        AsterionSectionHeader(
+            title = "AsterionCore",
+            detail = "Library overview",
+        )
 
         state.errorMessage?.let { AsterionStatusNotice(it, isError = true) }
 
@@ -812,18 +810,9 @@ private fun DashboardScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Column {
-                        Text(totalImages.toString(), style = MaterialTheme.typography.headlineSmall)
-                        Text("Images", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Column {
-                        Text(totalFolders.toString(), style = MaterialTheme.typography.headlineSmall)
-                        Text("Folders", style = MaterialTheme.typography.bodySmall)
-                    }
-                    Column {
-                        Text(state.tags.size.toString(), style = MaterialTheme.typography.headlineSmall)
-                        Text("Tags", style = MaterialTheme.typography.bodySmall)
-                    }
+                    AsterionMetric(totalImages.toString(), "Images", Modifier.weight(1f))
+                    AsterionMetric(totalFolders.toString(), "Folders", Modifier.weight(1f))
+                    AsterionMetric(state.tags.size.toString(), "Tags", Modifier.weight(1f))
                 }
                 Text(
                     "Status: $healthLabel",
@@ -2504,14 +2493,10 @@ private fun AiAutomationScreen(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text("Automation", style = MaterialTheme.typography.headlineMedium)
-            Text(
-                "One run processes the library image by image. Asterion chooses the required models and tasks automatically.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+        AsterionSectionHeader(
+            title = "Automation",
+            detail = "One image at a time. Models, routing, deduplication and organization run automatically.",
+        )
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
@@ -2633,8 +2618,9 @@ private fun AiAutomationScreen(
             ) {
                 Text("What happens automatically", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "Each image is completed before Asterion moves to the next. Specialized stages run first (OCR, NSFW classification, visual embedding and aesthetic scoring), then Qwen-VL is loaded once for one structured semantic pass that returns the caption, canonical illustration tags, normalized visual context and observable character attributes. Character Knowledge resolves identity afterward; Qwen never becomes the identity source of truth. With Character Knowledge available, the image is renamed and moved into its canonical series/character path before the next image starts. Without Character Knowledge, analysis completes and organization waits instead of guessing. Review outcomes and actual runtime/file failures are tracked separately.",
+                    "Asterion checks integrity and duplicates before loading AI. OCR, NSFW, embeddings and scoring run first, followed by one Qwen-VL semantic pass. Character Knowledge remains the identity authority; Scenery, promotional junk, corrupt files and unresolved groups are routed separately instead of flooding Review.",
                     style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
