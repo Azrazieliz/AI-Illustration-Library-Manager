@@ -76,13 +76,15 @@ internal class KnowledgeDatabase(
         db.execSQL(
             """
             CREATE TABLE knowledge_tag_aliases (
-                alias_key TEXT PRIMARY KEY,
+                alias_key TEXT NOT NULL,
                 tag_id TEXT NOT NULL,
+                PRIMARY KEY(alias_key, tag_id),
                 FOREIGN KEY(tag_id) REFERENCES knowledge_tags(tag_id)
                     ON UPDATE RESTRICT ON DELETE CASCADE
             )
             """.trimIndent(),
         )
+        db.execSQL("CREATE INDEX idx_knowledge_tag_aliases_key ON knowledge_tag_aliases(alias_key)")
         db.execSQL("CREATE INDEX idx_knowledge_tag_aliases_tag ON knowledge_tag_aliases(tag_id)")
 
         db.execSQL(
@@ -220,7 +222,7 @@ internal class KnowledgeDatabase(
                     },
                 )
                 (entry.aliases + entry.name + entry.id).distinct().forEach { alias ->
-                    insertAlias(db, "knowledge_tag_aliases", "tag_id", entry.id, alias)
+                    insertTagAlias(db, entry.id, alias)
                 }
             }
             bundle.tags.filter { it.parentId.isNotBlank() }.forEach { entry ->
@@ -435,12 +437,34 @@ internal class KnowledgeDatabase(
     }
 
     fun resolveTag(value: String): ReferenceTagEntry? {
-        val key = aliasKey(value)
+        val direct = value.trim()
+        if (direct.isBlank()) return null
+
+        // Tag IDs are the authoritative machine representation. Always prefer
+        // an exact ID before considering human-readable names or aliases.
+        readableDatabase.rawQuery(
+            "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json " +
+                "FROM knowledge_tags WHERE tag_id = ? COLLATE NOCASE LIMIT 1",
+            arrayOf(direct),
+        ).use { cursor ->
+            if (cursor.moveToFirst()) return cursor.toReferenceTag()
+        }
+
+        val key = aliasKey(direct)
         if (key.isBlank()) return null
-        val tagId = readableDatabase.rawQuery(
-            "SELECT tag_id FROM knowledge_tag_aliases WHERE alias_key = ? LIMIT 1",
-            arrayOf(key),
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null } ?: return null
+        val tagIds = buildList {
+            readableDatabase.rawQuery(
+                "SELECT tag_id FROM knowledge_tag_aliases WHERE alias_key = ? ORDER BY tag_id",
+                arrayOf(key),
+            ).use { cursor ->
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }.distinct()
+
+        // A human-readable label such as "Black" can legitimately belong to
+        // several dimensions (hair, eyes, skin). Ambiguous labels must not be
+        // silently assigned to an arbitrary tag.
+        val tagId = tagIds.singleOrNull() ?: return null
         return readableDatabase.rawQuery(
             "SELECT tag_id, canonical_name, category, COALESCE(parent_tag_id, ''), aliases_json FROM knowledge_tags WHERE tag_id = ? LIMIT 1",
             arrayOf(tagId),
@@ -576,6 +600,24 @@ internal class KnowledgeDatabase(
         )
     }
 
+    private fun insertTagAlias(
+        db: SQLiteDatabase,
+        tagId: String,
+        alias: String,
+    ) {
+        val key = aliasKey(alias)
+        if (key.isBlank()) return
+        db.insertWithOnConflict(
+            "knowledge_tag_aliases",
+            null,
+            ContentValues().apply {
+                put("alias_key", key)
+                put("tag_id", tagId)
+            },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
+    }
+
     private fun insertAlias(
         db: SQLiteDatabase,
         table: String,
@@ -678,7 +720,7 @@ internal class KnowledgeDatabase(
 
     companion object {
         private const val DB_NAME = "asterion_knowledge.sqlite"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
 
         fun featureWeight(id: String): Double = when {
             id.startsWith("WP", ignoreCase = true) -> 1.55
