@@ -471,6 +471,13 @@ internal class LlamaCppBackend(
                     {
                       "caption":"one concise factual sentence",
                       "normalized_context":"concise canonical visual description",
+                      "routing":{
+                        "content_class":"character|multi_character|landscape|promotion|non_character|document|screenshot|other",
+                        "people_count":0,
+                        "promotion_or_preview":false,
+                        "landscape_or_scenery":false,
+                        "quality_flags":["preview","placeholder","blurred_preview","contact_sheet","promotional_overlay"]
+                      },
                       "tags":["canonical illustration taxonomy ID", "..."],
                       "subjects":[
                         {
@@ -485,11 +492,15 @@ internal class LlamaCppBackend(
                     Rules:
                     - caption: visible facts only.
                     - normalized_context: preserve visible meaning; invent nothing.
+                    - routing.people_count counts visible human/human-like character subjects independently of Character Taxonomy.
+                    - routing.content_class=landscape only when scenery/environment is the primary content and there are no visible character subjects.
+                    - routing.content_class=promotion for paywall previews, promotional/sample grids, blurred teaser cards, advertisements, or images whose main purpose is to redirect to paid/full content.
+                    - quality_flags must describe only clearly visible quality/content-state signals; omit flags that do not apply.
                     - tags: use ONLY IDs from Illustration Taxonomy; omit uncertain concepts.
                     - subjects: use ONLY IDs from Character Taxonomy; describe visible physical attributes only.
                     - Never emit character names, series names, guessed identities, or IDs not present in the supplied taxonomies.
                     - confidence and prominence are 0..1. bbox is normalized [x,y,width,height].
-                    - If Character Taxonomy is empty, return "subjects":[].
+                    - If Character Taxonomy is empty, return "subjects":[] but STILL report routing.people_count from the image itself.
                     - Return JSON only, no markdown.
 
                     OCR context:
@@ -643,9 +654,35 @@ internal class LlamaCppBackend(
                 }
             }
 
+            val routingObject = root.optJSONObject("routing")
+            val routing = if (routingObject == null) {
+                mapOf(
+                    "content_class" to "other",
+                    "people_count" to subjects.size,
+                    "promotion_or_preview" to false,
+                    "landscape_or_scenery" to false,
+                    "quality_flags" to emptyList<String>(),
+                )
+            } else {
+                val qualityArray = routingObject.optJSONArray("quality_flags") ?: JSONArray()
+                val qualityFlags = buildList {
+                    for (index in 0 until qualityArray.length()) {
+                        qualityArray.optString(index).trim().takeIf(String::isNotBlank)?.let(::add)
+                    }
+                }.distinct()
+                mapOf(
+                    "content_class" to routingObject.optString("content_class", "other").trim().lowercase(),
+                    "people_count" to routingObject.optInt("people_count", subjects.size).coerceAtLeast(0),
+                    "promotion_or_preview" to routingObject.optBoolean("promotion_or_preview", false),
+                    "landscape_or_scenery" to routingObject.optBoolean("landscape_or_scenery", false),
+                    "quality_flags" to qualityFlags,
+                )
+            }
+
             mapOf(
                 "caption" to root.optString("caption").trim(),
                 "normalized_context" to root.optString("normalized_context").trim(),
+                "routing" to routing,
                 "tags" to tags,
                 "subjects" to subjects,
                 "raw_semantic_json" to candidate,
@@ -654,6 +691,13 @@ internal class LlamaCppBackend(
             mapOf(
                 "caption" to "",
                 "normalized_context" to "",
+                "routing" to mapOf(
+                    "content_class" to "other",
+                    "people_count" to 0,
+                    "promotion_or_preview" to false,
+                    "landscape_or_scenery" to false,
+                    "quality_flags" to emptyList<String>(),
+                ),
                 "tags" to emptyList<String>(),
                 "subjects" to emptyList<Map<String, Any>>(),
                 "raw_semantic_json" to generated.trim(),
