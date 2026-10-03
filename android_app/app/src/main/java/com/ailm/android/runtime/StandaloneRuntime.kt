@@ -1382,6 +1382,21 @@ object StandaloneRuntime {
     }
 
     private fun organizeAutonomousImage(imageId: Int, workflow: Map<String, Any>): Map<String, Any> {
+        if (workflow["content_route_terminal"] == true) {
+            val folders = (workflow["content_route_folders"] as? List<*>)
+                ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                .orEmpty()
+            val prefix = workflow["content_route_filename_prefix"]?.toString()?.trim().orEmpty()
+            if (folders.isNotEmpty() && prefix.isNotBlank()) {
+                return organizeContentCategory(
+                    imageId = imageId,
+                    folderSegments = folders,
+                    filenamePrefix = prefix,
+                    route = workflow["content_route"]?.toString().orEmpty(),
+                )
+            }
+        }
+
         if (workflow["queued_for_review"] == true) {
             return mapOf(
                 "ok" to true,
