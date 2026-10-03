@@ -132,4 +132,74 @@ class ReferenceKnowledgeParserTest {
         assertEquals(2, plan.ignoredAliases.count { it.alias == "Shared Title" })
     }
 
+
+    @Test
+    fun `json null parent is never converted to literal null id`() {
+        val bundle = ReferenceKnowledgeParser.parseDocuments(
+            mapOf(
+                "actions-and-rating-tags.json" to """[
+                    {"tag_id":"AC001","parent_action":null,"canonical_name":"Movement","aliases":[],"verified":true},
+                    {"tag_id":"AC001-1","parent_action":"AC001","canonical_name":"Walking","aliases":[],"verified":true},
+                    {"tag_id":"RT001","parent_action":null,"canonical_name":"Safe","aliases":[],"verified":true}
+                ]""",
+                "poses_PO001-PO011.json" to """[
+                    {"tag_id":"PO001","parent_tag":null,"canonical_name":"Standing","aliases":[],"verified":true},
+                    {"tag_id":"PO001-1","parent_tag":"PO001","canonical_name":"Contrapposto","aliases":[],"verified":true}
+                ]""",
+            ),
+        )
+
+        val acRoot = bundle.tags.single { it.id == "AC001" }
+        val acChild = bundle.tags.single { it.id == "AC001-1" }
+        val poseRoot = bundle.tags.single { it.id == "PO001" }
+        val rating = bundle.tags.single { it.id == "RT001" }
+
+        assertEquals("", acRoot.parentId)
+        assertEquals("AC001", acChild.parentId)
+        assertEquals("", poseRoot.parentId)
+        assertEquals("action", acRoot.category)
+        assertEquals("rating", rating.category)
+        assertEquals("pose", poseRoot.category)
+    }
+
+    @Test
+    fun `nullish textual parent sentinels are treated as absent ids`() {
+        val bundle = ReferenceKnowledgeParser.parseDocuments(
+            mapOf(
+                "Outfits.json" to """[
+                    {"id":"OF001","parent_outfit":"null","canonical_name":"Base Outfit","aliases":[]},
+                    {"id":"OF002","parent_outfit":"N/A","canonical_name":"Other Outfit","aliases":[]}
+                ]"""
+            ),
+        )
+
+        assertEquals("", bundle.tags.single { it.id == "OF001" }.parentId)
+        assertEquals("", bundle.tags.single { it.id == "OF002" }.parentId)
+    }
+
+    @Test
+    fun `mixed taxonomy file categories are inferred from ids before filename`() {
+        val bundle = ReferenceKnowledgeParser.parseDocuments(
+            mapOf(
+                "framing_orientation_camera_lighting.json" to """[
+                    {"tag_id":"FR001","canonical_name":"Portrait","aliases":[]},
+                    {"tag_id":"OR001","canonical_name":"Landscape","aliases":[]},
+                    {"tag_id":"CA001","canonical_name":"Eye Level","aliases":[]},
+                    {"tag_id":"LI001","canonical_name":"Soft Light","aliases":[]}
+                ]""",
+                "environments_weather_EN001-WE014.json" to """[
+                    {"tag_id":"EN001","canonical_name":"Interior","aliases":[]},
+                    {"tag_id":"WE001","canonical_name":"Clear","aliases":[]}
+                ]"""
+            ),
+        )
+
+        assertEquals("framing", bundle.tags.single { it.id == "FR001" }.category)
+        assertEquals("orientation", bundle.tags.single { it.id == "OR001" }.category)
+        assertEquals("camera", bundle.tags.single { it.id == "CA001" }.category)
+        assertEquals("lighting", bundle.tags.single { it.id == "LI001" }.category)
+        assertEquals("environment", bundle.tags.single { it.id == "EN001" }.category)
+        assertEquals("weather", bundle.tags.single { it.id == "WE001" }.category)
+    }
+
 }
