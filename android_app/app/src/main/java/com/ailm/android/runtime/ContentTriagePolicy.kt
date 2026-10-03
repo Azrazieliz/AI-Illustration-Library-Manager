@@ -69,7 +69,27 @@ internal object ContentTriagePolicy {
             )
         }
 
-        // Canonical Character Knowledge always wins over generic visual routing.
+        val scenery = observation.sceneryOrEnvironment ||
+            observation.environmentDominant ||
+            contentClass in SCENERY_CLASSES
+
+        // Environment dominance is an organization decision, not an identity
+        // decision. Asterion may still resolve/store a known character, but if
+        // the artwork itself is primarily scenery (for example a tiny figure,
+        // silhouette or luminous focal form inside a vast environment), the
+        // file belongs in Scenery rather than a character folder.
+        if (observation.environmentDominant) {
+            return ContentTriageDecision(
+                route = ROUTE_SCENERY,
+                folderSegments = listOf("Scenery"),
+                filenamePrefix = "Scenery",
+                terminal = true,
+                reason = "The environment is the primary subject of the artwork.",
+            )
+        }
+
+        // Outside a genuinely environment-dominant composition, canonical
+        // Character Knowledge remains authoritative for character organization.
         if (resolvedCharacterCount > 0) {
             return ContentTriageDecision(
                 route = ROUTE_CHARACTER,
@@ -77,20 +97,16 @@ internal object ContentTriagePolicy {
             )
         }
 
-        val scenery = observation.sceneryOrEnvironment ||
-            observation.environmentDominant ||
-            contentClass in SCENERY_CLASSES
-
         // Scenery is defined by composition, not by a literal zero-person count.
-        // Tiny silhouettes, decorative figures, statues, angel-like light forms,
-        // distant crowds, etc. may be visible without being character subjects.
-        if (scenery && (identifiableCharacters == 0 || observation.environmentDominant)) {
+        // Tiny silhouettes, decorative figures, statues, anonymous crowd shapes,
+        // etc. may be visible without being identifiable character subjects.
+        if (scenery && identifiableCharacters == 0) {
             return ContentTriageDecision(
                 route = ROUTE_SCENERY,
                 folderSegments = listOf("Scenery"),
                 filenamePrefix = "Scenery",
                 terminal = true,
-                reason = "Environment/scenery is the primary image content and no canonical character identity resolved.",
+                reason = "Scenery/environment is primary and no identifiable character subject needs organization.",
             )
         }
 
