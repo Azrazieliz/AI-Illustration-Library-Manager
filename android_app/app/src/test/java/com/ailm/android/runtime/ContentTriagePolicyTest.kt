@@ -164,4 +164,23 @@ class ContentTriagePolicyTest {
         assertTrue(decision.terminal)
     }
 
+    @Test
+    fun `environment dominant composition stays scenery even if identity metadata resolves`() {
+        val decision = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "scenery",
+                peopleCount = 1,
+                identifiableCharacterCount = 1,
+                sceneryOrEnvironment = true,
+                environmentDominant = true,
+            ),
+            resolvedCharacterCount = 1,
+            characterKnowledgeReady = true,
+        )
+
+        assertEquals(ContentTriagePolicy.ROUTE_SCENERY, decision.route)
+        assertEquals(listOf("Scenery"), decision.folderSegments)
+        assertTrue(decision.terminal)
+    }
+
 }
