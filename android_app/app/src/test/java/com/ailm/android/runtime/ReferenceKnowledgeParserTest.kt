@@ -84,4 +84,52 @@ class ReferenceKnowledgeParserTest {
         )
         assertEquals(5, character.attributeIds.size)
     }
+    @Test
+    fun `series alias collision with child canonical name is ignored safely`() {
+        val plan = SeriesAliasPlanner.plan(
+            listOf(
+                ReferenceSeriesEntry(
+                    code = "SE0322",
+                    name = "Million Arthur",
+                    franchise = "SE0322",
+                    aliases = listOf("Kaku-San-Sei Million Arthur"),
+                ),
+                ReferenceSeriesEntry(
+                    code = "SE0322-1",
+                    name = "Kaku-San-Sei Million Arthur",
+                    franchise = "SE0322",
+                    aliases = emptyList(),
+                ),
+            ),
+        )
+
+        assertTrue(plan.canonicalEntries.contains("SE0322-1" to "Kaku-San-Sei Million Arthur"))
+        assertTrue(plan.uniqueAliases.none { (_, alias) -> alias == "Kaku-San-Sei Million Arthur" })
+        assertEquals(1, plan.ignoredAliases.size)
+        assertEquals("SE0322", plan.ignoredAliases.single().seriesCode)
+    }
+
+    @Test
+    fun `shared noncanonical alias is not assigned to either series`() {
+        val plan = SeriesAliasPlanner.plan(
+            listOf(
+                ReferenceSeriesEntry(
+                    code = "SE1000",
+                    name = "Parent A",
+                    franchise = "SE1000",
+                    aliases = listOf("Shared Title"),
+                ),
+                ReferenceSeriesEntry(
+                    code = "SE1000-1",
+                    name = "Child A",
+                    franchise = "SE1000",
+                    aliases = listOf("Shared Title"),
+                ),
+            ),
+        )
+
+        assertTrue(plan.uniqueAliases.none { (_, alias) -> alias == "Shared Title" })
+        assertEquals(2, plan.ignoredAliases.count { it.alias == "Shared Title" })
+    }
+
 }
