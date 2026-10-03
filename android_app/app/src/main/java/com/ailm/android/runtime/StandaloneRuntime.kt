@@ -1544,6 +1544,101 @@ object StandaloneRuntime {
         )
     }
 
+    private fun organizeContentCategory(
+        imageId: Int,
+        folderSegments: List<String>,
+        filenamePrefix: String,
+        route: String,
+    ): Map<String, Any> {
+        val record = repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
+            ?: return mapOf("ok" to false, "status" to "missing", "message" to "Image record not found.")
+        val roots = repository.listFolders(includeDisabled = false)
+            .mapNotNull { it["folder_uri"]?.toString()?.trim()?.takeIf(String::isNotBlank) }
+        val root = roots
+            .filter { candidate ->
+                record.uri.startsWith(candidate) ||
+                    record.folderUri.startsWith(candidate) ||
+                    record.parentUri.startsWith(candidate)
+            }
+            .maxByOrNull(String::length)
+            ?: roots.singleOrNull()
+            ?: record.folderUri
+        if (root.isBlank()) {
+            return mapOf("ok" to false, "status" to "no_root", "message" to "No writable library root is available.")
+        }
+
+        var targetFolder = root
+        val safeSegments = mutableListOf<String>()
+        folderSegments.forEach { raw ->
+            val safe = safeAutomationPathSegment(raw)
+            targetFolder = getOrCreateAutomationFolder(targetFolder, safe)
+                ?: return mapOf(
+                    "ok" to false,
+                    "status" to "folder_failed",
+                    "message" to "Unable to create automation folder '" + safe + "'.",
+                )
+            safeSegments += safe
+        }
+
+        val extension = record.filename.substringAfterLast('.', "").takeIf(String::isNotBlank).orEmpty()
+        val prefix = safeAutomationPathSegment(filenamePrefix)
+        val sequence = nextAutomationSequenceNumber(targetFolder, prefix, extension)
+        val stem = prefix + " " + sequence
+        val targetName = if (extension.isBlank()) stem else stem + "." + extension
+
+        if (record.folderUri == targetFolder && record.filename == targetName) {
+            return mapOf(
+                "ok" to true,
+                "status" to "already_routed",
+                "route" to route,
+                "folder" to safeSegments.joinToString("/"),
+                "filename" to targetName,
+            )
+        }
+
+        val changed = if (record.folderUri == targetFolder) {
+            storageProvider.rename(record.uri, targetName)
+        } else {
+            storageProvider.move(record.uri, targetFolder, targetName)
+        }
+        if (!changed.ok || changed.uri.isNullOrBlank()) {
+            return mapOf(
+                "ok" to false,
+                "status" to "file_operation_failed",
+                "message" to changed.message.ifBlank { "Unable to route image." },
+            )
+        }
+
+        val relativeFolder = safeSegments.joinToString("/")
+        val updated = repository.updateImagePathAndClearThumbnails(
+            imageId = imageId,
+            newUri = changed.uri,
+            newFilename = targetName,
+            newFolderUri = targetFolder,
+            newParentUri = targetFolder,
+            newFolderName = safeSegments.lastOrNull().orEmpty(),
+            newRelativePath = if (relativeFolder.isBlank()) targetName else relativeFolder + "/" + targetName,
+            newModifiedAtMs = System.currentTimeMillis(),
+            oldUri = record.uri,
+        )
+        return if (updated) {
+            mapOf(
+                "ok" to true,
+                "status" to "routed_content",
+                "route" to route,
+                "folder" to relativeFolder,
+                "filename" to targetName,
+                "uri" to changed.uri,
+            )
+        } else {
+            mapOf(
+                "ok" to false,
+                "status" to "database_update_failed",
+                "message" to "File was routed but the library record could not be updated.",
+            )
+        }
+    }
+
     private fun getOrCreateAutomationFolder(parentUri: String, rawName: String): String? {
         val name = safeAutomationPathSegment(rawName)
         return storageProvider.listChildren(parentUri)
