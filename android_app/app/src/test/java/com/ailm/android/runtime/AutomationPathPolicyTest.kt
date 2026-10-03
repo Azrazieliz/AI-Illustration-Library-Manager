@@ -69,23 +69,26 @@ class AutomationPathPolicyTest {
     }
 
     @Test
-    fun `automation triage preserves landscapes and separates unknown groups`() {
-        val landscape = ContentTriagePolicy.decide(
+    fun `automation triage preserves scenery and separates unknown groups`() {
+        val scenery = ContentTriagePolicy.decide(
             observation = ContentRoutingObservation(
-                contentClass = "landscape",
+                contentClass = "scenery",
                 peopleCount = 0,
-                landscapeOrScenery = true,
+                identifiableCharacterCount = 0,
+                sceneryOrEnvironment = true,
+                environmentDominant = true,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
         )
-        assertEquals(ContentTriagePolicy.ROUTE_LANDSCAPE, landscape.route)
-        assertEquals(listOf("Landscapes"), landscape.folderSegments)
+        assertEquals(ContentTriagePolicy.ROUTE_SCENERY, scenery.route)
+        assertEquals(listOf("Scenery"), scenery.folderSegments)
 
         val group = ContentTriagePolicy.decide(
             observation = ContentRoutingObservation(
                 contentClass = "multi_character",
                 peopleCount = 3,
+                identifiableCharacterCount = 3,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
@@ -111,6 +114,7 @@ class AutomationPathPolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "non_character",
                 peopleCount = 0,
+                identifiableCharacterCount = 0,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
