@@ -1298,8 +1298,11 @@ class AppViewModel : ViewModel() {
                     val series = (reference["series_entries"] as? Number)?.toInt() ?: 0
                     val tags = (reference["tag_entries"] as? Number)?.toInt() ?: 0
                     val characters = (reference["character_entries"] as? Number)?.toInt() ?: 0
+                    val ignoredAliases = (reference["series_aliases_ignored"] as? Number)?.toInt() ?: 0
                     "Reference Knowledge imported: $series series, $tags taxonomy/tag entries" +
-                        if (characters > 0) ", $characters characters." else "."
+                        (if (characters > 0) ", $characters characters" else "") +
+                        (if (ignoredAliases > 0) ", $ignoredAliases ambiguous series alias(es) ignored" else "") +
+                        "."
                 }
                 installedPacks > 0 -> "Imported $installedPacks Knowledge Pack(s)."
                 failures.isNotEmpty() -> "Knowledge import failed."
