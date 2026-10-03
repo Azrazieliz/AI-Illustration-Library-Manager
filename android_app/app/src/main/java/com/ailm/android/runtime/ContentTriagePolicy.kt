@@ -51,6 +51,13 @@ internal object ContentTriagePolicy {
             )
         }
 
+        if (resolvedCharacterCount > 0) {
+            return ContentTriageDecision(
+                route = ROUTE_CHARACTER,
+                reason = "At least one canonical Character Knowledge identity resolved.",
+            )
+        }
+
         val landscape = observation.landscapeOrScenery ||
             contentClass in LANDSCAPE_CLASSES
         if (landscape && people == 0) {
@@ -70,13 +77,6 @@ internal object ContentTriagePolicy {
                 filenamePrefix = "No Character",
                 terminal = true,
                 reason = "No visible character/person and not classified as landscape.",
-            )
-        }
-
-        if (resolvedCharacterCount > 0) {
-            return ContentTriageDecision(
-                route = ROUTE_CHARACTER,
-                reason = "At least one canonical Character Knowledge identity resolved.",
             )
         }
 
