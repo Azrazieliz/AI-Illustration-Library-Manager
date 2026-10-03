@@ -69,6 +69,24 @@ internal class AiWorkflowCoordinator(
 
         val hasCharacterKnowledge = knowledge.hasCharacters()
         val recognitionResult = stages["character_recognition"]?.resultMap().orEmpty()
+        val routingMap = (recognitionResult["routing"] as? Map<*, *>)
+            ?.entries
+            ?.mapNotNull { (key, value) ->
+                key?.toString()?.trim()?.takeIf(String::isNotBlank)?.let { text ->
+                    value?.let { text to it }
+                }
+            }
+            ?.toMap()
+            .orEmpty()
+        val rawSubjectCount = (recognitionResult["subjects"] as? List<*>)?.size ?: 0
+        val routingObservation = ContentRoutingObservation(
+            contentClass = routingMap["content_class"]?.toString().orEmpty().ifBlank { "other" },
+            peopleCount = (routingMap["people_count"] as? Number)?.toInt() ?: rawSubjectCount,
+            promotionOrPreview = routingMap["promotion_or_preview"].asBoolean(),
+            landscapeOrScenery = routingMap["landscape_or_scenery"].asBoolean(),
+            qualityFlags = routingMap["quality_flags"].stringList(),
+            ocrText = stages["ocr"]?.resultMap()?.optText("text").orEmpty(),
+        )
         val resolvedSubjects = if (hasCharacterKnowledge && recognitionResult.isNotEmpty()) {
             characterResolver.resolve(
                 recognitionResult = recognitionResult,
@@ -92,18 +110,6 @@ internal class AiWorkflowCoordinator(
         }
         fusion.replaceSubjects(imageId, subjectRecords)
 
-        if (hasCharacterKnowledge) {
-            if (resolvedSubjects.isEmpty()) {
-                reviewReasons += "No character subject could be resolved from observable canonical attributes."
-            } else {
-                resolvedSubjects.filterNot(ResolvedSubject::resolved).forEach { subject ->
-                    reviewReasons += "Subject " + (subject.subjectIndex + 1) +
-                        " is below the character confidence threshold (" +
-                        "%.2f".format(subject.confidence) + ")."
-                }
-            }
-        }
-
         val resolvedCharacters = resolvedSubjects
             .filter(ResolvedSubject::resolved)
             .mapNotNull { subject ->
@@ -122,6 +128,25 @@ internal class AiWorkflowCoordinator(
                     "confidence" to subject.confidence,
                 )
             }
+
+        val triage = ContentTriagePolicy.decide(
+            observation = routingObservation,
+            resolvedCharacterCount = resolvedCharacters.size,
+            characterKnowledgeReady = hasCharacterKnowledge,
+        )
+
+        when {
+            triage.requiresReview -> {
+                reviewReasons += triage.reason
+            }
+            triage.route == ContentTriagePolicy.ROUTE_CHARACTER && hasCharacterKnowledge -> {
+                resolvedSubjects.filterNot(ResolvedSubject::resolved).forEach { subject ->
+                    reviewReasons += "Subject " + (subject.subjectIndex + 1) +
+                        " is below the character confidence threshold (" +
+                        "%.2f".format(subject.confidence) + ")."
+                }
+            }
+        }
 
         val canonicalTags = mutableListOf<CanonicalTagObservation>()
         canonicalTags += illustrationTags
@@ -191,9 +216,10 @@ internal class AiWorkflowCoordinator(
             }
         }
 
-        val unresolved = hasCharacterKnowledge &&
-            (resolvedSubjects.isEmpty() || resolvedSubjects.any { !it.resolved })
-        val queuedForReview = reviewReasons.isNotEmpty() || unresolved
+        val unresolved = triage.route == ContentTriagePolicy.ROUTE_CHARACTER &&
+            hasCharacterKnowledge &&
+            resolvedSubjects.any { !it.resolved }
+        val queuedForReview = reviewReasons.isNotEmpty() || triage.requiresReview || unresolved
         if (queuedForReview) {
             fusion.queueReview(
                 imageId = imageId,
@@ -211,6 +237,14 @@ internal class AiWorkflowCoordinator(
                         )
                     },
                     "resolved_characters" to resolvedCharacters,
+                    "content_route" to triage.route,
+                    "routing_observation" to mapOf(
+                        "content_class" to routingObservation.contentClass,
+                        "people_count" to routingObservation.peopleCount,
+                        "promotion_or_preview" to routingObservation.promotionOrPreview,
+                        "landscape_or_scenery" to routingObservation.landscapeOrScenery,
+                        "quality_flags" to routingObservation.qualityFlags,
+                    ),
                 ),
             )
         }
@@ -229,6 +263,18 @@ internal class AiWorkflowCoordinator(
             "accepted_series_code" to primary["series_code"].orEmptyText(),
             "accepted_series_name" to primary["series_name"].orEmptyText(),
             "original_character" to false,
+            "content_route" to triage.route,
+            "content_route_reason" to triage.reason,
+            "content_route_terminal" to triage.terminal,
+            "content_route_folders" to triage.folderSegments,
+            "content_route_filename_prefix" to triage.filenamePrefix,
+            "routing_observation" to mapOf(
+                "content_class" to routingObservation.contentClass,
+                "people_count" to routingObservation.peopleCount,
+                "promotion_or_preview" to routingObservation.promotionOrPreview,
+                "landscape_or_scenery" to routingObservation.landscapeOrScenery,
+                "quality_flags" to routingObservation.qualityFlags,
+            ),
             "queued_for_review" to queuedForReview,
             "review_reasons" to reviewReasons.distinct(),
             "canonical_tag_ids" to canonicalTags.map(CanonicalTagObservation::tagId).distinct(),
