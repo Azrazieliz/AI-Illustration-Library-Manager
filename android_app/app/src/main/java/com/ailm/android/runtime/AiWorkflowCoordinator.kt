@@ -82,8 +82,12 @@ internal class AiWorkflowCoordinator(
         val routingObservation = ContentRoutingObservation(
             contentClass = routingMap["content_class"]?.toString().orEmpty().ifBlank { "other" },
             peopleCount = (routingMap["people_count"] as? Number)?.toInt() ?: rawSubjectCount,
+            identifiableCharacterCount = (routingMap["identifiable_character_count"] as? Number)?.toInt()
+                ?: rawSubjectCount,
             promotionOrPreview = routingMap["promotion_or_preview"].asBoolean(),
-            landscapeOrScenery = routingMap["landscape_or_scenery"].asBoolean(),
+            sceneryOrEnvironment = routingMap["scenery_or_environment"].asBoolean() ||
+                routingMap["landscape_or_scenery"].asBoolean(),
+            environmentDominant = routingMap["environment_dominant"].asBoolean(),
             qualityFlags = (routingMap["quality_flags"] as? List<*>)
                 ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
                 .orEmpty(),
@@ -244,7 +248,9 @@ internal class AiWorkflowCoordinator(
                         "content_class" to routingObservation.contentClass,
                         "people_count" to routingObservation.peopleCount,
                         "promotion_or_preview" to routingObservation.promotionOrPreview,
-                        "landscape_or_scenery" to routingObservation.landscapeOrScenery,
+                        "identifiable_character_count" to routingObservation.identifiableCharacterCount,
+                        "scenery_or_environment" to routingObservation.sceneryOrEnvironment,
+                        "environment_dominant" to routingObservation.environmentDominant,
                         "quality_flags" to routingObservation.qualityFlags,
                     ),
                 ),
@@ -274,7 +280,9 @@ internal class AiWorkflowCoordinator(
                 "content_class" to routingObservation.contentClass,
                 "people_count" to routingObservation.peopleCount,
                 "promotion_or_preview" to routingObservation.promotionOrPreview,
-                "landscape_or_scenery" to routingObservation.landscapeOrScenery,
+                "identifiable_character_count" to routingObservation.identifiableCharacterCount,
+                        "scenery_or_environment" to routingObservation.sceneryOrEnvironment,
+                        "environment_dominant" to routingObservation.environmentDominant,
                 "quality_flags" to routingObservation.qualityFlags,
             ),
             "queued_for_review" to queuedForReview,
