@@ -115,7 +115,7 @@ internal class FusionResolutionStore(
                    f.pixel_width, f.pixel_height, f.source_size_bytes
             FROM ${FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS} f
             JOIN images i ON i.image_id = f.image_id
-            WHERE f.sha256 = ? AND f.image_id != ? AND i.active = 1
+            WHERE f.sha256 = ? AND f.image_id < ? AND i.active = 1
             ORDER BY f.image_id ASC
             LIMIT 1
             """.trimIndent(),
@@ -148,7 +148,7 @@ internal class FusionResolutionStore(
                        f.pixel_width, f.pixel_height, f.source_size_bytes
                 FROM ${FusionDatabaseSchema.TABLE_IMAGE_FINGERPRINTS} f
                 JOIN images i ON i.image_id = f.image_id
-                WHERE f.image_id != ? AND i.active = 1
+                WHERE f.image_id < ? AND i.active = 1
                   AND f.pixel_width = ? AND f.pixel_height = ?
                   AND f.perceptual_hash != ''
                 ORDER BY f.image_id ASC
