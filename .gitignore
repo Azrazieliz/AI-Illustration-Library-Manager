@@ -46,3 +46,18 @@ keystore/
 
 branding/New Tab.html
 branding/New Tab_files/
+
+# Local Android/native build artifacts and test scratch
+android_app/.kotlin/
+android_app/app/.cxx/
+android_app/**/hs_err_pid*.log
+android_app/**/replay_pid*.log
+android_app/*.log
+android_app/*output*.txt
+android_app/*errors*.txt
+android_app/*out*.txt
+pytest_tmp/
+full_pytest_output*.txt
+*_crash.txt
+kotlin_info.txt
+swipe_test.txt
