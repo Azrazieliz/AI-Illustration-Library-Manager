@@ -1,35 +1,37 @@
 package com.ailm.android.ui.theme
 
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Shapes
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 
 object AsterionColors {
     val MatteBlack = Color(0xFF080808)
-    val DeepOnyx = Color(0xFF141414)
-    val Charcoal = Color(0xFF1A1A1A)
-    val SurfaceMuted = Color(0xFF292929)
-    val Gold = Color(0xFFC8A95A)
-    val GoldLight = Color(0xFFE0C16F)
-    val GoldDark = Color(0xFFA67C1A)
-    val Amber = Color(0xFFE0A23D)
-    val Text = Color(0xFFF3F0E8)
-    val TextMuted = Color(0xFFCBC5B8)
-    val Divider = Color(0xFF383838)
+    val DeepOnyx = Color(0xFF100F0E)
+    val Charcoal = Color(0xFF181714)
+    val SurfaceMuted = Color(0xFF211F1B)
+    val SurfaceElevated = Color(0xFF171512)
+    val Gold = Color(0xFFD0B56A)
+    val GoldLight = Color(0xFFE8CE83)
+    val GoldDark = Color(0xFFA98332)
+    val GoldMuted = Color(0xFF665632)
+    val Amber = Color(0xFFE1A348)
+    val Text = Color(0xFFF5F1E8)
+    val TextMuted = Color(0xFFBEB8AC)
+    val Divider = Color(0xFF3A352B)
 }
 
 val AsterionColorScheme = darkColorScheme(
     primary = AsterionColors.Gold,
     onPrimary = AsterionColors.MatteBlack,
-    primaryContainer = AsterionColors.DeepOnyx,
+    primaryContainer = AsterionColors.SurfaceMuted,
     onPrimaryContainer = AsterionColors.GoldLight,
     inversePrimary = AsterionColors.GoldDark,
     secondary = AsterionColors.Amber,
@@ -38,7 +40,7 @@ val AsterionColorScheme = darkColorScheme(
     onSecondaryContainer = AsterionColors.Text,
     tertiary = AsterionColors.TextMuted,
     onTertiary = AsterionColors.MatteBlack,
-    tertiaryContainer = AsterionColors.SurfaceMuted,
+    tertiaryContainer = AsterionColors.SurfaceElevated,
     onTertiaryContainer = AsterionColors.Text,
     background = AsterionColors.MatteBlack,
     onBackground = AsterionColors.Text,
@@ -51,31 +53,60 @@ val AsterionColorScheme = darkColorScheme(
     inverseOnSurface = AsterionColors.MatteBlack,
     error = AsterionColors.Amber,
     onError = AsterionColors.MatteBlack,
-    errorContainer = AsterionColors.DeepOnyx,
-    onErrorContainer = AsterionColors.Amber,
+    errorContainer = Color(0xFF241A10),
+    onErrorContainer = Color(0xFFFFC978),
     outline = AsterionColors.Divider,
     outlineVariant = AsterionColors.SurfaceMuted,
-    scrim = Color(0xCC000000),
+    scrim = Color(0xD9000000),
 )
 
 val AsterionTypography = Typography(
-    headlineMedium = TextStyle(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold),
-    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
-    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
-    titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
+    headlineMedium = TextStyle(
+        fontSize = 26.sp,
+        lineHeight = 31.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.15.sp,
+    ),
+    titleLarge = TextStyle(
+        fontSize = 20.sp,
+        lineHeight = 25.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.10.sp,
+    ),
+    titleMedium = TextStyle(
+        fontSize = 16.sp,
+        lineHeight = 21.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.05.sp,
+    ),
+    titleSmall = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 19.sp,
+        fontWeight = FontWeight.SemiBold,
+    ),
     bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 23.sp, fontWeight = FontWeight.Normal),
     bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Normal),
     bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 17.sp, fontWeight = FontWeight.Normal),
-    labelLarge = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
-    labelMedium = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
+    labelLarge = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 19.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.15.sp,
+    ),
+    labelMedium = TextStyle(
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 0.10.sp,
+    ),
 )
 
 val AsterionShapes = Shapes(
-    extraSmall = RoundedCornerShape(4.dp),
-    small = RoundedCornerShape(6.dp),
-    medium = RoundedCornerShape(8.dp),
-    large = RoundedCornerShape(10.dp),
-    extraLarge = RoundedCornerShape(12.dp),
+    extraSmall = RoundedCornerShape(7.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp),
 )
 
 @Composable
