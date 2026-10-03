@@ -132,8 +132,8 @@ internal object ReferenceKnowledgeParser {
     fun looksLikeReferenceDocument(filename: String, raw: String): Boolean {
         return runCatching {
             collectObjects(raw).any { obj ->
-                val canonicalName = obj.optString("canonical_name").trim()
-                    .ifBlank { obj.optString("character_name").trim() }
+                val canonicalName = cleanString(obj, "canonical_name")
+                    .ifBlank { cleanString(obj, "character_name") }
                 if (canonicalName.isBlank()) {
                     false
                 } else {
@@ -143,15 +143,16 @@ internal object ReferenceKnowledgeParser {
                         "character_id",
                         "outfit_id",
                         "weapon_id",
-                    ).any { key -> obj.optString(key).trim().isNotBlank() }
-                    val genericTaxonomyId = obj.optString("id").trim().isNotBlank() &&
+                    ).any { key -> cleanId(obj, key).isNotBlank() }
+                    val genericId = cleanId(obj, "id")
+                    val genericTaxonomyId = genericId.isNotBlank() &&
                         (
-                            obj.optString("attribute").trim().isNotBlank() ||
-                                obj.has("parent_tag") ||
-                                obj.has("parent_action") ||
-                                obj.has("parent_outfit") ||
-                                obj.has("parent_weapon") ||
-                                inferCategory(filename, obj) != "tag"
+                            cleanString(obj, "attribute").isNotBlank() ||
+                                hasMeaningfulValue(obj, "parent_tag") ||
+                                hasMeaningfulValue(obj, "parent_action") ||
+                                hasMeaningfulValue(obj, "parent_outfit") ||
+                                hasMeaningfulValue(obj, "parent_weapon") ||
+                                inferCategory(filename, obj, genericId) != "tag"
                             )
                     explicitReferenceId || genericTaxonomyId
                 }
@@ -163,82 +164,114 @@ internal object ReferenceKnowledgeParser {
         val series = linkedMapOf<String, ReferenceSeriesEntry>()
         val tags = linkedMapOf<String, ReferenceTagEntry>()
         val characters = linkedMapOf<String, KnowledgeCharacterEntry>()
+
         documents.toSortedMap(String.CASE_INSENSITIVE_ORDER).forEach { (filename, raw) ->
             collectObjects(raw).forEach { obj ->
-                val canonicalName = obj.optString("canonical_name").trim()
-                    .ifBlank { obj.optString("character_name").trim() }
+                val canonicalName = cleanString(obj, "canonical_name")
+                    .ifBlank { cleanString(obj, "character_name") }
                 if (canonicalName.isBlank()) return@forEach
 
-                val characterId = obj.optString("character_id").trim()
+                val characterId = cleanId(obj, "character_id")
                 if (characterId.isNotBlank()) {
-                    val primarySeries = obj.optString("primary_series_code").trim()
-                        .ifBlank { obj.optString("series_code").trim() }
+                    val parentCharacterId = cleanId(obj, "parent_character_id")
+                    val primarySeries = cleanId(obj, "primary_series_code")
+                        .ifBlank { cleanId(obj, "series_code") }
                     val attributes = linkedSetOf<String>().apply {
-                        addAll(stringList(obj.optJSONArray("attribute_ids")))
+                        addAll(stringList(obj.opt("attribute_ids")).map(::cleanIdValue).filter(String::isNotBlank))
                         val attributeObject = obj.optJSONObject("attributes")
                         attributeObject?.keys()?.forEach { key ->
                             when (val value = attributeObject.opt(key)) {
-                                is JSONArray -> addAll(stringList(value))
-                                is String -> value.trim().takeIf(String::isNotBlank)?.let(::add)
+                                is JSONArray -> addAll(
+                                    stringList(value).map(::cleanIdValue).filter(String::isNotBlank),
+                                )
+                                is String -> cleanIdValue(value).takeIf(String::isNotBlank)?.let(::add)
                             }
                         }
                     }
-                    characters.putIfAbsent(
-                        characterId.lowercase(Locale.US),
-                        KnowledgeCharacterEntry(
-                            characterId = characterId,
-                            parentCharacterId = obj.optString("parent_character_id").trim(),
-                            identityGroupId = obj.optString("identity_group_id").trim(),
-                            entryType = obj.optString("entry_type").trim().ifBlank {
-                                if (obj.optString("parent_character_id").isNotBlank()) "transformation" else "identity"
-                            },
-                            canonicalName = canonicalName,
-                            primarySeriesCode = primarySeries,
-                            aliases = stringList(obj.optJSONArray("aliases")),
-                            attributeIds = attributes.toList(),
-                            weaponIds = stringList(obj.optJSONArray("canonical_weapon_ids"))
-                                .ifEmpty { stringList(obj.optJSONArray("weapon_ids")) },
-                            outfitIds = stringList(obj.optJSONArray("canonical_outfit_ids"))
-                                .ifEmpty { stringList(obj.optJSONArray("outfit_ids")) },
-                            sheetAssetId = obj.optString("sheet_asset_id").trim(),
-                            metadata = emptyMap(),
-                        ),
+                    val entry = KnowledgeCharacterEntry(
+                        characterId = characterId,
+                        parentCharacterId = parentCharacterId,
+                        identityGroupId = cleanId(obj, "identity_group_id"),
+                        entryType = cleanString(obj, "entry_type").ifBlank {
+                            if (parentCharacterId.isNotBlank()) "transformation" else "identity"
+                        },
+                        canonicalName = canonicalName,
+                        primarySeriesCode = primarySeries,
+                        aliases = stringList(obj.opt("aliases")),
+                        attributeIds = attributes.toList(),
+                        weaponIds = stringList(obj.opt("canonical_weapon_ids"))
+                            .ifEmpty { stringList(obj.opt("weapon_ids")) }
+                            .map(::cleanIdValue)
+                            .filter(String::isNotBlank),
+                        outfitIds = stringList(obj.opt("canonical_outfit_ids"))
+                            .ifEmpty { stringList(obj.opt("outfit_ids")) }
+                            .map(::cleanIdValue)
+                            .filter(String::isNotBlank),
+                        sheetAssetId = cleanId(obj, "sheet_asset_id"),
+                        metadata = emptyMap(),
+                    )
+                    putUnique(
+                        target = characters,
+                        key = characterId.lowercase(Locale.US),
+                        value = entry,
+                        kind = "character_id",
+                        displayId = characterId,
                     )
                     return@forEach
                 }
 
-                val seriesCode = obj.optString("series_code").trim()
+                val seriesCode = cleanId(obj, "series_code")
                 if (seriesCode.isNotBlank()) {
-                    series.putIfAbsent(
-                        seriesCode.lowercase(Locale.US),
-                        ReferenceSeriesEntry(
-                            code = seriesCode,
-                            name = canonicalName,
-                            franchise = obj.optString("franchise").trim(),
-                            aliases = stringList(obj.optJSONArray("aliases")),
-                        ),
+                    val entry = ReferenceSeriesEntry(
+                        code = seriesCode,
+                        name = canonicalName,
+                        franchise = cleanId(obj, "franchise"),
+                        aliases = stringList(obj.opt("aliases")),
                     )
-                } else {
-                    val id = obj.optString("tag_id").trim().ifBlank { obj.optString("id").trim() }
-                    if (id.isBlank()) return@forEach
-                    val parent = listOf("parent_tag", "parent_action", "parent_outfit", "parent_weapon")
-                        .asSequence()
-                        .map { obj.optString(it).trim() }
-                        .firstOrNull(String::isNotBlank)
-                        .orEmpty()
-                    tags.putIfAbsent(
-                        id.lowercase(Locale.US),
-                        ReferenceTagEntry(
-                            id = id,
-                            name = canonicalName,
-                            category = inferCategory(filename, obj),
-                            parentId = parent,
-                            aliases = stringList(obj.optJSONArray("aliases")),
-                        ),
+                    putUnique(
+                        target = series,
+                        key = seriesCode.lowercase(Locale.US),
+                        value = entry,
+                        kind = "series_code",
+                        displayId = seriesCode,
                     )
+                    return@forEach
                 }
+
+                val id = cleanId(obj, "tag_id")
+                    .ifBlank { cleanId(obj, "id") }
+                    .ifBlank { cleanId(obj, "outfit_id") }
+                    .ifBlank { cleanId(obj, "weapon_id") }
+                if (id.isBlank()) return@forEach
+
+                val parent = listOf(
+                    "parent_tag",
+                    "parent_action",
+                    "parent_outfit",
+                    "parent_weapon",
+                )
+                    .asSequence()
+                    .map { key -> cleanId(obj, key) }
+                    .firstOrNull(String::isNotBlank)
+                    .orEmpty()
+
+                val entry = ReferenceTagEntry(
+                    id = id,
+                    name = canonicalName,
+                    category = inferCategory(filename, obj, id),
+                    parentId = parent,
+                    aliases = stringList(obj.opt("aliases")),
+                )
+                putUnique(
+                    target = tags,
+                    key = id.lowercase(Locale.US),
+                    value = entry,
+                    kind = "tag id",
+                    displayId = id,
+                )
             }
         }
+
         return ReferenceKnowledgeBundle(
             series = series.values.toList(),
             tags = tags.values.toList(),
@@ -247,27 +280,62 @@ internal object ReferenceKnowledgeParser {
     }
 
     private fun collectObjects(raw: String): List<JSONObject> {
-        val trimmed = raw.trim()
-        if (trimmed.startsWith("[")) {
-            val array = JSONArray(trimmed)
-            return (0 until array.length()).mapNotNull(array::optJSONObject)
+        val trimmed = raw.trim().removePrefix("\uFEFF")
+        if (trimmed.isBlank()) return emptyList()
+
+        val root: Any = when {
+            trimmed.startsWith("[") -> JSONArray(trimmed)
+            trimmed.startsWith("{") -> JSONObject(trimmed)
+            else -> error("Reference Knowledge JSON must start with an object or array.")
         }
-        val root = JSONObject(trimmed)
-        if (root.has("canonical_name")) return listOf(root)
+
         return buildList {
-            root.keys().forEach { key ->
-                when (val value = root.opt(key)) {
-                    is JSONArray -> for (index in 0 until value.length()) {
-                        value.optJSONObject(index)?.let(::add)
+            fun visit(value: Any?) {
+                when (value) {
+                    is JSONObject -> {
+                        if (value.has("canonical_name") || value.has("character_name")) {
+                            add(value)
+                        } else {
+                            value.keys().forEach { key -> visit(value.opt(key)) }
+                        }
                     }
-                    is JSONObject -> if (value.has("canonical_name")) add(value)
+                    is JSONArray -> {
+                        for (index in 0 until value.length()) visit(value.opt(index))
+                    }
                 }
             }
+            visit(root)
         }
     }
 
-    private fun inferCategory(filename: String, obj: JSONObject): String {
-        obj.optString("attribute").trim().takeIf(String::isNotBlank)?.let { return slug(it) }
+    private fun inferCategory(filename: String, obj: JSONObject, id: String): String {
+        cleanString(obj, "attribute").takeIf(String::isNotBlank)?.let { return slug(it) }
+
+        val prefix = id
+            .takeWhile(Char::isLetter)
+            .uppercase(Locale.US)
+        val byPrefix = when (prefix) {
+            "AC" -> "action"
+            "RT" -> "rating"
+            "EN" -> "environment"
+            "WE" -> "weather"
+            "EX" -> "expression"
+            "EY" -> "eye_state"
+            "MO" -> "mouth_state"
+            "GE" -> "gesture"
+            "PO" -> "pose"
+            "FR" -> "framing"
+            "OR" -> "orientation"
+            "CA" -> "camera"
+            "LI" -> "lighting"
+            "OF" -> "outfit"
+            "WP" -> "weapon"
+            "SP" -> "species"
+            "SA" -> "species_attribute"
+            else -> ""
+        }
+        if (byPrefix.isNotBlank()) return byPrefix
+
         val lower = filename.lowercase(Locale.US)
         return when {
             "outfit" in lower -> "outfit"
@@ -282,22 +350,73 @@ internal object ReferenceKnowledgeParser {
             "expression" in lower -> "expression"
             "gesture" in lower -> "gesture"
             "pose" in lower -> "pose"
-            "environment" in lower || "weather" in lower -> "environment"
-            "framing" in lower || "camera" in lower || "lighting" in lower -> "camera_framing"
-            "action" in lower || obj.has("parent_action") -> "action"
+            "environment" in lower -> "environment"
+            "weather" in lower -> "weather"
+            "framing" in lower -> "framing"
+            "orientation" in lower -> "orientation"
+            "camera" in lower -> "camera"
+            "lighting" in lower -> "lighting"
+            "action" in lower -> "action"
+            "rating" in lower -> "rating"
             else -> "tag"
         }
     }
 
+    private fun cleanString(obj: JSONObject, key: String): String {
+        if (!obj.has(key) || obj.isNull(key)) return ""
+        return when (val value = obj.opt(key)) {
+            null, JSONObject.NULL -> ""
+            is String -> value.trim()
+            is Number, is Boolean -> value.toString().trim()
+            else -> ""
+        }
+    }
+
+    private fun cleanId(obj: JSONObject, key: String): String =
+        cleanIdValue(cleanString(obj, key))
+
+    private fun cleanIdValue(value: String): String {
+        val trimmed = value.trim()
+        return if (trimmed.lowercase(Locale.US) in NULLISH_ID_VALUES) "" else trimmed
+    }
+
+    private fun hasMeaningfulValue(obj: JSONObject, key: String): Boolean =
+        cleanId(obj, key).isNotBlank()
+
     private fun slug(value: String): String = value.trim().lowercase(Locale.US)
         .replace(Regex("[^a-z0-9]+"), "_").trim('_')
 
-    private fun stringList(array: JSONArray?): List<String> {
-        if (array == null) return emptyList()
-        return (0 until array.length()).mapNotNull { index ->
-            array.optString(index).trim().takeIf(String::isNotBlank)
+    private fun stringList(value: Any?): List<String> {
+        val raw = when (value) {
+            null, JSONObject.NULL -> emptyList()
+            is JSONArray -> (0 until value.length()).map { index -> value.opt(index) }
+            is String -> listOf(value)
+            else -> emptyList()
         }
+        return raw.mapNotNull { item ->
+            when (item) {
+                null, JSONObject.NULL -> null
+                is String -> item.trim().takeIf(String::isNotBlank)
+                else -> null
+            }
+        }.distinct()
     }
+
+    private fun <T> putUnique(
+        target: MutableMap<String, T>,
+        key: String,
+        value: T,
+        kind: String,
+        displayId: String,
+    ) {
+        val existing = target[key]
+        require(existing == null || existing == value) {
+            "Conflicting duplicate $kind '$displayId' in reference Knowledge documents."
+        }
+        if (existing == null) target[key] = value
+    }
+
+    private val NULLISH_ID_VALUES = setOf("null", "none", "nil", "n/a", "na")
 }
 
 internal class ReferenceKnowledgeImporter(
