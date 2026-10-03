@@ -1089,6 +1089,10 @@ object StandaloneRuntime {
         val imageId = payload["image_id"].toIntOrNullValue()
             ?: return mapOf("ok" to false, "status" to "invalid", "message" to "image_id is required")
 
+        automationImagePreflight(imageId)?.let { terminalResult ->
+            return terminalResult
+        }
+
         val readiness = automationReadiness()
         if (readiness["ready"] != true) {
             return mapOf(
