@@ -175,7 +175,8 @@ internal class KnowledgeDatabase(
         onCreate(db)
     }
 
-    fun replaceReferenceKnowledge(bundle: ReferenceKnowledgeBundle, sourceName: String) {
+    fun replaceReferenceKnowledge(bundle: ReferenceKnowledgeBundle, sourceName: String): Int {
+        val aliasPlan = SeriesAliasPlanner.plan(bundle.series)
         val db = writableDatabase
         val now = System.currentTimeMillis()
         db.beginTransaction()
@@ -192,6 +193,10 @@ internal class KnowledgeDatabase(
             db.delete("knowledge_series_aliases", null, null)
             db.delete("knowledge_series", null, null)
 
+            // Store source aliases unchanged, but build the lookup index from
+            // a safe derived plan. Canonical code/name always win. Ambiguous
+            // aliases are intentionally absent from the lookup index instead
+            // of aborting the entire Knowledge release or resolving randomly.
             bundle.series.forEach { entry ->
                 db.insertOrThrow(
                     "knowledge_series",
@@ -203,10 +208,14 @@ internal class KnowledgeDatabase(
                         put("aliases_json", JSONArray(entry.aliases).toString())
                     },
                 )
-                (entry.aliases + entry.name + entry.code).distinct().forEach { alias ->
-                    insertAlias(db, "knowledge_series_aliases", "series_code", entry.code, alias)
-                }
             }
+            aliasPlan.canonicalEntries.forEach { (seriesCode, value) ->
+                insertAlias(db, "knowledge_series_aliases", "series_code", seriesCode, value)
+            }
+            aliasPlan.uniqueAliases.forEach { (seriesCode, alias) ->
+                insertAlias(db, "knowledge_series_aliases", "series_code", seriesCode, alias)
+            }
+
             bundle.tags.forEach { entry ->
                 // Parent references are linked in a second pass so file/order
                 // differences in an external Knowledge ZIP cannot violate FKs.
@@ -244,6 +253,7 @@ internal class KnowledgeDatabase(
         } finally {
             db.endTransaction()
         }
+        return aliasPlan.ignoredAliases.size
     }
 
     fun replaceCharacterKnowledge(entries: List<KnowledgeCharacterEntry>, sourceName: String) {
