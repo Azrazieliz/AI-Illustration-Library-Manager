@@ -1322,6 +1322,110 @@ object StandaloneRuntime {
         return result
     }
 
+    private fun automationImagePreflight(imageId: Int): Map<String, Any>? {
+        val record = repository.getImageRecordsByIds(listOf(imageId)).firstOrNull()
+            ?: return mapOf(
+                "ok" to false,
+                "status" to "missing",
+                "message" to "Image record not found.",
+                "automation_stage_failures" to 0,
+            )
+
+        val fingerprint = ImageFingerprinting.inspect(
+            storage = storageProvider,
+            uri = record.uri,
+            reportedSizeBytes = record.sizeBytes ?: 0L,
+        )
+        if (fingerprint == null) {
+            val corrupt = ContentTriagePolicy.corruptDecision()
+            val workflow = mapOf<String, Any>(
+                "accepted" to false,
+                "queued_for_review" to false,
+                "content_route" to corrupt.route,
+                "content_route_reason" to corrupt.reason,
+                "content_route_terminal" to true,
+                "content_route_folders" to corrupt.folderSegments,
+                "content_route_filename_prefix" to corrupt.filenamePrefix,
+                "resolved_characters" to emptyList<Map<String, Any>>(),
+            )
+            val organization = organizeAutonomousImage(imageId, workflow)
+            val ok = organization["ok"] == true
+            resolutionStore.markAutomationState(
+                imageId = imageId,
+                state = if (ok) "complete" else "retry_required",
+                pipelineComplete = true,
+                organizationComplete = ok,
+                needsReview = false,
+                lastError = if (ok) "" else organization["message"]?.toString().orEmpty(),
+            )
+            return mapOf(
+                "ok" to ok,
+                "status" to if (ok) "corrupt_routed" else "corrupt_route_failed",
+                "workflow" to workflow,
+                "organization" to organization,
+                "automation_stage_failures" to 0,
+                "automation_state" to if (ok) "complete" else "retry_required",
+            )
+        }
+
+        val exact = resolutionStore.findExactDuplicate(imageId, fingerprint.sha256)
+        val visual = if (exact == null) {
+            resolutionStore
+                .perceptualDuplicateCandidates(
+                    imageId = imageId,
+                    width = fingerprint.width,
+                    height = fingerprint.height,
+                )
+                .firstOrNull { candidate ->
+                    candidate.perceptualHash.equals(fingerprint.perceptualHash, ignoreCase = true)
+                }
+        } else {
+            null
+        }
+        val duplicate = exact ?: visual
+        if (duplicate != null) {
+            val operation = executeFileOperations(
+                mapOf(
+                    "action" to "delete_images",
+                    "image_ids" to listOf(imageId),
+                ),
+            )
+            val ok = operation["ok"] == true
+            return mapOf(
+                "ok" to ok,
+                "status" to if (ok) "duplicate_deleted" else "duplicate_delete_failed",
+                "message" to if (ok) {
+                    "Duplicate image removed before AI processing."
+                } else {
+                    operation["message"]?.toString().orEmpty().ifBlank { "Duplicate cleanup failed." }
+                },
+                "duplicate_kind" to if (exact != null) "exact" else "conservative_visual",
+                "duplicate_of_image_id" to duplicate.imageId,
+                "duplicate_of_uri" to duplicate.uri,
+                "workflow" to mapOf(
+                    "queued_for_review" to false,
+                    "content_route" to "duplicate_deleted",
+                ),
+                "organization" to mapOf(
+                    "ok" to ok,
+                    "status" to if (ok) "duplicate_deleted" else "duplicate_delete_failed",
+                ),
+                "automation_stage_failures" to 0,
+                "automation_state" to if (ok) "complete" else "retry_required",
+            )
+        }
+
+        resolutionStore.upsertImageFingerprint(
+            imageId = imageId,
+            sha256 = fingerprint.sha256,
+            perceptualHash = fingerprint.perceptualHash,
+            width = fingerprint.width,
+            height = fingerprint.height,
+            sizeBytes = fingerprint.sizeBytes,
+        )
+        return null
+    }
+
     private fun resolvedQwenSemanticModel(): Pair<String, String>? {
         return localAiManager.listInstalledModels()
             .asSequence()
