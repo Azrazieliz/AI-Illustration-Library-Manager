@@ -119,4 +119,18 @@ class AutomationPathPolicyTest {
         assertEquals(listOf("Trash", "No Character"), generic.folderSegments)
     }
 
+
+    @Test
+    fun `resolved identity overrides a mistaken zero people routing count`() {
+        val decision = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "other",
+                peopleCount = 0,
+            ),
+            resolvedCharacterCount = 1,
+            characterKnowledgeReady = true,
+        )
+        assertEquals(ContentTriagePolicy.ROUTE_CHARACTER, decision.route)
+    }
+
 }
