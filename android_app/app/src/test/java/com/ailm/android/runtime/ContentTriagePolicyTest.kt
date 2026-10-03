@@ -25,20 +25,41 @@ class ContentTriagePolicyTest {
     }
 
     @Test
-    fun `landscape without people is preserved in landscapes`() {
+    fun `scenery without people is preserved in scenery`() {
         val decision = ContentTriagePolicy.decide(
             observation = ContentRoutingObservation(
-                contentClass = "landscape",
+                contentClass = "scenery",
                 peopleCount = 0,
-                landscapeOrScenery = true,
+                identifiableCharacterCount = 0,
+                sceneryOrEnvironment = true,
+                environmentDominant = true,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
         )
 
-        assertEquals(ContentTriagePolicy.ROUTE_LANDSCAPE, decision.route)
-        assertEquals(listOf("Landscapes"), decision.folderSegments)
+        assertEquals(ContentTriagePolicy.ROUTE_SCENERY, decision.route)
+        assertEquals(listOf("Scenery"), decision.folderSegments)
         assertTrue(decision.terminal)
+    }
+
+    @Test
+    fun `environment dominant art with anonymous luminous figure remains scenery`() {
+        val decision = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "scenery",
+                peopleCount = 1,
+                identifiableCharacterCount = 0,
+                sceneryOrEnvironment = true,
+                environmentDominant = true,
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+
+        assertEquals(ContentTriagePolicy.ROUTE_SCENERY, decision.route)
+        assertEquals(listOf("Scenery"), decision.folderSegments)
+        assertFalse(decision.requiresReview)
     }
 
     @Test
@@ -47,6 +68,7 @@ class ContentTriagePolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "non_character",
                 peopleCount = 0,
+                identifiableCharacterCount = 0,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
@@ -62,6 +84,7 @@ class ContentTriagePolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "multi_character",
                 peopleCount = 4,
+                identifiableCharacterCount = 4,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
@@ -79,6 +102,7 @@ class ContentTriagePolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "character",
                 peopleCount = 1,
+                identifiableCharacterCount = 1,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = true,
@@ -95,6 +119,7 @@ class ContentTriagePolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "character",
                 peopleCount = 1,
+                identifiableCharacterCount = 1,
             ),
             resolvedCharacterCount = 0,
             characterKnowledgeReady = false,
@@ -111,6 +136,7 @@ class ContentTriagePolicyTest {
             observation = ContentRoutingObservation(
                 contentClass = "character",
                 peopleCount = 1,
+                identifiableCharacterCount = 1,
             ),
             resolvedCharacterCount = 1,
             characterKnowledgeReady = true,
@@ -120,4 +146,22 @@ class ContentTriagePolicyTest {
         assertFalse(decision.terminal)
         assertFalse(decision.requiresReview)
     }
+    @Test
+    fun `obvious junk routes away from review`() {
+        val decision = ContentTriagePolicy.decide(
+            observation = ContentRoutingObservation(
+                contentClass = "blank",
+                peopleCount = 0,
+                identifiableCharacterCount = 0,
+                qualityFlags = listOf("solid_color_placeholder"),
+            ),
+            resolvedCharacterCount = 0,
+            characterKnowledgeReady = true,
+        )
+
+        assertEquals(ContentTriagePolicy.ROUTE_JUNK_TRASH, decision.route)
+        assertEquals(listOf("Trash", "Junk"), decision.folderSegments)
+        assertTrue(decision.terminal)
+    }
+
 }
