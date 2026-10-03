@@ -84,7 +84,9 @@ internal class AiWorkflowCoordinator(
             peopleCount = (routingMap["people_count"] as? Number)?.toInt() ?: rawSubjectCount,
             promotionOrPreview = routingMap["promotion_or_preview"].asBoolean(),
             landscapeOrScenery = routingMap["landscape_or_scenery"].asBoolean(),
-            qualityFlags = routingMap["quality_flags"].stringList(),
+            qualityFlags = (routingMap["quality_flags"] as? List<*>)
+                ?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotBlank) }
+                .orEmpty(),
             ocrText = stages["ocr"]?.resultMap()?.optText("text").orEmpty(),
         )
         val resolvedSubjects = if (hasCharacterKnowledge && recognitionResult.isNotEmpty()) {
