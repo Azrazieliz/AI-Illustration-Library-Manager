@@ -472,11 +472,13 @@ internal class LlamaCppBackend(
                       "caption":"one concise factual sentence",
                       "normalized_context":"concise canonical visual description",
                       "routing":{
-                        "content_class":"character|multi_character|landscape|promotion|non_character|document|screenshot|other",
+                        "content_class":"character|multi_character|scenery|promotion|non_character|document|screenshot|blank|broken_image|other",
                         "people_count":0,
+                        "identifiable_character_count":0,
                         "promotion_or_preview":false,
-                        "landscape_or_scenery":false,
-                        "quality_flags":["preview","placeholder","blurred_preview","contact_sheet","promotional_overlay"]
+                        "scenery_or_environment":false,
+                        "environment_dominant":false,
+                        "quality_flags":["preview","placeholder","blurred_preview","contact_sheet","promotional_overlay","blank","broken_image"]
                       },
                       "tags":["canonical illustration taxonomy ID", "..."],
                       "subjects":[
@@ -492,9 +494,13 @@ internal class LlamaCppBackend(
                     Rules:
                     - caption: visible facts only.
                     - normalized_context: preserve visible meaning; invent nothing.
-                    - routing.people_count counts visible human/human-like character subjects independently of Character Taxonomy.
-                    - routing.content_class=landscape only when scenery/environment is the primary content and there are no visible character subjects.
+                    - routing.people_count counts every visible human/human-like figure, including distant silhouettes.
+                    - routing.identifiable_character_count counts only figures with enough visible character-specific detail to be treated as character artwork. Tiny silhouettes, statues, anonymous crowd shapes, abstract humanoid light forms, and decorative figures do NOT count.
+                    - routing.scenery_or_environment=true when the image is primarily a place, environment, architecture, nature, space, or environmental composition.
+                    - routing.environment_dominant=true when the environment is the actual subject of the artwork even if one or more tiny/anonymous figures are present. A luminous angel-like silhouette used mainly as a focal element in a vast city/environment can still be environment-dominant scenery.
+                    - routing.content_class=scenery for environment-dominant artwork; do not require a literal zero-person count.
                     - routing.content_class=promotion for paywall previews, promotional/sample grids, blurred teaser cards, advertisements, or images whose main purpose is to redirect to paid/full content.
+                    - routing.content_class=blank or broken_image only for obvious non-artifacts such as empty/solid placeholders, failed renders, loading/error captures, or unusable broken imagery.
                     - quality_flags must describe only clearly visible quality/content-state signals; omit flags that do not apply.
                     - tags: use ONLY IDs from Illustration Taxonomy; omit uncertain concepts.
                     - subjects: use ONLY IDs from Character Taxonomy; describe visible physical attributes only.
@@ -659,8 +665,10 @@ internal class LlamaCppBackend(
                 mapOf(
                     "content_class" to "other",
                     "people_count" to subjects.size,
+                    "identifiable_character_count" to subjects.size,
                     "promotion_or_preview" to false,
-                    "landscape_or_scenery" to false,
+                    "scenery_or_environment" to false,
+                    "environment_dominant" to false,
                     "quality_flags" to emptyList<String>(),
                 )
             } else {
@@ -673,8 +681,15 @@ internal class LlamaCppBackend(
                 mapOf(
                     "content_class" to routingObject.optString("content_class", "other").trim().lowercase(),
                     "people_count" to routingObject.optInt("people_count", subjects.size).coerceAtLeast(0),
+                    "identifiable_character_count" to routingObject
+                        .optInt("identifiable_character_count", subjects.size)
+                        .coerceAtLeast(0),
                     "promotion_or_preview" to routingObject.optBoolean("promotion_or_preview", false),
-                    "landscape_or_scenery" to routingObject.optBoolean("landscape_or_scenery", false),
+                    "scenery_or_environment" to (
+                        routingObject.optBoolean("scenery_or_environment", false) ||
+                            routingObject.optBoolean("landscape_or_scenery", false)
+                        ),
+                    "environment_dominant" to routingObject.optBoolean("environment_dominant", false),
                     "quality_flags" to qualityFlags,
                 )
             }
@@ -694,8 +709,10 @@ internal class LlamaCppBackend(
                 "routing" to mapOf(
                     "content_class" to "other",
                     "people_count" to 0,
+                    "identifiable_character_count" to 0,
                     "promotion_or_preview" to false,
-                    "landscape_or_scenery" to false,
+                    "scenery_or_environment" to false,
+                    "environment_dominant" to false,
                     "quality_flags" to emptyList<String>(),
                 ),
                 "tags" to emptyList<String>(),
