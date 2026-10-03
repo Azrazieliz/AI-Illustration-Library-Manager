@@ -35,6 +35,8 @@ jobs:
             --tests "com.ailm.android.runtime.ReferenceKnowledgeParserTest" \
             --tests "com.ailm.android.runtime.CanonicalAttributeSemanticsTest" \
             --tests "com.ailm.android.runtime.AutomationPathPolicyTest" \
+            --tests "com.ailm.android.runtime.ContentTriagePolicyTest" \
+            --tests "com.ailm.android.runtime.ImageFingerprintingTest" \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorTest" \
             --tests "com.ailm.android.runtime.ai.ModelPackageInspectorRegressionTest" \
             --tests "com.ailm.android.runtime.ai.QwenLlamaCppContractTest" \
