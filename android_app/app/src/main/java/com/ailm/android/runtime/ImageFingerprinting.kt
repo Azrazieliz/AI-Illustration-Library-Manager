@@ -12,19 +12,27 @@ internal data class ImageFingerprint(
     val sizeBytes: Long,
 )
 
+internal data class ImageFingerprintInspection(
+    val status: String,
+    val fingerprint: ImageFingerprint? = null,
+)
+
 internal object ImageFingerprinting {
     fun inspect(
         storage: StorageProvider,
         uri: String,
         reportedSizeBytes: Long = 0L,
-    ): ImageFingerprint? {
-        val exactHash = sha256(storage, uri) ?: return null
+    ): ImageFingerprintInspection {
+        val exactHash = sha256(storage, uri)
+            ?: return ImageFingerprintInspection(status = "unreadable")
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         storage.openInputStream(uri)?.use { input ->
             BitmapFactory.decodeStream(input, null, bounds)
-        } ?: return null
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        } ?: return ImageFingerprintInspection(status = "unreadable")
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return ImageFingerprintInspection(status = "invalid_image")
+        }
 
         var sample = 1
         while (bounds.outWidth / sample > 512 || bounds.outHeight / sample > 512) {
@@ -36,7 +44,7 @@ internal object ImageFingerprinting {
                 null,
                 BitmapFactory.Options().apply { inSampleSize = sample.coerceAtLeast(1) },
             )
-        } ?: return null
+        } ?: return ImageFingerprintInspection(status = "invalid_image")
 
         val perceptualHash = try {
             signature(bitmap)
@@ -44,12 +52,15 @@ internal object ImageFingerprinting {
             bitmap.recycle()
         }
 
-        return ImageFingerprint(
-            sha256 = exactHash,
-            perceptualHash = perceptualHash,
-            width = bounds.outWidth,
-            height = bounds.outHeight,
-            sizeBytes = reportedSizeBytes.coerceAtLeast(0L),
+        return ImageFingerprintInspection(
+            status = "ready",
+            fingerprint = ImageFingerprint(
+                sha256 = exactHash,
+                perceptualHash = perceptualHash,
+                width = bounds.outWidth,
+                height = bounds.outHeight,
+                sizeBytes = reportedSizeBytes.coerceAtLeast(0L),
+            ),
         )
     }
 
