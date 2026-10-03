@@ -29,6 +29,105 @@ internal data class ReferenceKnowledgeBundle(
     val characters: List<KnowledgeCharacterEntry> = emptyList(),
 )
 
+internal data class SeriesAliasConflict(
+    val alias: String,
+    val seriesCode: String,
+    val reason: String,
+)
+
+internal data class SeriesAliasIndexPlan(
+    val canonicalEntries: List<Pair<String, String>>,
+    val uniqueAliases: List<Pair<String, String>>,
+    val ignoredAliases: List<SeriesAliasConflict>,
+)
+
+internal object SeriesAliasPlanner {
+    fun plan(series: List<ReferenceSeriesEntry>): SeriesAliasIndexPlan {
+        fun key(value: String): String = value
+            .trim()
+            .lowercase(Locale.US)
+            .replace(Regex("\\s+"), " ")
+
+        val canonicalOwners = linkedMapOf<String, MutableSet<String>>()
+        series.forEach { entry ->
+            listOf(entry.code, entry.name).forEach { value ->
+                val normalized = key(value)
+                if (normalized.isNotBlank()) {
+                    canonicalOwners.getOrPut(normalized) { linkedSetOf() } += entry.code
+                }
+            }
+        }
+
+        val canonicalConflicts = canonicalOwners.filterValues { owners -> owners.size > 1 }
+        require(canonicalConflicts.isEmpty()) {
+            canonicalConflicts.entries.joinToString("; ") { (normalized, owners) ->
+                "Canonical series key '$normalized' belongs to multiple series: " + owners.sorted().joinToString(", ")
+            }
+        }
+
+        val aliasOwners = linkedMapOf<String, MutableSet<String>>()
+        val aliasSpellings = linkedMapOf<Pair<String, String>, String>()
+        series.forEach { entry ->
+            entry.aliases.forEach { alias ->
+                val normalized = key(alias)
+                if (normalized.isBlank()) return@forEach
+                aliasOwners.getOrPut(normalized) { linkedSetOf() } += entry.code
+                aliasSpellings.putIfAbsent(entry.code to normalized, alias.trim())
+            }
+        }
+
+        val canonicalEntries = buildList {
+            series.forEach { entry ->
+                listOf(entry.code, entry.name)
+                    .distinctBy(::key)
+                    .forEach { value -> add(entry.code to value) }
+            }
+        }
+
+        val uniqueAliases = mutableListOf<Pair<String, String>>()
+        val ignored = mutableListOf<SeriesAliasConflict>()
+
+        series.forEach { entry ->
+            entry.aliases
+                .distinctBy(::key)
+                .forEach { alias ->
+                    val normalized = key(alias)
+                    if (normalized.isBlank()) return@forEach
+
+                    val canonicalOwner = canonicalOwners[normalized]?.singleOrNull()
+                    val owners = aliasOwners[normalized].orEmpty()
+                    when {
+                        canonicalOwner != null && canonicalOwner != entry.code -> {
+                            ignored += SeriesAliasConflict(
+                                alias = alias,
+                                seriesCode = entry.code,
+                                reason = "canonical key belongs to $canonicalOwner",
+                            )
+                        }
+                        owners.size > 1 -> {
+                            ignored += SeriesAliasConflict(
+                                alias = alias,
+                                seriesCode = entry.code,
+                                reason = "alias is shared by " + owners.sorted().joinToString(", "),
+                            )
+                        }
+                        canonicalOwner == entry.code -> {
+                            // Redundant alias for this series' own code/name. The
+                            // authoritative canonical entry already indexes it.
+                        }
+                        else -> uniqueAliases += entry.code to alias
+                    }
+                }
+        }
+
+        return SeriesAliasIndexPlan(
+            canonicalEntries = canonicalEntries,
+            uniqueAliases = uniqueAliases,
+            ignoredAliases = ignored,
+        )
+    }
+}
+
 internal object ReferenceKnowledgeParser {
     fun looksLikeReferenceDocument(filename: String, raw: String): Boolean {
         return runCatching {
@@ -232,11 +331,12 @@ internal class ReferenceKnowledgeImporter(
         }
 
         return runCatching {
+            var ignoredSeriesAliases = 0
             if (bundle.series.isNotEmpty() || bundle.tags.isNotEmpty()) {
                 require(bundle.series.isNotEmpty() && bundle.tags.isNotEmpty()) {
                     "A reference taxonomy release must contain both canonical series and taxonomy values. Select the series JSON and taxonomy JSON files together."
                 }
-                knowledgeDatabase.replaceReferenceKnowledge(
+                ignoredSeriesAliases = knowledgeDatabase.replaceReferenceKnowledge(
                     ReferenceKnowledgeBundle(bundle.series, bundle.tags),
                     sourceName,
                 )
@@ -252,6 +352,7 @@ internal class ReferenceKnowledgeImporter(
                 "documents" to documents.size,
                 "series_entries" to bundle.series.size,
                 "tag_entries" to bundle.tags.size,
+                "series_aliases_ignored" to ignoredSeriesAliases,
                 "character_entries" to bundle.characters.size,
                 "characters_imported" to bundle.characters.size,
                 "fusion_modified" to false,
