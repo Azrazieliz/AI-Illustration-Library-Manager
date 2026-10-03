@@ -1396,7 +1396,10 @@ object StandaloneRuntime {
                     height = fingerprint.height,
                 )
                 .firstOrNull { candidate ->
-                    candidate.perceptualHash.equals(fingerprint.perceptualHash, ignoreCase = true)
+                    ImageFingerprinting.isConservativeVisualDuplicate(
+                        current = fingerprint,
+                        candidate = candidate,
+                    )
                 }
         } else {
             null
